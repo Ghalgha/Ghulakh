@@ -146,16 +146,33 @@ impl TurnSocketActor {
                             continue;
                         }
                         if packet.first().is_some_and(|byte| byte & 0xC0 == 0x40) {
-                            if decode_channel_data(packet).is_err() {
-                                task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                            let event = TurnInbound::Data {
-                                datagram: packet.to_vec(),
-                                source,
+                            let channel = match decode_channel_data(packet) {
+                                Ok(channel) => channel,
+                                Err(_) => {
+                                    task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
                             };
-                            if data_tx.try_send(event).is_err() {
-                                task_counters.dropped_data_datagrams.fetch_add(1, Ordering::Relaxed);
+                            if channel.data.starts_with(b"GHHS") {
+                                if HandshakeEnvelope::decode(channel.data).is_err() {
+                                    task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                                let event = TurnInbound::Handshake {
+                                    datagram: channel.data.to_vec(),
+                                    source,
+                                };
+                                if handshake_tx.send(event).await.is_err() {
+                                    break;
+                                }
+                            } else {
+                                let event = TurnInbound::Data {
+                                    datagram: packet.to_vec(),
+                                    source,
+                                };
+                                if data_tx.try_send(event).is_err() {
+                                    task_counters.dropped_data_datagrams.fetch_add(1, Ordering::Relaxed);
+                                }
                             }
                             continue;
                         }
@@ -204,7 +221,10 @@ impl TurnSocketActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ghulakh_protocol::stun::{StunAttribute, ATTR_DATA, METHOD_ALLOCATE};
+    use ghulakh_protocol::{
+        stun::{StunAttribute, ATTR_DATA, METHOD_ALLOCATE},
+        turn_channel_data::encode_channel_data,
+    };
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
     async fn pair() -> (TurnSocketHandle, TurnSocketActorReceivers, UdpSocket, SocketAddr) {
@@ -292,7 +312,8 @@ mod tests {
                 handshake_id: [7; 16],
                 payload: b"noise-message-2".to_vec(),
             }.encode().unwrap();
-            relay.send_to(&envelope, source).await.unwrap();
+            let channel_data = encode_channel_data(0x4001, &envelope).unwrap();
+            relay.send_to(&channel_data, source).await.unwrap();
         });
         handle.send_datagram(vec![1]).await.unwrap();
         let event = timeout(Duration::from_secs(2), receivers.handshake.recv())
@@ -310,7 +331,8 @@ mod tests {
         let relay_task = tokio::spawn(async move {
             let mut buffer = [0u8; 64];
             let (_, source) = relay.recv_from(&mut buffer).await.unwrap();
-            relay.send_to(b"GHHS-invalid", source).await.unwrap();
+            let channel_data = encode_channel_data(0x4001, b"GHHS-invalid").unwrap();
+            relay.send_to(&channel_data, source).await.unwrap();
         });
         handle.send_datagram(vec![1]).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
