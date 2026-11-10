@@ -66,6 +66,7 @@ class GhulakhVpnService : VpnService() {
                 callsSession.turnCredentialsJson,
                 decodeHexKey(profile.pinnedServerPublicKeyHex),
                 profile.credential,
+                DEFAULT_TURN_PATHS,
             )
             sessionHandle = handle
 
@@ -232,5 +233,6 @@ class GhulakhVpnService : VpnService() {
         private const val MIN_TUN_MTU = 576
         private const val MAX_TUN_MTU = 1500
         private const val MAX_IP_PACKET_SIZE = 65_535
+        private const val DEFAULT_TURN_PATHS = 5
     }
 }
