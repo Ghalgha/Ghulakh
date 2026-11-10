@@ -6,7 +6,6 @@
 
 use std::{
     net::{SocketAddr, UdpSocket as StdUdpSocket},
-    time::Duration,
 };
 
 use anyhow::{Context, Result};
@@ -22,7 +21,6 @@ use crate::{
     turn_dataplane::{TurnDataPlane, TurnDataPlaneStats},
     turn_driver::TurnClientDriver,
     turn_handshake_task::{run_turn_client_handshake, TurnClientSession},
-    turn_socket_actor::TurnInbound,
     turn_supervisor::TurnSessionSupervisor,
     turn_udp::TurnUdpSocket,
     turn_credentials::{TurnCredentials, TurnWireTransport},
@@ -115,7 +113,7 @@ impl TurnClientRuntime {
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
         let dataplane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
-        let maintenance_task = tokio::spawn(supervisor.maintain_allocation());
+        let maintenance_task = tokio::spawn(async move { supervisor.maintain_allocation().await });
 
         Ok(Self {
             config,
