@@ -458,9 +458,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_wrong_relay_source_before_frame_authentication() {
-        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let _relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let wrong_relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = relay.local_addr().unwrap();
+        let relay_addr = _relay.local_addr().unwrap();
         let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION, CLIENT_IP, relay_addr,
