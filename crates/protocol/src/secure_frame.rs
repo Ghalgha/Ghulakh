@@ -6,6 +6,9 @@
 
 use zeroize::Zeroize;
 
+/// Authenticated non-IP payload used to keep an otherwise idle VPN session alive.
+pub const SESSION_KEEPALIVE_PAYLOAD: &[u8; 4] = b"GHKP";
+
 use chacha20poly1305::{
     aead::{AeadInPlace, KeyInit},
     ChaCha20Poly1305, Key, Nonce, Tag,
