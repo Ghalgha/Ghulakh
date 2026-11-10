@@ -689,6 +689,7 @@ mod tests {
             server_name: "localhost".into(),
             root_certificate_der: certificate.cert.der().to_vec(),
             credential,
+            udp_socket: None,
         })
         .await
         .unwrap();
