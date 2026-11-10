@@ -342,7 +342,6 @@ mod tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let wrong_relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
-        let wrong_addr = wrong_relay.local_addr().unwrap();
         let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION, CLIENT_IP, relay_addr, CHANNEL,
@@ -360,7 +359,6 @@ mod tests {
         wrong_relay.send_to(&datagram, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(gateway.stats().rejected_source, 1);
-        assert_eq!(wrong_addr.port() == 0, false);
         gateway_task.abort();
     }
 }
