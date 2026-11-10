@@ -17,8 +17,9 @@ pub struct AllocationLease {
     pub refresh_at: Instant,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AllocationState {
+    #[default]
     Idle,
     AwaitingAllocate {
         transaction_id: [u8; 12],
@@ -51,11 +52,6 @@ pub struct AllocationManager {
     state: AllocationState,
 }
 
-impl Default for AllocationState {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
 
 impl AllocationManager {
     pub fn new() -> Self {
