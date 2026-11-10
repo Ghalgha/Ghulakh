@@ -17,6 +17,7 @@
 - Peer registry для permissions и channel bindings с expiry и cooldown; он обновляется только после подтверждённого вызывающим кодом успеха.
 - UDP adapter для STUN/TURN datagrams и ChannelData; умеет принимать заранее созданный и защищённый Android socket.
 - Асинхронный TURN control driver: сериализованные Allocate/Refresh/CreatePermission/ChannelBind transactions, точное сопоставление endpoint/method/transaction ID, ограниченные retransmissions/timeouts, проверка MESSAGE-INTEGRITY для успешных ответов и authenticated 438, возврат начального 401 challenge вызывающему слою, обновление allocation/peer state только после успешной проверки.
+- TURN session supervisor: автоматическая обработка первоначального 401 и проверенного 438 с ограничением до трёх повторов; отдельный TurnAuthProvider; автоматическое планирование Refresh allocation, CreatePermission и ChannelBind до их сроков истечения; единый владелец control driver. Peer registry предоставляет точные deadlines для permission/channel.
 - TURN auth context для USERNAME/REALM/NONCE и MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 с явно переданным integrity key; отдельные параметры password derivation и HMAC, сохранение и точное эхо PASSWORD-ALGORITHMS из challenge, выбор PASSWORD-ALGORITHM по RFC 8656: SHA-256 при совместном предложении MD5/SHA-256 и поддержке обоих клиентом; иначе — первый поддерживаемый алгоритм в порядке серверного списка и проверка согласованности выбранного алгоритма. Ключ не выводится из VK credentials автоматически.
 - Codec защищённых кадров поверх TURN ChannelData с AEAD и защитой от replay.
 - Экспериментальный QUIC-клиент/сервер, серверный TUN и Android VpnService/JNI-интеграция.
@@ -32,7 +33,7 @@
 
 - Реальное получение и обновление VK Calls credentials.
 - Подтверждённый профиль TURN-аутентификации VK: нормализация строк, derivation MESSAGE-INTEGRITY key и обработка credential rotation. Auth context пока требует явно предоставленный ключ; реальный обмен VK не подтверждён.
-- Полноценный долгоживущий TURN session owner с автоматическим credential/nonce refresh, ограниченным reconnect и выделенным непрерывным receive/data loop. Текущий control driver выполняет отдельные сериализованные операции и возвращает challenge внешнему слою; он ещё не обеспечивает автоматический жизненный цикл сессии.
+- Автоматическое получение/обновление VK Calls credentials, ограниченный reconnect и выделенный непрерывный receive/data loop. Supervisor уже обрабатывает TURN 401/438 и обслуживает сроки allocation/permission/channel, но credential rotation и восстановление после потери allocation ещё не реализованы. Текущий driver всё ещё читает socket во время отдельной control-операции, поэтому ChannelData нельзя непрерывно принимать параллельно с control-транзакциями.
 - Согласование и аутентифицированный обмен отдельными tunnel session keys. TURN credentials не являются ключами шифрования IP-трафика.
 - Серверный UDP gateway, принимающий защищённые кадры от relay и отправляющий ответы на фактический relay source tuple.
 - Привязка server-side tunnel session к назначенному IP и проверенной relay-сессии.
