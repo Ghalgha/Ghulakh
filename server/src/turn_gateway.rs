@@ -338,6 +338,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_spoofed_inner_source_and_replayed_frame() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        gateway.register_session(
+            SESSION, CLIENT_IP, relay_addr, CHANNEL,
+            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+        ).await.unwrap();
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let mut client_tx = FrameSealer::new(
+            CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
+        );
+        let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(203, 0, 113, 2));
+        let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
+        relay.send_to(&encode_channel_data(CHANNEL, &spoofed_frame).unwrap(), gateway_addr)
+            .await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(tun_rx.try_recv().is_err());
+        assert_eq!(gateway.stats().rejected_packet, 1);
+
+        let valid = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 2));
+        let valid_frame = client_tx.seal(&valid.encode().unwrap()).unwrap();
+        let valid_datagram = encode_channel_data(CHANNEL, &valid_frame).unwrap();
+        relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            valid
+        );
+        relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(gateway.stats().accepted, 1);
+        assert_eq!(gateway.stats().rejected_packet, 2);
+        gateway_task.abort();
+    }
+
+    #[tokio::test]
     async fn rejects_wrong_relay_source_before_frame_authentication() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let wrong_relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
