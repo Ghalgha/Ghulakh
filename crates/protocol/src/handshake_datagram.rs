@@ -215,6 +215,322 @@ impl HandshakeResponseCache {
     }
 }
 
+
+use std::{
+    collections::BTreeMap,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandshakeRetryPolicy {
+    pub initial_rto: Duration,
+    pub max_rto: Duration,
+    /// Includes the initial transmission.
+    pub max_transmissions: u8,
+}
+
+impl Default for HandshakeRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_rto: Duration::from_millis(500),
+            max_rto: Duration::from_secs(4),
+            max_transmissions: 5,
+        }
+    }
+}
+
+#[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeDriverError {
+    #[error("handshake retry policy is invalid")]
+    InvalidPolicy,
+    #[error("maximum pending handshake count reached")]
+    CapacityReached,
+    #[error("per-peer pending handshake limit reached")]
+    PeerLimitReached,
+    #[error("handshake transaction already exists")]
+    DuplicateTransaction,
+    #[error("request and response phases do not form a valid pair")]
+    InvalidPhasePair,
+    #[error("response cache capacity or lifetime is invalid")]
+    InvalidCachePolicy,
+    #[error("cached transaction key conflicts with different bytes")]
+    CacheConflict,
+    #[error("handshake envelope is invalid")]
+    InvalidEnvelope,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandshakeDriverEvent {
+    Retransmit {
+        handshake_id: [u8; 16],
+        phase: HandshakePhase,
+        datagram: Vec<u8>,
+        attempt: u8,
+        destination: SocketAddr,
+    },
+    TimedOut {
+        handshake_id: [u8; 16],
+        phase: HandshakePhase,
+        destination: SocketAddr,
+    },
+}
+
+struct PendingHandshake {
+    request_phase: HandshakePhase,
+    response_phase: HandshakePhase,
+    datagram: Vec<u8>,
+    destination: SocketAddr,
+    transmissions: u8,
+    retry_interval: Duration,
+    next_deadline: Instant,
+}
+
+struct CachedHandshakeResponse {
+    source: SocketAddr,
+    handshake_id: [u8; 16],
+    request_phase: HandshakePhase,
+    request_digest: [u8; 32],
+    response_datagram: Vec<u8>,
+    expires_at: Instant,
+}
+
+/// Deterministic stop-and-wait handshake delivery primitives. The caller owns
+/// the socket and timer loop. Retransmissions are byte-for-byte copies of the
+/// original envelope; no Noise state is advanced by this type.
+pub struct HandshakeDatagramDriver {
+    pending: BTreeMap<([u8; 16], u8, SocketAddr), PendingHandshake>,
+    responses: VecDeque<CachedHandshakeResponse>,
+    max_pending: usize,
+    max_pending_per_peer: usize,
+    max_cached_responses: usize,
+    max_cached_per_peer: usize,
+    response_ttl: Duration,
+    retry_policy: HandshakeRetryPolicy,
+}
+
+impl HandshakeDatagramDriver {
+    pub fn new(
+        max_pending: usize,
+        max_pending_per_peer: usize,
+        max_cached_responses: usize,
+        max_cached_per_peer: usize,
+        response_ttl: Duration,
+        retry_policy: HandshakeRetryPolicy,
+    ) -> Result<Self, HandshakeDriverError> {
+        if max_pending == 0
+            || max_pending_per_peer == 0
+            || max_pending_per_peer > max_pending
+            || max_cached_responses == 0
+            || max_cached_per_peer == 0
+            || max_cached_per_peer > max_cached_responses
+            || response_ttl.is_zero()
+        {
+            return Err(HandshakeDriverError::InvalidCachePolicy);
+        }
+        if retry_policy.initial_rto.is_zero()
+            || retry_policy.max_rto < retry_policy.initial_rto
+            || retry_policy.max_transmissions == 0
+        {
+            return Err(HandshakeDriverError::InvalidPolicy);
+        }
+        Ok(Self {
+            pending: BTreeMap::new(),
+            responses: VecDeque::with_capacity(max_cached_responses),
+            max_pending,
+            max_pending_per_peer,
+            max_cached_responses,
+            max_cached_per_peer,
+            response_ttl,
+            retry_policy,
+        })
+    }
+
+    pub fn register_request(
+        &mut self,
+        datagram: Vec<u8>,
+        destination: SocketAddr,
+        expected_response: HandshakePhase,
+        now: Instant,
+    ) -> Result<[u8; 16], HandshakeDriverError> {
+        let envelope = HandshakeEnvelope::decode(&datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        let valid_pair = matches!(
+            (envelope.phase, expected_response),
+            (HandshakePhase::ClientInit, HandshakePhase::ServerResponse)
+                | (HandshakePhase::ClientFinish, HandshakePhase::ServerAck)
+                | (HandshakePhase::ServerResponse, HandshakePhase::ClientFinish)
+                | (HandshakePhase::ServerAck, HandshakePhase::ClientFinish)
+        );
+        if !valid_pair {
+            return Err(HandshakeDriverError::InvalidPhasePair);
+        }
+        let key = (envelope.handshake_id, envelope.phase as u8, destination);
+        if self.pending.contains_key(&key) {
+            return Err(HandshakeDriverError::DuplicateTransaction);
+        }
+        if self.pending.len() >= self.max_pending {
+            return Err(HandshakeDriverError::CapacityReached);
+        }
+        if self.pending.keys().filter(|(_, _, peer)| *peer == destination).count()
+            >= self.max_pending_per_peer
+        {
+            return Err(HandshakeDriverError::PeerLimitReached);
+        }
+        self.pending.insert(key, PendingHandshake {
+            request_phase: envelope.phase,
+            response_phase: expected_response,
+            datagram,
+            destination,
+            transmissions: 1,
+            retry_interval: self.retry_policy.initial_rto,
+            next_deadline: now + self.retry_policy.initial_rto,
+        });
+        Ok(envelope.handshake_id)
+    }
+
+    /// Returns only responses matching the exact peer, identifier and expected
+    /// phase. The caller must still authenticate the Noise payload.
+    pub fn accept_response(
+        &mut self,
+        datagram: &[u8],
+        source: SocketAddr,
+    ) -> Result<bool, HandshakeDriverError> {
+        let envelope = HandshakeEnvelope::decode(datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        let key = self.pending.iter().find_map(|(key, pending)| {
+            (key.0 == envelope.handshake_id
+                && pending.destination == source
+                && pending.response_phase == envelope.phase)
+                .then_some(*key)
+        });
+        Ok(key.is_some_and(|key| self.pending.remove(&key).is_some()))
+    }
+
+    pub fn poll(&mut self, now: Instant) -> Vec<HandshakeDriverEvent> {
+        let due: Vec<_> = self.pending.iter()
+            .filter_map(|(key, pending)| (now >= pending.next_deadline).then_some(*key))
+            .collect();
+        let mut events = Vec::with_capacity(due.len());
+        for key in due {
+            let Some(pending) = self.pending.get_mut(&key) else { continue };
+            if pending.transmissions < self.retry_policy.max_transmissions {
+                pending.transmissions += 1;
+                events.push(HandshakeDriverEvent::Retransmit {
+                    handshake_id: key.0,
+                    phase: pending.request_phase,
+                    datagram: pending.datagram.clone(),
+                    attempt: pending.transmissions,
+                    destination: pending.destination,
+                });
+                pending.retry_interval = pending.retry_interval.saturating_mul(2)
+                    .min(self.retry_policy.max_rto);
+                pending.next_deadline = now + pending.retry_interval;
+            } else {
+                events.push(HandshakeDriverEvent::TimedOut {
+                    handshake_id: key.0,
+                    phase: pending.request_phase,
+                    destination: pending.destination,
+                });
+                self.pending.remove(&key);
+            }
+        }
+        events
+    }
+
+    /// Store an exact response before sending it. Duplicate requests can then
+    /// be answered without advancing a Noise handshake state a second time.
+    pub fn cache_response(
+        &mut self,
+        request_datagram: &[u8],
+        response_datagram: Vec<u8>,
+        source: SocketAddr,
+        now: Instant,
+    ) -> Result<(), HandshakeDriverError> {
+        self.prune_expired(now);
+        let request = HandshakeEnvelope::decode(request_datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        let response = HandshakeEnvelope::decode(&response_datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        if request.handshake_id != response.handshake_id {
+            return Err(HandshakeDriverError::InvalidPhasePair);
+        }
+        let key_exists = self.responses.iter().any(|entry| {
+            entry.source == source
+                && entry.handshake_id == request.handshake_id
+                && entry.request_phase == request.phase
+        });
+        let digest: [u8; 32] = Sha256::digest(request_datagram).into();
+        if let Some(entry) = self.responses.iter().find(|entry| {
+            entry.source == source
+                && entry.handshake_id == request.handshake_id
+                && entry.request_phase == request.phase
+        }) {
+            if entry.request_digest == digest && entry.response_datagram == response_datagram {
+                return Ok(());
+            }
+            return Err(HandshakeDriverError::CacheConflict);
+        }
+        if self.responses.len() >= self.max_cached_responses {
+            self.responses.pop_front();
+        }
+        if self.responses.iter().filter(|entry| entry.source == source).count()
+            >= self.max_cached_per_peer
+        {
+            if let Some(index) = self.responses.iter().position(|entry| entry.source == source) {
+                self.responses.remove(index);
+            }
+        }
+        let _ = key_exists;
+        self.responses.push_back(CachedHandshakeResponse {
+            source,
+            handshake_id: request.handshake_id,
+            request_phase: request.phase,
+            request_digest: digest,
+            response_datagram,
+            expires_at: now + self.response_ttl,
+        });
+        Ok(())
+    }
+
+    pub fn cached_response(
+        &mut self,
+        request_datagram: &[u8],
+        source: SocketAddr,
+        now: Instant,
+    ) -> Result<Option<&[u8]>, HandshakeDriverError> {
+        self.prune_expired(now);
+        let request = HandshakeEnvelope::decode(request_datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        let digest: [u8; 32] = Sha256::digest(request_datagram).into();
+        let Some(entry) = self.responses.iter().find(|entry| {
+            entry.source == source
+                && entry.handshake_id == request.handshake_id
+                && entry.request_phase == request.phase
+        }) else {
+            return Ok(None);
+        };
+        if entry.request_digest != digest {
+            return Err(HandshakeDriverError::CacheConflict);
+        }
+        Ok(Some(entry.response_datagram.as_slice()))
+    }
+
+    pub fn prune_expired(&mut self, now: Instant) -> usize {
+        let before = self.responses.len();
+        self.responses.retain(|entry| entry.expires_at > now);
+        before - self.responses.len()
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub fn cached_response_len(&self) -> usize {
+        self.responses.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
