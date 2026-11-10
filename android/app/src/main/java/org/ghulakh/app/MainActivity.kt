@@ -172,7 +172,7 @@ class MainActivity : Activity() {
             val turnServer = root.optJSONObject("turn_server") ?: root
             require(turnServer.optString("username").isNotBlank()) { "В JSON отсутствует TURN username" }
             require(turnServer.optString("credential").isNotBlank()) { "В JSON отсутствует TURN credential" }
-            require(turnServer.optJSONArray("urls")?.length() ?: 0 > 0) { "В JSON отсутствуют TURN URLs" }
+            require((turnServer.optJSONArray("urls")?.length() ?: 0) > 0) { "В JSON отсутствуют TURN URLs" }
             require(profile.pinnedServerPublicKeyHex.matches(Regex("[0-9a-fA-F]{64}"))) {
                 "Закреплённый Noise public key должен содержать 64 hex-символа"
             }
@@ -190,6 +190,10 @@ class MainActivity : Activity() {
         try {
             store.clear()
             credentialInput.text.clear()
+            turnCredentialsInput.text.clear()
+            pinnedServerKeyInput.text.clear()
+            hostInput.text.clear()
+            portInput.text.clear()
             status.text = "Локальный профиль и ключ Android Keystore удалены."
         } catch (error: Exception) {
             status.text = "Не удалось очистить профиль: ${error.message}"
