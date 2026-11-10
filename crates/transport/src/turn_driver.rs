@@ -241,18 +241,23 @@ impl TurnClientDriver {
                     if response.class == StunClass::ErrorResponse {
                         let challenge = parse_turn_challenge(&response, request.method).ok();
                         if let Some(challenge) = challenge {
-                            // A 438 stale-nonce response follows an authenticated
-                            // request and must itself pass integrity verification.
-                            if challenge.code == 438 {
+                            // Only the first, unauthenticated 401 is an initial
+                            // challenge. A stale nonce (438) must be authenticated.
+                            let should_verify = challenge.code == 438 || auth.is_some();
+                            if should_verify {
                                 if let Some(context) = auth {
                                     if let Err(error) = context.verify_response(&buffer[..length]) {
                                         self.transactions.complete(&id);
-                                        return Err(error).context("verify authenticated stale-nonce response");
+                                        return Err(error).context("verify authenticated TURN challenge");
                                     }
                                 } else {
                                     self.transactions.complete(&id);
                                     return Err(TurnDriverError::MissingAuthentication.into());
                                 }
+                            }
+                            if challenge.code == 401 && auth.is_some() {
+                                self.transactions.complete(&id);
+                                return Err(TurnDriverError::ServerError { code: 401 }.into());
                             }
                             self.transactions.complete(&id);
                             return Err(TurnDriverError::Challenge(challenge).into());
