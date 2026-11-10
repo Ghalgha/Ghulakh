@@ -632,6 +632,15 @@ async fn main() -> Result<()> {
         "no transport enabled: configure TURN gateway or explicitly enable legacy QUIC"
     );
 
+    if turn_gateway_setup.is_some() {
+        let ip_forward = fs::read_to_string("/proc/sys/net/ipv4/ip_forward")
+            .context("read Linux IPv4 forwarding state")?;
+        anyhow::ensure!(
+            ip_forward.trim() == "1",
+            "Linux IPv4 forwarding is disabled; set net.ipv4.ip_forward=1"
+        );
+    }
+
     let tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _)| Arc::clone(gateway));
