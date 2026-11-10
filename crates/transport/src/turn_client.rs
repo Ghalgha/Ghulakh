@@ -188,6 +188,10 @@ impl TurnClientRuntime {
         self.config
     }
 
+    pub fn path_context(&self) -> Option<TurnPathContext> {
+        self.path_context
+    }
+
     pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
         self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
     }
