@@ -49,7 +49,7 @@ Android пока требует вручную предоставить поль
 - Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
 - Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
 - Проверить lifecycle server TUN, IP forwarding/NAT/firewall и session cleanup под нагрузкой.
-- Реализовать multipath tunnel group: зашифрованные group/path metadata в Noise handshake, общий lease виртуального IPv4, регистрацию нескольких session IDs и cleanup адреса после последнего path.
+- Подключить TurnPathContext к TurnHandshakeService: общий lease виртуального IPv4, проверка path count/уникальности path ID, регистрация нескольких session IDs и cleanup адреса после последнего path.
 - Реализовать независимые клиентские TurnPath allocations, flow-aware scheduler, общий group sequence и bounded reorder buffers uplink/downlink.
 - Расширить mock end-to-end TURN tunnel test двумя и более paths: распределение нагрузки, reorder, loss/gap timeout, path failure/recovery, queue saturation и cleanup.
 - Добавить fuzz/property tests, deterministic network fault simulation на полном multipath пути TURN, MTU/fragmentation, source spoofing, reconnect и credential rotation.
@@ -82,6 +82,8 @@ Android пока требует вручную предоставить поль
 Для одного TURN path выбраны bounded Tokio queues и один socket actor. Это решение сохраняется внутри каждого независимого path, но не ограничивает tunnel group одной allocation. Параллельная работа нескольких paths обязательна. Более сложные packet pools, ring buffers и batched UDP I/O остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
 
 ## Многопутевая архитектура
+
+**Статус: протокольная основа начата; production multipath ещё не реализован.** Реализован формат защищённых метаданных path group и handshake API, но клиентский runtime по-прежнему поднимает одну allocation, а gateway пока регистрирует один session ID на виртуальный IPv4.
 
 Обязательное требование — несколько независимых TURN allocations в одной логической VPN-сессии. Дополнительные OS threads поверх одной allocation не устраняют ограничение скорости отдельного relay-потока. Каждая allocation становится отдельным transport path с собственным UDP socket, permission, ChannelBind, Noise keys и очередями; tunnel group использует один виртуальный IPv4 и один TUN.
 
