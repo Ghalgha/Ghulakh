@@ -1,10 +1,8 @@
 package org.ghulakh.app
 
 /**
- * Thin JNI facade over the shared Rust QUIC transport.
- *
- * Call blocking methods from Dispatchers.IO or a dedicated worker thread.
- * rootCertificateDer must contain the trusted CA/server certificate in DER form.
+ * JNI facade for the native protected TURN VPN runtime and temporary legacy
+ * QUIC diagnostics. Blocking calls must run on a dedicated worker thread.
  */
 class NativeTransport {
     external fun nativeTurnConnect(
