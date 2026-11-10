@@ -10,18 +10,15 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import java.security.cert.CertificateFactory
-import java.security.cert.X509Certificate
 
 class MainActivity : Activity() {
     private lateinit var store: CredentialStore
     private lateinit var hostInput: EditText
     private lateinit var portInput: EditText
-    private lateinit var serverNameInput: EditText
     private lateinit var credentialInput: EditText
-    private lateinit var certificateStatus: TextView
+    private lateinit var turnCredentialsInput: EditText
+    private lateinit var pinnedServerKeyInput: EditText
     private lateinit var status: TextView
-    private var certificateDer: ByteArray? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,30 +42,37 @@ class MainActivity : Activity() {
             textSize = 14f
         })
 
-        hostInput = addField(content, "Адрес сервера", "vpn.example.org")
-        portInput = addField(content, "UDP-порт", "4433", numeric = true)
-        serverNameInput = addField(content, "Имя узла в TLS-сертификате", "vpn.example.org")
+        hostInput = addField(content, "Адрес TURN gateway", "vpn.example.org")
+        portInput = addField(content, "UDP-порт TURN gateway", "4434", numeric = true)
         credentialInput = addField(content, "Индивидуальный ключ устройства", "Вставьте credential")
         credentialInput.inputType = android.text.InputType.TYPE_CLASS_TEXT or
             android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         credentialInput.isSaveEnabled = false
 
-        certificateStatus = TextView(this).apply {
-            text = "Доверенный сертификат не выбран"
-            setPadding(0, 20, 0, 8)
+        turnCredentialsInput = addField(
+            content,
+            "JSON временных TURN credentials из VK Calls",
+            "Объект turn_server с username, credential и urls",
+        ).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setSingleLine(false)
+            minLines = 4
+            maxLines = 8
+            gravity = android.view.Gravity.TOP
         }
-        content.addView(certificateStatus)
+        pinnedServerKeyInput = addField(
+            content,
+            "Закреплённый Noise public key сервера (64 hex)",
+            "64 шестнадцатеричных символа",
+        )
 
-        content.addView(Button(this).apply {
-            text = "Импортировать доверенный сертификат"
-            setOnClickListener { chooseCertificate() }
-        })
         content.addView(Button(this).apply {
             text = "Сохранить настройки"
             setOnClickListener { saveProfile() }
         })
         content.addView(Button(this).apply {
-            text = "Проверить соединение"
+            text = "Проверить профиль TURN"
             setOnClickListener { testConnection() }
         })
         content.addView(Button(this).apply {
@@ -77,7 +81,7 @@ class MainActivity : Activity() {
         })
 
         status = TextView(this).apply {
-            text = "VPN-туннель и маршрутизация пока не активируются."
+            text = "Используется защищённый VPN-туннель через TURN-реле VK Calls."
             textSize = 15f
             setPadding(0, 24, 0, 16)
         }
@@ -127,68 +131,30 @@ class MainActivity : Activity() {
             val profile = store.load() ?: return
             hostInput.setText(profile.host)
             portInput.setText(profile.port.toString())
-            serverNameInput.setText(profile.serverName)
             credentialInput.setText(profile.credential)
-            certificateDer = profile.rootCertificateDer
-            certificateStatus.text = "Доверенный сертификат загружен из Android Keystore-хранилища"
+            turnCredentialsInput.setText(profile.turnCredentialsJson)
+            pinnedServerKeyInput.setText(profile.pinnedServerPublicKeyHex)
             status.text = "Настройки загружены. VPN-туннель не запущен."
         } catch (error: Exception) {
             status.text = "Не удалось расшифровать настройки: ${error.message}"
         }
     }
 
-    private fun chooseCertificate() {
-        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "*/*"
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        @Suppress("DEPRECATION")
-        startActivityForResult(intent, REQUEST_CERTIFICATE)
-    }
-
-    @Deprecated("Deprecated by Android; retained for the minimal file picker flow")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_VPN_PERMISSION) {
-            if (resultCode == RESULT_OK) {
-                startVpnService()
-            } else {
-                status.text = "Разрешение VPN не выдано."
-            }
-            return
-        }
-        if (requestCode != REQUEST_CERTIFICATE || resultCode != RESULT_OK) return
-        val uri = data?.data ?: return
-        try {
-            val certificate = contentResolver.openInputStream(uri).use { input ->
-                val stream = requireNotNull(input) { "Не удалось открыть файл сертификата" }
-                CertificateFactory.getInstance("X.509")
-                    .generateCertificate(stream) as X509Certificate
-            }
-            certificateDer = certificate.encoded
-            certificateStatus.text = "Сертификат выбран: ${certificate.subjectX500Principal.name}"
-        } catch (error: Exception) {
-            status.text = "Ошибка импорта сертификата: ${error.message}"
-        }
-    }
-
     private fun saveProfile() {
         try {
             val port = portInput.text.toString().toInt()
-            val certificate = certificateDer
-                ?: store.load()?.rootCertificateDer
-                ?: throw IllegalArgumentException("Сначала импортируйте доверенный сертификат")
+            val turnJson = turnCredentialsInput.text.toString().trim()
+            val key = pinnedServerKeyInput.text.toString().trim()
             store.save(ConnectionProfile(
                 host = hostInput.text.toString().trim(),
                 port = port,
-                serverName = serverNameInput.text.toString().trim(),
+                serverName = "",
                 credential = credentialInput.text.toString(),
-                rootCertificateDer = certificate,
+                rootCertificateDer = byteArrayOf(),
+                turnCredentialsJson = turnJson,
+                pinnedServerPublicKeyHex = key,
             ))
-            certificateDer = certificate
-            certificateStatus.text = "Сертификат и credential зашифрованы ключом Android Keystore"
-            status.text = "Настройки сохранены. Подключение ещё не выполнялось."
+            status.text = "Профиль TURN и секреты зашифрованы ключом Android Keystore."
         } catch (error: Exception) {
             status.text = "Не удалось сохранить настройки: ${error.message}"
         }
@@ -196,52 +162,24 @@ class MainActivity : Activity() {
 
     private fun testConnection() {
         if (GhulakhVpnService.isActive) {
-            status.text = "Остановите VPN перед отдельной проверкой соединения."
+            status.text = "Остановите VPN перед проверкой профиля."
             return
         }
-        val profile = try {
-            store.load() ?: throw IllegalStateException("Сначала сохраните настройки")
-        } catch (error: Exception) {
-            status.text = error.message ?: "Профиль недоступен"
-            return
-        }
-
-        status.text = "Проверка QUIC-соединения…"
-        Thread {
-            var transport: NativeTransport? = null
-            var session = 0L
-            try {
-                val nativeTransport = NativeTransport()
-                transport = nativeTransport
-                session = nativeTransport.nativeConnect(
-                    null,
-                    profile.host,
-                    profile.port,
-                    profile.serverName,
-                    profile.rootCertificateDer,
-                    profile.credential,
-                )
-                check(nativeTransport.nativePing(session)) { "Сервер не подтвердил ping" }
-                val tunnelReady = nativeTransport.nativeTunnelEnabled(session)
-                val forwardingReady = nativeTransport.nativeForwardingEnabled(session)
-                nativeTransport.nativeClose(session)
-                session = 0L
-                runOnUiThread {
-                    status.text = when {
-                        !tunnelReady -> "QUIC, TLS и аутентификация успешны, но серверный TUN выключен."
-                        !forwardingReady -> "Серверный TUN включён, но администратор не подтвердил настройку IP forwarding/NAT/firewall. VPN запускать нельзя."
-                        else -> "QUIC, TLS, аутентификация и готовность серверной маршрутизации подтверждены."
-                    }
-                }
-            } catch (error: Throwable) {
-                if (session != 0L) {
-                    runCatching { transport?.nativeClose(session) }
-                }
-                runOnUiThread {
-                    status.text = "Ошибка соединения: ${error.message}"
-                }
+        try {
+            val profile = store.load() ?: throw IllegalStateException("Сначала сохраните настройки")
+            require(profile.turnCredentialsJson.isNotBlank()) { "Не заданы TURN credentials VK Calls" }
+            val root = org.json.JSONObject(profile.turnCredentialsJson)
+            val turnServer = root.optJSONObject("turn_server") ?: root
+            require(turnServer.optString("username").isNotBlank()) { "В JSON отсутствует TURN username" }
+            require(turnServer.optString("credential").isNotBlank()) { "В JSON отсутствует TURN credential" }
+            require(turnServer.optJSONArray("urls")?.length() ?: 0 > 0) { "В JSON отсутствуют TURN URLs" }
+            require(profile.pinnedServerPublicKeyHex.matches(Regex("[0-9a-fA-F]{64}"))) {
+                "Закреплённый Noise public key должен содержать 64 hex-символа"
             }
-        }.start()
+            status.text = "Профиль проверен локально. Проверка relay и Noise-handshake выполняется при запуске VPN."
+        } catch (error: Exception) {
+            status.text = "Профиль TURN некорректен: ${error.message}"
+        }
     }
 
     private fun clearProfile() {
@@ -252,8 +190,6 @@ class MainActivity : Activity() {
         try {
             store.clear()
             credentialInput.text.clear()
-            certificateDer = null
-            certificateStatus.text = "Доверенный сертификат не выбран"
             status.text = "Локальный профиль и ключ Android Keystore удалены."
         } catch (error: Exception) {
             status.text = "Не удалось очистить профиль: ${error.message}"
@@ -294,7 +230,6 @@ class MainActivity : Activity() {
     }
 
     private companion object {
-        const val REQUEST_CERTIFICATE = 1002
         const val REQUEST_VPN_PERMISSION = 1001
     }
 }
