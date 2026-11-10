@@ -43,7 +43,7 @@
 
 `crates/transport/src/turn_supervisor.rs` добавляет единственного владельца TURN driver и auth context. `TurnAuthProvider` получает конкретный 401/438 challenge и возвращает новый явно сконфигурированный `TurnAuthContext`; derivation credentials остаётся за пределами транспорта.
 
-Supervisor ограничивает повторное согласование тремя challenge retries, обрабатывает первоначальный 401 при Allocate и проверенный 438 при Refresh, предоставляет сериализованные CreatePermission/ChannelBind и maintenance loop до allocation refresh deadline. Ошибки других классов не запускают автоматические повторные попытки. Локальные permission/channel записи удаляются по истечении их сроков.
+Supervisor ограничивает повторное согласование тремя challenge retries, обрабатывает первоначальный 401 при Allocate и проверенный 438 при Refresh/CreatePermission/ChannelBind, предоставляет сериализованные control operations и maintenance loop. Он планирует обновление allocation, permissions (с запасом 60 секунд до истечения) и channel bindings (с запасом 120 секунд), повторно устанавливая peer state до истечения срока. Ошибки других классов не запускают автоматические повторные попытки. Локальные permission/channel записи удаляются по истечении их сроков.
 
 Это пока control-plane supervisor, а не полноценный долгоживущий socket actor: `TurnClientDriver::transact` всё ещё временно владеет receive loop во время отдельной control-операции. Непрерывный приём ChannelData и одновременная обработка control/data сообщений должны быть реализованы следующим отдельным изменением через один socket reader и bounded dispatch, а не запуском второго receive loop.
 
