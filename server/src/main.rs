@@ -695,6 +695,7 @@ mod tests {
 
         assert_eq!(client.session_id().len(), 32);
         assert_eq!(client.client_ipv4(), "10.77.0.2");
+        assert!(!client.tunnel_enabled());
         client.ping().await.unwrap();
 
         let assigned: Ipv4Addr = client.client_ipv4().parse().unwrap();
