@@ -29,7 +29,7 @@ const HANDSHAKE_TTL: Duration = Duration::from_secs(30);
 const CACHE_CAPACITY: usize = 4096;
 const CACHE_PER_PEER: usize = 16;
 
-type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
+pub type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
 
 struct PendingHandshake {
     server: TurnHandshakeServer,
@@ -41,7 +41,6 @@ struct PeerRate {
     requests: u32,
 }
 
-#[derive(Debug)]
 pub enum TurnHandshakeOutcome {
     /// Exact cached response for a retransmitted request.
     Cached {
@@ -145,13 +144,24 @@ impl TurnHandshakeService {
                 })
             }
             HandshakePhase::ClientFinish => {
-                let pending = self.pending.get_mut(&key)
-                    .context("no active handshake for ClientFinish")?;
-                ensure!(pending.expires_at > now, "client handshake expired");
-                let (response, frame_keys) = pending.server.receive_client_finish(
-                    datagram,
-                    |credential| (self.verify_credential)(credential),
-                ).context("authenticate client Noise finish")?;
+                let finish_result = {
+                    let pending = self.pending.get_mut(&key)
+                        .context("no active handshake for ClientFinish")?;
+                    ensure!(pending.expires_at > now, "client handshake expired");
+                    pending.server.receive_client_finish(
+                        datagram,
+                        |credential| (self.verify_credential)(credential),
+                    )
+                };
+                let (response, frame_keys) = match finish_result {
+                    Ok(result) => result,
+                    Err(error) => {
+                        // A failed credential consumes this Noise state; discard it
+                        // immediately instead of retaining an unusable pending entry.
+                        self.pending.remove(&key);
+                        return Err(error).context("authenticate client Noise finish");
+                    }
+                };
 
                 // Cache exact ServerAck before exposing response or session keys.
                 self.delivery.cache_response(
@@ -214,5 +224,88 @@ impl TurnHandshakeService {
 
     pub fn cached_responses(&self) -> usize {
         self.delivery.cached_response_len()
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ghulakh_protocol::turn_handshake::TurnHandshakeClient;
+
+    fn service(credential: &'static [u8]) -> (TurnHandshakeService, Arc<NoiseServerKeyPair>) {
+        let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
+        let verifier: Arc<CredentialVerifier> =
+            Arc::new(move |candidate| candidate == credential);
+        (TurnHandshakeService::new(Arc::clone(&keypair), verifier).unwrap(), keypair)
+    }
+
+    fn relay_peer() -> SocketAddr {
+        "192.0.2.10:49152".parse().unwrap()
+    }
+
+    #[test]
+    fn full_handshake_caches_before_returning_and_replays_without_noise_transition() {
+        let credential = b"device-secret";
+        let (mut service, keypair) = service(credential);
+        let now = Instant::now();
+        let peer = relay_peer();
+        let handshake_id = [0x42; 16];
+        let (mut client, init) =
+            TurnHandshakeClient::new(keypair.public_key(), credential, handshake_id).unwrap();
+
+        let first = service.process(&init, peer, now).unwrap();
+        let server_response = match first {
+            TurnHandshakeOutcome::Response { response, established: None } => response,
+            _ => panic!("expected initial server response"),
+        };
+        assert_eq!(service.cached_responses(), 1);
+        assert_eq!(service.active_handshakes(), 1);
+
+        let duplicate = service.process(&init, peer, now).unwrap();
+        assert!(matches!(duplicate, TurnHandshakeOutcome::Cached { response } if response == server_response));
+
+        let finish = client.receive_server_response(&server_response).unwrap();
+        let completed = service.process(&finish, peer, now).unwrap();
+        let (server_ack, established) = match completed {
+            TurnHandshakeOutcome::Response { response, established: Some(session) } => (response, session),
+            _ => panic!("expected authenticated session"),
+        };
+        assert_eq!(established.handshake_id, handshake_id);
+        assert_eq!(established.relay_peer, peer);
+        assert_eq!(service.active_handshakes(), 0);
+        assert_eq!(service.cached_responses(), 2);
+        let client_keys = client.receive_server_ack(&server_ack).unwrap();
+        assert_eq!(client_keys.session_id(), established.frame_keys.session_id());
+
+        let duplicate_finish = service.process(&finish, peer, now).unwrap();
+        assert!(matches!(duplicate_finish, TurnHandshakeOutcome::Cached { response } if response == server_ack));
+    }
+
+    #[test]
+    fn rejected_credential_discards_pending_noise_state() {
+        let (mut service, keypair) = service(b"expected");
+        let now = Instant::now();
+        let (mut client, init) =
+            TurnHandshakeClient::new(keypair.public_key(), b"wrong", [0x33; 16]).unwrap();
+        let response = match service.process(&init, relay_peer(), now).unwrap() {
+            TurnHandshakeOutcome::Response { response, .. } => response,
+            _ => panic!("expected ServerResponse"),
+        };
+        let finish = client.receive_server_response(&response).unwrap();
+        assert!(service.process(&finish, relay_peer(), now).is_err());
+        assert_eq!(service.active_handshakes(), 0);
+    }
+
+    #[test]
+    fn per_peer_rate_limit_is_bounded() {
+        let (mut service, _) = service(b"secret");
+        let now = Instant::now();
+        let peer = relay_peer();
+        for _ in 0..MAX_REQUESTS_PER_WINDOW {
+            service.admit(peer, now).unwrap();
+        }
+        assert!(service.admit(peer, now).is_err());
+        service.admit(peer, now + RATE_WINDOW).unwrap();
     }
 }
