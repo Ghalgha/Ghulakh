@@ -228,6 +228,14 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
         anyhow::bail!("TURN ChannelBind retry loop exhausted")
     }
 
+    /// Transfer the TURN actor's bounded data receiver and send handle to the dataplane.
+    /// Control-plane ownership remains with this supervisor.
+    pub fn take_data_plane_parts(
+        &mut self,
+    ) -> Option<(crate::turn_socket_actor::TurnSocketHandle, tokio::sync::mpsc::Receiver<crate::turn_socket_actor::TurnInbound>)> {
+        self.driver.take_data_plane_parts()
+    }
+
     pub fn close(&mut self) {
         self.auth = None;
         self.permission_peers.clear();
