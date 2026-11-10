@@ -85,7 +85,8 @@ pub enum DatagramError {
 
 
 fn validate_ip_packet(kind: IpPacketKind, packet: &[u8]) -> Result<(), DatagramError> {
-    let version = packet.first().ok_or(DatagramError::InvalidLength)? >> 4;
+    let first_byte = *packet.first().ok_or(DatagramError::InvalidLength)?;
+    let version = first_byte >> 4;
     if version != kind as u8 {
         return Err(DatagramError::IpVersionMismatch);
     }
