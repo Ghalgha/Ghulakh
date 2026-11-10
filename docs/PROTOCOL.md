@@ -163,3 +163,8 @@ The codec requires independent directional keys and nonce prefixes from a future
 ### TURN peer permission and channel state
 
 The allocation-scoped peer registry tracks permissions by peer IP and channel bindings by peer transport address/channel number. It models the RFC 8656 permission lifetime of 300 seconds, channel-binding lifetime of 600 seconds, uniqueness in both directions, and the 300-second cooldown before reusing an expired channel number or peer address. A successful ChannelBind is recorded as also installing/refreshing the corresponding IP permission. The registry is updated only after the caller has authenticated and accepted a successful response.
+
+
+### TURN UDP socket adapter
+
+The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages to one configured TURN endpoint, preserves the source address of received datagrams, and can adopt a pre-bound standard UDP socket. Android integration is expected to create and protect that socket with `VpnService.protect(fd)` before handing it to the adapter. The adapter does not yet perform TURN authentication, transaction scheduling, allocation management, or relay session establishment.
