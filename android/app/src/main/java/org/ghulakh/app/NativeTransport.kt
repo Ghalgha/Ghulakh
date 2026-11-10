@@ -8,6 +8,7 @@ package org.ghulakh.app
  */
 class NativeTransport {
     external fun nativeConnect(
+        vpnService: android.net.VpnService?,
         host: String,
         port: Int,
         serverName: String,
@@ -16,6 +17,8 @@ class NativeTransport {
     ): Long
 
     external fun nativeClientIpv4(session: Long): String
+
+    external fun nativeTunnelEnabled(session: Long): Boolean
 
     external fun nativeSendPacket(session: Long, packet: ByteArray): Boolean
 
