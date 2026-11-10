@@ -138,3 +138,8 @@ The codec supports RFC 8489 `MESSAGE-INTEGRITY-SHA256` (full 32-byte HMAC) in ad
 ### TURN password-algorithm negotiation
 
 The protocol crate now parses RFC 8489 `PASSWORD-ALGORITHMS` and `PASSWORD-ALGORITHM` values with strict length bounds, duplicate-ID rejection, and preservation of unknown algorithm identifiers. Selection prefers SHA-256 when offered and falls back to MD5 only when SHA-256 is absent. The module only models and encodes negotiation attributes: it does not derive long-term credential keys, infer the VK Calls authentication profile, or authorize use of an algorithm without explicit service-profile confirmation.
+
+
+### TURN allocation lifecycle
+
+The protocol crate exposes an event-driven allocation state machine with Idle, AwaitingAllocate, Active, and AwaitingRefresh states. It accepts only matching transaction IDs and typed Allocate/Refresh results, tracks the granted relayed address and expiry, schedules refresh at 80% of the granted lifetime, restores a still-valid lease after a failed refresh, and retires expired or explicitly deleted allocations. It performs no network I/O and assumes the caller has already matched the response source/method/transaction and verified MESSAGE-INTEGRITY.
