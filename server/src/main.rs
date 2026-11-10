@@ -512,6 +512,14 @@ async fn handle_connection(
     Ok(())
 }
 
+fn ensure_keygen_args(args: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        args.len() == 4,
+        "usage: ghulakh-server --generate-noise-keypair <private-hex-file> <public-hex-file>"
+    );
+    Ok(())
+}
+
 fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
