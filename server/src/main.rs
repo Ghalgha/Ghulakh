@@ -77,7 +77,7 @@ fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> 
     let (packet_sender, mut packet_receiver) = mpsc::channel::<Vec<u8>>(TUN_QUEUE_CAPACITY);
 
     let writer = Arc::clone(&device);
-    tokio::spawn(async move {
+    let _tun_writer_task = tokio::spawn(async move {
         while let Some(packet) = packet_receiver.recv().await {
             if let Err(error) = writer.send(&packet).await {
                 eprintln!("TUN write failed: {error}");
@@ -87,7 +87,7 @@ fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> 
     });
 
     let reader = Arc::clone(&device);
-    tokio::spawn(async move {
+    let _tun_reader_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
             let length = match reader.recv(&mut buffer).await {
@@ -271,7 +271,15 @@ async fn handle_control_stream(
                     return Err(error);
                 }
             };
-            sessions.write().await.insert(address, connection.clone());
+            if sessions
+                .write()
+                .await
+                .insert(address, connection.clone())
+                .is_some()
+            {
+                connection.close(0u32.into(), b"address collision");
+                bail!("client address collision");
+            }
             *client_address.lock().await = Some(address);
             ControlMessage::ServerHello {
                 session_id: session_id.as_ref().clone(),
@@ -388,7 +396,7 @@ async fn handle_connection(
                 let session_map = Arc::clone(&sessions);
                 let allocator = Arc::clone(&ip_allocator);
                 let assigned_address = Arc::clone(&client_address);
-                tokio::spawn(async move {
+                let _control_stream_task = tokio::spawn(async move {
                     if let Err(error) = handle_control_stream(
                         connection.clone(),
                         send,
@@ -440,7 +448,7 @@ async fn handle_connection(
     }
 
     if let Some(address) = client_address.lock().await.take() {
-        sessions.write().await.remove(&address);
+        let _ = sessions.write().await.remove(&address);
     }
 
     if valid_datagrams > 0 || rejected_datagrams > 0 {
@@ -507,7 +515,7 @@ async fn main() -> Result<()> {
         let sender = tun_sender.clone();
         let session_map = Arc::clone(&sessions);
         let allocator = Arc::clone(&ip_allocator);
-        tokio::spawn(async move {
+        let _connection_task = tokio::spawn(async move {
             let _permit = permit;
             match connecting.await {
                 Ok(connection) => {
@@ -653,7 +661,7 @@ mod tests {
                 let metrics = Arc::clone(&server_metrics);
                 let sessions = Arc::clone(&server_sessions);
                 let allocator = Arc::clone(&server_allocator);
-                tokio::spawn(async move {
+                let _server_connection_task = tokio::spawn(async move {
                     if let Ok(connection) = connecting.await {
                         let _ = handle_connection(
                             connection,
