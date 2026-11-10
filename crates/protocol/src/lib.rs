@@ -6,6 +6,8 @@ pub mod turn_transaction;
 pub mod turn_request;
 pub mod turn_password;
 
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_BODY: usize = 16 * 1024;
