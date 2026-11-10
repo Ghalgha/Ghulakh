@@ -100,7 +100,7 @@ impl StunMessage {
             attributes.push(StunAttribute { kind, value: input[value_start..value_end].to_vec() });
             offset = padded_end;
         }
-        let method = ((ty & 0x000F) | ((ty & 0x00E0) >> 1) | ((ty & 0x3E00) >> 2)) as u16;
+        let method = (ty & 0x000F) | ((ty & 0x00E0) >> 1) | ((ty & 0x3E00) >> 2);
         let class = match ((ty >> 4) & 1) | ((ty >> 7) & 2) {
             0 => StunClass::Request,
             1 => StunClass::Indication,
