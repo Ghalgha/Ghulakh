@@ -105,7 +105,7 @@ fn connect_impl(
     port: jint,
     server_name: JString,
     root_certificate_der: JByteArray,
-    credential: JString<'local'>,
+    credential: JString<'local>,
 ) -> Result<jlong> {
     let host = env.get_string(&host)?.to_string_lossy().into_owned();
     let server_name = env
@@ -158,12 +158,12 @@ fn connect_impl(
 
 
 struct TurnConnectArgs<'local> {
-    vpn_service: JObject,
-    gateway_host: JString<'local'>,
+    vpn_service: JObject<'local>,
+    gateway_host: JString<'local>,
     gateway_port: jint,
-    turn_credentials_json: JString<'local'>,
-    pinned_server_key: JByteArray<'local'>,
-    credential: JString,
+    turn_credentials_json: JString<'local>,
+    pinned_server_key: JByteArray<'local>,
+    credential: JString<'local>,
     path_count: jint,
 }
 
