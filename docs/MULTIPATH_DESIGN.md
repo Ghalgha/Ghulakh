@@ -29,15 +29,15 @@ Group ID — идентификатор экземпляра туннеля, а 
 - Android TUN читается одним владельцем; пакеты поступают в ограниченную очередь диспетчера.
 - Диспетчер выбирает один здоровый path на пакет с учётом доступности, очереди и наблюдаемой перегрузки.
 - Потоки распределяются между paths; нельзя использовать простой round-robin по каждому пакету без механизма восстановления порядка.
-- Для возможности отправлять пакеты одного IP flow по разным paths каждый пакет получает монотонный group sequence внутри защищённого payload. Sequence общий для группы, а не для отдельной allocation.
-- Сервер проверяет AEAD и session/path identity, затем передаёт кадры в ограниченный reorder buffer группы. Буфер выдаёт пакеты TUN по group sequence; пропуск не блокирует трафик бесконечно — действует ограниченный gap timeout и лимит памяти.
-- Повтор sequence, слишком старые кадры и выход за окно отклоняются. Повторная передача на уровне TURN не подменяет семантику UDP; восстановление потерянного IP-пакета остаётся задачей транспортов верхнего уровня.
+- Начальный режим использует flow affinity: один IPv4 flow закрепляется за одним path, разные flows распределяются между paths. Это сохраняет порядок внутри flow без глобального head-of-line blocking, но один flow ограничен пропускной способностью одного path.
+- Striping одного flow между paths — отдельный следующий этап, а не поведение первой multipath-версии. Для него потребуется монотонный group sequence внутри защищённого payload и bounded reorder buffer на принимающей стороне.
+- В режиме striping повтор sequence, слишком старые кадры и выход за окно должны отклоняться. Пропуск не должен блокировать трафик бесконечно: обязательны gap timeout и лимит памяти. Потерянный IP-пакет не восстанавливается TURN сам по себе.
 
 ## Распределение downlink
 
 - Сервер читает TUN одним владельцем и определяет tunnel group по destination IPv4.
-- Диспетчер выбирает здоровый path группы, добавляет общий downlink group sequence и шифрует пакет ключами выбранного path.
-- Клиент проверяет path/session AEAD, затем использует отдельный bounded reorder buffer группы перед записью в Android TUN.
+- Диспетчер выбирает path по flow hash и шифрует пакет ключами выбранного path.
+- Клиент проверяет path/session AEAD и передаёт пакет из объединённой очереди Android TUN. При flow-affinity отдельный reorder buffer не нужен; он будет добавлен только при переходе к striping одного flow.
 - При отказе path новые пакеты перенаправляются через оставшиеся paths. Активные allocations не считаются доступными, пока не завершены TURN setup и Noise authentication.
 
 ## Параллелизм и владение ресурсами
@@ -65,10 +65,10 @@ Group ID — идентификатор экземпляра туннеля, а 
 
 1. Добавить защищённый формат client session context: group ID, path ID, requested path count.
 2. На сервере реализовать lease виртуального IPv4 и регистрацию нескольких session IDs в одной tunnel group.
-3. На клиенте реализовать TurnPath и TurnPathGroup, поднимающие независимые protected UDP sockets и TURN allocations.
-4. Реализовать общий group sequence и bounded reorder buffer в обоих направлениях.
-5. Реализовать диспетчер path selection и деградацию/восстановление отдельных paths.
-6. Добавить mock end-to-end тесты для двух и более paths: распределение пакетов, порядок, потери, duplicate/replay, path failure, восстановление, queue saturation и cleanup последнего path.
+3. Подключить Rust TurnClientPathGroup к JNI и реализовать Android создание нескольких protected UDP sockets/allocations.
+4. Реализовать мониторинг path health, выбор живых путей, graceful degradation и повторное создание allocation.
+5. Добавить mock end-to-end тесты для двух и более paths: распределение flows, порядок, потери, duplicate/replay, path failure, восстановление, queue saturation и cleanup последнего path.
+6. После стабилизации flow-affinity multipath оценить необходимость striping одного flow с group sequence/reorder.
 7. Только после успешной программной вертикали провести физические Android/VPS испытания и измерить масштабирование.
 
 ## Поздние функции
