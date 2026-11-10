@@ -28,10 +28,10 @@ class CredentialStore(context: Context) {
         require(profile.port in 1..65535)
         require(profile.serverName.isNotBlank())
         require(profile.credential.isNotBlank())
-        require(profile.rootCertificateDer.isNotEmpty())
+        require(profile.turnCredentialsJson.isNotBlank())\n        require(profile.pinnedServerPublicKeyHex.matches(Regex(\"[0-9a-fA-F]{64}\")))
 
         val credential = encrypt(profile.credential.toByteArray(StandardCharsets.UTF_8))
-        val certificate = encrypt(profile.rootCertificateDer)
+        val certificate = if (profile.rootCertificateDer.isNotEmpty()) encrypt(profile.rootCertificateDer) else null\n        val turnCredentials = encrypt(profile.turnCredentialsJson.toByteArray(StandardCharsets.UTF_8))\n        val pinnedKey = encrypt(profile.pinnedServerPublicKeyHex.lowercase().toByteArray(StandardCharsets.UTF_8))
 
         preferences.edit()
             .putString("host", profile.host)
@@ -50,13 +50,28 @@ class CredentialStore(context: Context) {
         val serverName = preferences.getString("server_name", null) ?: return null
         val credentialIv = preferences.getString("credential_iv", null) ?: return null
         val credentialData = preferences.getString("credential_data", null) ?: return null
-        val certificateIv = preferences.getString("certificate_iv", null) ?: return null
-        val certificateData = preferences.getString("certificate_data", null) ?: return null
+        val certificateIv = preferences.getString("certificate_iv", null)
+        val certificateData = preferences.getString("certificate_data", null)
+        val turnCredentialsIv = preferences.getString("turn_credentials_iv", null) ?: return null
+        val turnCredentialsData = preferences.getString("turn_credentials_data", null) ?: return null
+        val pinnedKeyIv = preferences.getString("pinned_key_iv", null) ?: return null
+        val pinnedKeyData = preferences.getString("pinned_key_data", null) ?: return null
 
         val credential = decrypt(credentialIv, credentialData)
             .let { String(it, StandardCharsets.UTF_8) }
-        val certificate = decrypt(certificateIv, certificateData)
-        return ConnectionProfile(host, port, serverName, credential, certificate)
+        val certificate = if (certificateIv != null && certificateData != null) {
+            decrypt(certificateIv, certificateData)
+        } else {
+            byteArrayOf()
+        }
+        val turnCredentials = decrypt(turnCredentialsIv, turnCredentialsData)
+            .let { String(it, StandardCharsets.UTF_8) }
+        val pinnedKey = decrypt(pinnedKeyIv, pinnedKeyData)
+            .let { String(it, StandardCharsets.UTF_8) }
+        return ConnectionProfile(
+            host, port, serverName, credential, certificate,
+            turnCredentials, pinnedKey,
+        )
     }
 
     fun clear() {
