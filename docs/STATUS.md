@@ -154,3 +154,10 @@ README всех шести указанных пользователем исх�
 - Documented the observed anonymous join-link, authenticated account, and WebView response-interception paths for obtaining `turn_server`.
 - Identified the credential fields as `username`, `credential`, and `urls[]`; separated these relay credentials from Ghulakh's tunnel-session encryption keys.
 - Credential acquisition is not yet implemented. The app still needs a product decision on joining an existing call versus creating a dedicated call, plus confirmation of returned URI schemes, credential lifetime and authentication profile.
+
+
+- Added a VK Calls `turn_server` JSON parser for username, credential and URI list.
+- Sensitive credential strings are zeroized on drop and redacted from Debug output.
+- Added strict TURN/TURNS URI parsing with IPv4, bracketed IPv6, DNS names, default ports and retained query parameters.
+- The UDP socket adapter now resolves a parsed UDP endpoint and rejects TCP/TLS endpoints instead of silently treating them as UDP.
+- No live VK API acquisition, OAuth/WebView integration or credential refresh scheduler is implemented yet.
