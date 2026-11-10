@@ -359,8 +359,6 @@ impl HandshakeDatagramDriver {
             (envelope.phase, expected_response),
             (HandshakePhase::ClientInit, HandshakePhase::ServerResponse)
                 | (HandshakePhase::ClientFinish, HandshakePhase::ServerAck)
-                | (HandshakePhase::ServerResponse, HandshakePhase::ClientFinish)
-                | (HandshakePhase::ServerAck, HandshakePhase::ClientFinish)
         );
         if !valid_pair {
             return Err(HandshakeDriverError::InvalidPhasePair);
@@ -455,11 +453,14 @@ impl HandshakeDatagramDriver {
         if request.handshake_id != response.handshake_id {
             return Err(HandshakeDriverError::InvalidPhasePair);
         }
-        let key_exists = self.responses.iter().any(|entry| {
-            entry.source == source
-                && entry.handshake_id == request.handshake_id
-                && entry.request_phase == request.phase
-        });
+        let expected_response = match request.phase {
+            HandshakePhase::ClientInit => HandshakePhase::ServerResponse,
+            HandshakePhase::ClientFinish => HandshakePhase::ServerAck,
+            _ => return Err(HandshakeDriverError::InvalidPhasePair),
+        };
+        if response.phase != expected_response {
+            return Err(HandshakeDriverError::InvalidPhasePair);
+        }
         let digest: [u8; 32] = Sha256::digest(request_datagram).into();
         if let Some(entry) = self.responses.iter().find(|entry| {
             entry.source == source
@@ -481,7 +482,6 @@ impl HandshakeDatagramDriver {
                 self.responses.remove(index);
             }
         }
-        let _ = key_exists;
         self.responses.push_back(CachedHandshakeResponse {
             source,
             handshake_id: request.handshake_id,
@@ -623,5 +623,127 @@ mod tests {
     #[test]
     fn rejects_zero_capacity() {
         assert_eq!(HandshakeResponseCache::new(0).err(), Some(HandshakeReplayCacheError::ZeroCapacity));
+    }
+
+    fn peer() -> SocketAddr {
+        "192.0.2.44:50000".parse().unwrap()
+    }
+
+    fn envelope(phase: HandshakePhase, id: [u8; 16], payload: &[u8]) -> Vec<u8> {
+        HandshakeEnvelope {
+            phase,
+            handshake_id: id,
+            payload: payload.to_vec(),
+        }.encode().unwrap()
+    }
+
+    fn driver() -> HandshakeDatagramDriver {
+        HandshakeDatagramDriver::new(
+            8, 2, 8, 2, Duration::from_secs(10),
+            HandshakeRetryPolicy {
+                initial_rto: Duration::from_millis(100),
+                max_rto: Duration::from_millis(250),
+                max_transmissions: 3,
+            },
+        ).unwrap()
+    }
+
+    #[test]
+    fn retry_driver_resends_exact_bytes_with_bounded_backoff() {
+        let now = Instant::now();
+        let request = envelope(HandshakePhase::ClientInit, [9; 16], b"noise-msg-1");
+        let mut driver = driver();
+        driver.register_request(
+            request.clone(), peer(), HandshakePhase::ServerResponse, now,
+        ).unwrap();
+
+        assert!(driver.poll(now + Duration::from_millis(99)).is_empty());
+        assert!(matches!(
+            driver.poll(now + Duration::from_millis(100)).as_slice(),
+            [HandshakeDriverEvent::Retransmit { datagram, attempt: 2, .. }]
+                if datagram == &request
+        ));
+        assert!(matches!(
+            driver.poll(now + Duration::from_millis(300)).as_slice(),
+            [HandshakeDriverEvent::Retransmit { datagram, attempt: 3, .. }]
+                if datagram == &request
+        ));
+        assert!(matches!(
+            driver.poll(now + Duration::from_millis(550)).as_slice(),
+            [HandshakeDriverEvent::TimedOut { .. }]
+        ));
+        assert_eq!(driver.pending_len(), 0);
+    }
+
+    #[test]
+    fn response_requires_matching_peer_identifier_and_phase() {
+        let now = Instant::now();
+        let request = envelope(HandshakePhase::ClientInit, [8; 16], b"m1");
+        let valid = envelope(HandshakePhase::ServerResponse, [8; 16], b"m2");
+        let mut driver = driver();
+        driver.register_request(
+            request, peer(), HandshakePhase::ServerResponse, now,
+        ).unwrap();
+        assert!(!driver.accept_response(
+            &valid, "192.0.2.45:50000".parse().unwrap(),
+        ).unwrap());
+        let wrong_phase = envelope(HandshakePhase::ServerAck, [8; 16], b"bad");
+        assert!(!driver.accept_response(&wrong_phase, peer()).unwrap());
+        assert!(driver.accept_response(&valid, peer()).unwrap());
+        assert_eq!(driver.pending_len(), 0);
+    }
+
+    #[test]
+    fn response_cache_replays_exact_response_and_expires() {
+        let now = Instant::now();
+        let request = envelope(HandshakePhase::ClientInit, [6; 16], b"m1");
+        let response = envelope(HandshakePhase::ServerResponse, [6; 16], b"m2");
+        let mut driver = driver();
+        driver.cache_response(&request, response.clone(), peer(), now).unwrap();
+        assert_eq!(
+            driver.cached_response(&request, peer(), now).unwrap(),
+            Some(response.as_slice())
+        );
+        assert_eq!(driver.prune_expired(now + Duration::from_secs(10)), 1);
+        assert_eq!(driver.cached_response(&request, peer(), now + Duration::from_secs(10)).unwrap(), None);
+    }
+
+    #[test]
+    fn response_cache_rejects_transaction_reuse_with_different_request() {
+        let now = Instant::now();
+        let request = envelope(HandshakePhase::ClientInit, [5; 16], b"first");
+        let altered = envelope(HandshakePhase::ClientInit, [5; 16], b"other");
+        let response = envelope(HandshakePhase::ServerResponse, [5; 16], b"reply");
+        let mut driver = driver();
+        driver.cache_response(&request, response, peer(), now).unwrap();
+        assert_eq!(
+            driver.cached_response(&altered, peer(), now),
+            Err(HandshakeDriverError::CacheConflict)
+        );
+    }
+
+    #[test]
+    fn driver_enforces_global_and_per_peer_pending_limits() {
+        let now = Instant::now();
+        let mut driver = HandshakeDatagramDriver::new(
+            2, 1, 2, 1, Duration::from_secs(1), HandshakeRetryPolicy::default(),
+        ).unwrap();
+        driver.register_request(
+            envelope(HandshakePhase::ClientInit, [1; 16], b"a"),
+            peer(), HandshakePhase::ServerResponse, now,
+        ).unwrap();
+        assert_eq!(
+            driver.register_request(
+                envelope(HandshakePhase::ClientInit, [2; 16], b"b"),
+                peer(), HandshakePhase::ServerResponse, now,
+            ),
+            Err(HandshakeDriverError::PeerLimitReached)
+        );
+        driver.register_request(
+            envelope(HandshakePhase::ClientInit, [3; 16], b"c"),
+            "192.0.2.45:50000".parse().unwrap(),
+            HandshakePhase::ServerResponse, now,
+        ).unwrap();
+        assert_eq!(driver.pending_len(), 2);
     }
 }
