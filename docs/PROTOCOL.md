@@ -8,7 +8,7 @@
 
 В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Кодек реализует MESSAGE-INTEGRITY на HMAC-SHA1 с внешним ключом и FINGERPRINT на CRC-32. Он не выводит long-term ключи, не реализует TURN transaction state machine, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
 
-Следующие обязательные компоненты: TURN long-term authentication, Allocate/Refresh/CreatePermission/ChannelBind state machine, UDP transaction manager, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
+Следующие обязательные компоненты: подтверждение фактического TURN credential/auth profile VK Calls, Allocate/Refresh/CreatePermission/ChannelBind state machine, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
 
 ## Экспериментальный QUIC прототип (не целевой транспорт)
 
@@ -114,7 +114,7 @@ MESSAGE-INTEGRITY проверяется HMAC-SHA1 с constant-time MAC verifica
 - `append_fingerprint` и `verify_fingerprint` реализуют CRC-32 XOR 0x5354554e. FINGERPRINT не является аутентификацией.
 - Проверка HMAC выполняется constant-time через криптографическую библиотеку.
 
-TURN long-term credential derivation, challenge handling (401/438), transaction management и allocation lifecycle пока не реализованы.
+TURN challenge parser (401/438) реализован отдельно от credential derivation. Модуль `ghulakh_protocol::turn_transaction` реализует ограниченный UDP transaction manager: случайные 96-битные ID через системный генератор, лимит 10 незавершённых запросов на endpoint, сопоставление ответа по ID/method/source endpoint, RFC 8489 retransmission schedule (500 ms initial RTO, 7 отправок, финальное ожидание 16×RTO), отмену и маркировку повторно отправленных транзакций для Karn's algorithm. Он не выполняет socket I/O, не проверяет MESSAGE-INTEGRITY сам и не реализует TURN allocation lifecycle.
 
 
 ### TURN authentication challenge parser
@@ -122,3 +122,8 @@ TURN long-term credential derivation, challenge handling (401/438), transaction 
 Модуль `ghulakh_protocol::turn_auth` извлекает ограниченные по размеру challenge-ответы 401 и 438 для ожидаемого метода. Он проверяет класс/метод ответа, формат ERROR-CODE, уникальность ERROR-CODE/REALM/NONCE, UTF-8 и границы длины текстовых атрибутов. Вызывающий TURN transaction manager обязан до принятия challenge сопоставить transaction ID и адрес источника с ожидающим запросом.
 
 Парсер не выводит ключ, не выбирает PASSWORD-ALGORITHM и не считает challenge доказательством подлинности сервера. Эти решения остаются за будущим auth provider после подтверждения фактического профиля TURN endpoint.
+
+
+### TURN transaction manager
+
+Менеджер транзакций является детерминированным механизмом состояния без собственного сокета и таймера. Вызывающий код отправляет исходный STUN Request, периодически вызывает `poll()` и исполняет возвращённые retransmit-события. Входящий ответ передаётся в `accept_response()`; совпадение transaction ID, method и source endpoint необходимо, но недостаточно: вызывающий код обязан проверить MESSAGE-INTEGRITY согласно согласованному профилю до изменения состояния TURN. Для UDP используются параметры по умолчанию RFC 8489: RTO 500 мс, всего 7 отправок и финальное ожидание 8 секунд после последней отправки (общий примерный тайм-аут 39,5 секунды).
