@@ -128,7 +128,7 @@ impl StunMessage {
     }
 }
 
-pub fn encode_xor_address(kind: u16, address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
+pub fn encode_xor_address(address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
     let mut out = Vec::with_capacity(20);
     out.push(0);
     match address.ip() {
@@ -144,11 +144,9 @@ pub fn encode_xor_address(kind: u16, address: SocketAddr, transaction_id: &[u8; 
             let mut mask = [0u8; 16];
             mask[..4].copy_from_slice(&MAGIC_COOKIE.to_be_bytes());
             mask[4..].copy_from_slice(transaction_id);
-            for (dst, src) in out.iter_mut().skip(4).zip(ip.octets().iter()) { let _ = (dst, src); }
             out.extend(ip.octets().iter().zip(mask.iter()).map(|(a,b)| a ^ b));
         }
     }
-    let _ = kind;
     out
 }
 
@@ -197,7 +195,7 @@ mod tests {
     }
     #[test] fn xor_ipv4_round_trip() {
         let id=[7u8;12]; let a="192.0.2.10:3478".parse().unwrap();
-        let v=encode_xor_address(ATTR_XOR_MAPPED_ADDRESS,a,&id);
+        let v=encode_xor_address(a,&id);
         assert_eq!(decode_xor_address(&v,&id).unwrap(),a);
     }
     #[test] fn xor_ipv6_round_trip() {
