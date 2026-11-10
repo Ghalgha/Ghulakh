@@ -378,6 +378,7 @@ fn throw_error(env: &mut JNIEnv, class: &str, error: impl std::fmt::Display) {
 }
 
 
+#[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
     mut env: JNIEnv,
