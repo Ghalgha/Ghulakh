@@ -397,11 +397,10 @@ impl HandshakeDatagramDriver {
     ) -> Result<bool, HandshakeDriverError> {
         let envelope = HandshakeEnvelope::decode(datagram)
             .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
-        Ok(self.pending.values().any(|pending| {
-            pending.destination == source
+        Ok(self.pending.iter().any(|(key, pending)| {
+            key.0 == envelope.handshake_id
+                && key.2 == source
                 && pending.response_phase == envelope.phase
-                && self.pending.iter().any(|(key, _)| key.0 == envelope.handshake_id
-                    && key.2 == source)
         }))
     }
 
