@@ -22,10 +22,14 @@ use ghulakh_protocol::{
     },
     turn_transaction::{TransactionEvent, TransactionManager, TransactionPolicy},
 };
-use crate::{turn_auth::TurnAuthContext, turn_udp::TurnUdpSocket};
+use crate::{
+    turn_auth::TurnAuthContext,
+    turn_socket_actor::{TurnInbound, TurnSocketActor, TurnSocketHandle},
+    turn_udp::TurnUdpSocket,
+};
+use tokio::sync::mpsc;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-const RECEIVE_BUFFER_SIZE: usize = 65_507;
 const DEFAULT_REFRESH_LIFETIME: u32 = 600;
 
 #[derive(Debug, thiserror::Error)]
@@ -42,12 +46,17 @@ pub enum TurnDriverError {
     UnmatchedResponse,
     #[error("TURN operation requires an active allocation")]
     NoAllocation,
+    #[error("TURN socket actor is no longer available")]
+    SocketActorClosed,
     #[error("TURN operation failed: {0}")]
     Operation(String),
 }
 
 pub struct TurnClientDriver {
-    socket: TurnUdpSocket,
+    socket: Option<TurnSocketHandle>,
+    control_rx: mpsc::Receiver<TurnInbound>,
+    data_rx: Option<mpsc::Receiver<TurnInbound>>,
+    relay_endpoint: SocketAddr,
     transactions: TransactionManager,
     allocations: AllocationManager,
     peers: Option<TurnPeerRegistry>,
@@ -56,8 +65,13 @@ pub struct TurnClientDriver {
 
 impl TurnClientDriver {
     pub fn new(socket: TurnUdpSocket) -> Self {
+        let relay_endpoint = socket.server_addr();
+        let (actor, receivers) = TurnSocketActor::spawn(socket);
         Self {
-            socket,
+            socket: Some(actor),
+            control_rx: receivers.control,
+            data_rx: Some(receivers.data),
+            relay_endpoint,
             transactions: TransactionManager::new(),
             allocations: AllocationManager::new(),
             peers: None,
@@ -71,7 +85,13 @@ impl TurnClientDriver {
     }
 
     pub fn relay_endpoint(&self) -> SocketAddr {
-        self.socket.server_addr()
+        self.relay_endpoint
+    }
+
+    /// Transfer the bounded data-event receiver to the dataplane consumer.
+    /// It can run concurrently with serialized control operations.
+    pub fn take_data_receiver(&mut self) -> Option<mpsc::Receiver<TurnInbound>> {
+        self.data_rx.take()
     }
 
     pub fn allocation(&self) -> Option<&AllocationLease> {
@@ -224,6 +244,8 @@ impl TurnClientDriver {
     pub fn close(&mut self) {
         self.peers = None;
         self.allocations = AllocationManager::new();
+        self.data_rx = None;
+        self.socket = None;
     }
 
     fn require_live_allocation(&self) -> Result<()> {
@@ -237,7 +259,8 @@ impl TurnClientDriver {
         request: StunMessage,
         auth: Option<&TurnAuthContext>,
     ) -> Result<StunMessage> {
-        let destination = self.socket.server_addr();
+        let destination = self.relay_endpoint;
+        let actor = self.socket.as_ref().cloned().ok_or(TurnDriverError::SocketActorClosed)?;
         let wire = match auth {
             Some(context) => context.sign_request(&request).context("authenticate TURN request")?,
             None => request.encode().context("encode unauthenticated TURN request")?,
@@ -248,42 +271,32 @@ impl TurnClientDriver {
             Instant::now(),
             self.transaction_policy,
         ).map_err(|e| anyhow::anyhow!("register TURN transaction: {e}"))?;
-        if let Err(error) = self.socket.send_datagram(&wire).await {
+        if let Err(error) = actor.send_datagram(wire).await {
             self.transactions.cancel(&id);
             return Err(error).context("send TURN request");
         }
 
-        let mut buffer = vec![0u8; RECEIVE_BUFFER_SIZE];
         loop {
             tokio::select! {
-                received = self.socket.receive_datagram(&mut buffer) => {
-                    let (length, source) = match received {
-                        Ok(datagram) => datagram,
-                        Err(error) => {
-                            self.transactions.cancel(&id);
-                            return Err(error).context("receive TURN response");
-                        }
+                inbound = self.control_rx.recv() => {
+                    let Some(TurnInbound::Control { message, wire, source }) = inbound else {
+                        self.transactions.cancel(&id);
+                        return Err(TurnDriverError::SocketActorClosed.into());
                     };
-                    if source != destination {
+                    let Some(matched) = self.transactions.accept_response(message, source) else {
+                        continue;
+                    };
+                    if matched.transaction_id != id {
                         continue;
                     }
-                    let response = match StunMessage::decode(&buffer[..length]) {
-                        Ok(response) => response,
-                        Err(_) => continue,
-                    };
-                    let Some(matched) = self.transactions.accept_response(response, source) else {
-                        continue;
-                    };
                     let response = matched.response;
                     if response.class == StunClass::ErrorResponse {
                         let challenge = parse_turn_challenge(&response, request.method).ok();
                         if let Some(challenge) = challenge {
-                            // Only the first, unauthenticated 401 is an initial
-                            // challenge. A stale nonce (438) must be authenticated.
                             let should_verify = challenge.code == 438 || auth.is_some();
                             if should_verify {
                                 if let Some(context) = auth {
-                                    if let Err(error) = context.verify_response(&buffer[..length]) {
+                                    if let Err(error) = context.verify_response(&wire) {
                                         self.transactions.complete(&id);
                                         return Err(error).context("verify authenticated TURN challenge");
                                     }
@@ -300,7 +313,7 @@ impl TurnClientDriver {
                             return Err(TurnDriverError::Challenge(challenge).into());
                         }
                         if let Some(context) = auth {
-                            if let Err(error) = context.verify_response(&buffer[..length]) {
+                            if let Err(error) = context.verify_response(&wire) {
                                 self.transactions.complete(&id);
                                 return Err(error).context("verify authenticated TURN error response");
                             }
@@ -313,7 +326,7 @@ impl TurnClientDriver {
                         return Err(TurnDriverError::ServerError { code: code.unwrap_or(0) }.into());
                     }
                     if let Some(context) = auth {
-                        if let Err(error) = context.verify_response(&buffer[..length]) {
+                        if let Err(error) = context.verify_response(&wire) {
                             self.transactions.complete(&id);
                             return Err(error).context("verify TURN success response");
                         }
@@ -328,11 +341,11 @@ impl TurnClientDriver {
                     for event in self.transactions.poll(Instant::now()) {
                         match event {
                             TransactionEvent::Retransmit { request, destination, .. } => {
-                                if destination != self.socket.server_addr() {
+                                if destination != self.relay_endpoint {
                                     self.transactions.cancel(&id);
                                     anyhow::bail!("TURN retry destination changed");
                                 }
-                                if let Err(error) = self.socket.send_datagram(&request).await {
+                                if let Err(error) = actor.send_datagram(request).await {
                                     self.transactions.cancel(&id);
                                     return Err(error).context("retransmit TURN request");
                                 }
