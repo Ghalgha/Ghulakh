@@ -203,6 +203,7 @@ class MainActivity : Activity() {
                 val nativeTransport = NativeTransport()
                 transport = nativeTransport
                 session = nativeTransport.nativeConnect(
+                    null,
                     profile.host,
                     profile.port,
                     profile.serverName,
@@ -210,10 +211,15 @@ class MainActivity : Activity() {
                     profile.credential,
                 )
                 check(nativeTransport.nativePing(session)) { "Сервер не подтвердил ping" }
+                val tunnelReady = nativeTransport.nativeTunnelEnabled(session)
                 nativeTransport.nativeClose(session)
                 session = 0L
                 runOnUiThread {
-                    status.text = "QUIC-соединение, проверка TLS и аутентификация прошли успешно. VPN-трафик пока не маршрутизируется."
+                    status.text = if (tunnelReady) {
+                        "QUIC, TLS и аутентификация успешны. Серверный TUN включён; локальный VPN-клиент ещё не подключён."
+                    } else {
+                        "QUIC, TLS и аутентификация успешны, но серверный TUN выключен. VPN запускать нельзя."
+                    }
                 }
             } catch (error: Throwable) {
                 if (session != 0L) {
