@@ -1,6 +1,7 @@
 //! Shared, versioned control-plane and data-plane message types.
 
 pub mod stun;
+pub mod turn_auth;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
