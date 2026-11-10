@@ -20,6 +20,7 @@
 - базовая egress ACL: блокировка частных, loopback, link-local, multicast, broadcast и CGNAT-адресов по умолчанию;
 - серверные unit-тесты на отклонение датаграмм до аутентификации, повреждённых пакетов и проверку индивидуальных credentials;
 - loopback integration test: QUIC-клиент устанавливает TLS-соединение, проходит аутентификацию, выполняет ping и отправляет IP-датаграмму, которую сервер принимает;
+- проверка закрытия QUIC-клиента при ожидающем чтении датаграммы: ожидающий receive должен завершиться ошибкой после close (добавлена, ожидает CI);
 - тайм-аут чтения управляющего потока;
 - Kotlin JNI facade и native Rust QUIC library с cross-compilation для Android ABI в CI;
 - Android UI для параметров сервера, импорта X.509 trust anchor и проверки QUIC-соединения;
@@ -30,10 +31,10 @@
 
 ## Проверки
 
-- GitHub Actions run `42840236910` завершился успешно для обеих задач: Rust checks и Android debug build.
+- GitHub Actions run `42841428239` завершился успешно для обеих задач: Rust checks и Android debug build.
 - В Rust job успешно выполнены dependency audit, rustfmt, `cargo test --workspace` и Clippy с `-D warnings`.
-- Android job успешно собрал нативную библиотеку для трёх ABI и выполнил `gradle assembleDebug`.
-- Следующее изменение CI добавляет проверку существования APK и публикацию APK как артефакта. Этот новый шаг ещё ожидает отдельного CI-запуска.
+- Android job успешно собрал нативную библиотеку для `arm64-v8a`, `armeabi-v7a` и `x86_64`, выполнил `gradle assembleDebug` и проверил наличие APK.
+- Артефакт `ghulakh-android-debug` опубликован (5 640 412 байт); срок хранения до 2026-11-24. SHA-256: `878c8386ce7012c9de3eca9c6c4a38b8abbc352c4bf0e1a767e8938ad`.
 - Проверки выполнялись в CI; физическая установка APK и end-to-end тест через реальный сервер не выполнялись.
 
 ## Не реализовано
@@ -65,6 +66,6 @@ Android-приложение создаёт TUN только после успе
 
 ## Следующий этап
 
-1. Реализовать восстановление соединения и адаптацию MTU на Android.
-2. Добавить IPv6-транспорт и управляемый allowlist частных сетей.
+1. Завершить проверку жизненного цикла native receive/close и Android VPN worker.
+2. Добавить контролируемое восстановление соединения и адаптацию MTU.
 3. Добавить API управления credentials, нагрузочные тесты и fuzzing.
