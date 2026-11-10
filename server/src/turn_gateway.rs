@@ -7,6 +7,7 @@
 
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
     net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -19,6 +20,7 @@ use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
     secure_frame::{protected_frame_session_id, FrameOpener, FrameSealer},
     DataDatagram, IpPacketKind,
+    turn_path_context::TurnPathContext,
 };
 use tokio::{
     net::UdpSocket,
@@ -38,8 +40,15 @@ struct SessionCrypto {
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
     relay_peer: SocketAddr,
+    path_context: Option<TurnPathContext>,
     crypto: Mutex<SessionCrypto>,
     last_activity: Mutex<Instant>,
+}
+
+#[derive(Clone)]
+struct ClientRoute {
+    group_id: Option<[u8; 16]>,
+    sessions: Vec<[u8; 8]>,
 }
 
 #[derive(Default)]
@@ -68,7 +77,7 @@ pub struct TurnGatewayStats {
 pub struct TurnGateway {
     socket: Arc<UdpSocket>,
     sessions: RwLock<HashMap<[u8; 8], Arc<GatewaySession>>>,
-    clients: RwLock<HashMap<Ipv4Addr, [u8; 8]>>,
+    clients: RwLock<HashMap<Ipv4Addr, ClientRoute>>,
     tun_ingress: mpsc::Sender<DataDatagram>,
     handshake: AsyncMutex<Option<super::turn_handshake_service::TurnHandshakeService>>,
     counters: Counters,
@@ -134,14 +143,16 @@ impl TurnGateway {
             let client_ipv4 = established.config.virtual_ipv4;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
-            if let Err(error) = self.register_session(
+            let path_context = established.path_context;
+            if let Err(error) = self.register_session_with_path(
                 session_id,
                 client_ipv4,
                 established.relay_peer,
                 opener,
                 sealer,
+                path_context,
             ).await {
-                self.release_virtual_ipv4(client_ipv4).await;
+                self.release_session_lease(client_ipv4, path_context, true).await;
                 return Err(error).context("register authenticated TURN session after ServerAck cache");
             }
         }
@@ -162,24 +173,59 @@ impl TurnGateway {
         opener: FrameOpener,
         sealer: FrameSealer,
     ) -> Result<()> {
+        self.register_session_with_path(
+            session_id, client_ipv4, relay_peer, opener, sealer, None,
+        ).await
+    }
+
+    async fn register_session_with_path(
+        &self,
+        session_id: [u8; 8],
+        client_ipv4: Ipv4Addr,
+        relay_peer: SocketAddr,
+        opener: FrameOpener,
+        sealer: FrameSealer,
+        path_context: Option<TurnPathContext>,
+    ) -> Result<()> {
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
         ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
         ensure!(opener.session_id() == session_id, "opener session identifier mismatch");
         ensure!(sealer.session_id() == session_id, "sealer session identifier mismatch");
+        if let Some(context) = path_context {
+            context.validate().context("validate registered TURN path context")?;
+        }
 
         let mut sessions = self.sessions.write().await;
         let mut clients = self.clients.write().await;
         ensure!(!sessions.contains_key(&session_id), "TURN session already exists");
-        ensure!(!clients.contains_key(&client_ipv4), "client IPv4 address already registered");
+        let group_id = path_context.map(|context| context.group_id);
+        if let Some(route) = clients.get_mut(&client_ipv4) {
+            ensure!(group_id.is_some() && route.group_id == group_id,
+                "client IPv4 address is already owned by another tunnel group");
+            ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
+            let context = path_context.context("multipath route requires path context")?;
+            ensure!(
+                !route.sessions.iter().any(|id| sessions.get(id)
+                    .and_then(|entry| entry.path_context)
+                    .is_some_and(|existing| existing.path_id == context.path_id)),
+                "TURN path identifier is already registered for this client"
+            );
+            route.sessions.push(session_id);
+        } else {
+            clients.insert(client_ipv4, ClientRoute {
+                group_id,
+                sessions: vec![session_id],
+            });
+        }
         let session = Arc::new(GatewaySession {
             client_ipv4,
             relay_peer,
+            path_context,
             crypto: Mutex::new(SessionCrypto { opener, sealer }),
             last_activity: Mutex::new(Instant::now()),
         });
         sessions.insert(session_id, session);
-        clients.insert(client_ipv4, session_id);
         Ok(())
     }
 
@@ -188,14 +234,21 @@ impl TurnGateway {
             let mut sessions = self.sessions.write().await;
             let mut clients = self.clients.write().await;
             if let Some(session) = sessions.remove(&session_id) {
-                clients.remove(&session.client_ipv4);
-                Some(session.client_ipv4)
+                let mut group_empty = false;
+                if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                    route.sessions.retain(|id| *id != session_id);
+                    group_empty = route.sessions.is_empty();
+                }
+                if group_empty {
+                    clients.remove(&session.client_ipv4);
+                }
+                Some((session.client_ipv4, session.path_context, group_empty))
             } else {
                 None
             }
         };
-        if let Some(address) = removed {
-            self.release_virtual_ipv4(address).await;
+        if let Some((address, path_context, group_empty)) = removed {
+            self.release_session_lease(address, path_context, group_empty).await;
             true
         } else {
             false
@@ -208,28 +261,50 @@ impl TurnGateway {
         let expired = {
             let mut sessions = self.sessions.write().await;
             let mut clients = self.clients.write().await;
-            let expired: Vec<([u8; 8], Ipv4Addr)> = sessions.iter()
+            let expired_ids: Vec<[u8; 8]> = sessions.iter()
                 .filter_map(|(session_id, session)| {
                     let last = session.last_activity.lock().ok().map(|value| *value)?;
-                    (now.saturating_duration_since(last) >= idle_timeout)
-                        .then_some((*session_id, session.client_ipv4))
+                    (now.saturating_duration_since(last) >= idle_timeout).then_some(*session_id)
                 })
                 .collect();
-            for (session_id, address) in &expired {
-                sessions.remove(session_id);
-                clients.remove(address);
+            let mut leases = Vec::with_capacity(expired_ids.len());
+            for session_id in expired_ids {
+                if let Some(session) = sessions.remove(&session_id) {
+                    let mut group_empty = false;
+                    if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                        route.sessions.retain(|id| *id != session_id);
+                        group_empty = route.sessions.is_empty();
+                    }
+                    if group_empty {
+                        clients.remove(&session.client_ipv4);
+                    }
+                    leases.push((session.client_ipv4, session.path_context, group_empty));
+                }
             }
-            expired.into_iter().map(|(_, address)| address).collect::<Vec<_>>()
+            leases
         };
-        for address in &expired {
-            self.release_virtual_ipv4(*address).await;
+        let mut released = Vec::new();
+        for (address, path_context, group_empty) in expired {
+            self.release_session_lease(address, path_context, group_empty).await;
+            if group_empty {
+                released.push(address);
+            }
         }
-        expired
+        released
     }
 
-    async fn release_virtual_ipv4(&self, address: Ipv4Addr) {
+    async fn release_session_lease(
+        &self,
+        address: Ipv4Addr,
+        path_context: Option<TurnPathContext>,
+        group_empty: bool,
+    ) {
         if let Some(service) = self.handshake.lock().await.as_mut() {
-            service.release_virtual_ipv4(address);
+            if let Some(context) = path_context {
+                service.release_path(context);
+            } else if group_empty {
+                service.release_virtual_ipv4(address);
+            }
         }
     }
 
@@ -334,10 +409,13 @@ impl TurnGateway {
         let destination = Ipv4Addr::new(
             packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19],
         );
-        let session_id = self.clients.read().await.get(&destination).copied()
-            .context("no active TURN session for packet destination")?;
+        let route = self.clients.read().await.get(&destination).cloned()
+            .context("no active TURN session group for packet destination")?;
+        let selected = flow_hash(&packet.packet) as usize % route.sessions.len().max(1);
+        let session_id = *route.sessions.get(selected)
+            .context("TURN session group has no active paths")?;
         let session = self.sessions.read().await.get(&session_id).cloned()
-            .context("TURN session disappeared during downlink routing")?;
+            .context("TURN path disappeared during downlink routing")?;
         let encoded = {
             let mut crypto = session.crypto.lock().map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
             crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
@@ -364,6 +442,26 @@ impl TurnGateway {
             downlink_sent: self.counters.downlink_sent.load(Ordering::Relaxed),
         }
     }
+}
+
+fn flow_hash(packet: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    if packet.len() < 20 {
+        packet.hash(&mut hasher);
+        return hasher.finish();
+    }
+    packet[12..20].hash(&mut hasher);
+    packet[9].hash(&mut hasher);
+    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+    if fragment & 0x1fff != 0 {
+        packet[4..6].hash(&mut hasher);
+    } else {
+        let header_len = usize::from(packet[0] & 0x0f) * 4;
+        if (packet[9] == 6 || packet[9] == 17) && packet.len() >= header_len + 4 {
+            packet[header_len..header_len + 4].hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 #[cfg(test)]
