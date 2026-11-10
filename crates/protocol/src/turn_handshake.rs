@@ -10,6 +10,7 @@ use crate::{
         NoiseClientFinish, NoiseClientHandshake, NoiseServerHandshake,
         NoiseServerKeyPair, SessionFrameKeys, SessionHandshakeError,
     },
+    turn_path_context::TurnPathContext,
 };
 use thiserror::Error;
 
@@ -46,6 +47,29 @@ impl TurnHandshakeClient {
             return Err(TurnHandshakeError::HandshakeIdMismatch);
         }
         let (noise, message) = NoiseClientHandshake::new(pinned_server_key, credential)?;
+        let datagram = HandshakeEnvelope {
+            phase: HandshakePhase::ClientInit,
+            handshake_id,
+            payload: message,
+        }.encode()?;
+        Ok((Self {
+            handshake_id,
+            noise: Some(noise),
+            pending_auth: None,
+        }, datagram))
+    }
+
+    pub fn new_with_path_context(
+        pinned_server_key: &[u8],
+        credential: &[u8],
+        context: TurnPathContext,
+        handshake_id: [u8; 16],
+    ) -> Result<(Self, Vec<u8>), TurnHandshakeError> {
+        if handshake_id.iter().all(|byte| *byte == 0) {
+            return Err(TurnHandshakeError::HandshakeIdMismatch);
+        }
+        let (noise, message) =
+            NoiseClientHandshake::new_with_path_context(pinned_server_key, credential, context)?;
         let datagram = HandshakeEnvelope {
             phase: HandshakePhase::ClientInit,
             handshake_id,
@@ -174,6 +198,20 @@ impl TurnHandshakeServer {
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys), TurnHandshakeError> {
+        let (response, keys, _) = self.receive_client_finish_with_path_context(
+            datagram,
+            verify_credential,
+            acknowledgement_payload,
+        )?;
+        Ok((response, keys))
+    }
+
+    pub fn receive_client_finish_with_path_context(
+        &mut self,
+        datagram: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        acknowledgement_payload: &[u8],
+    ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         if envelope.phase != HandshakePhase::ClientFinish {
             return Err(TurnHandshakeError::UnexpectedPhase);
@@ -182,14 +220,18 @@ impl TurnHandshakeServer {
             return Err(TurnHandshakeError::HandshakeIdMismatch);
         }
         let noise = self.noise.take().ok_or(TurnHandshakeError::InvalidState)?;
-        let (acknowledgement, keys) =
-            noise.receive_client_finish_with_payload(&envelope.payload, verify_credential, acknowledgement_payload)?;
+        let (acknowledgement, keys, path_context) =
+            noise.receive_client_finish_with_path_context(
+                &envelope.payload,
+                verify_credential,
+                acknowledgement_payload,
+            )?;
         let response = HandshakeEnvelope {
             phase: HandshakePhase::ServerAck,
             handshake_id: envelope.handshake_id,
             payload: acknowledgement,
         }.encode()?;
-        Ok((response, keys))
+        Ok((response, keys, path_context))
     }
 }
 
@@ -214,6 +256,36 @@ mod tests {
         ).unwrap();
         let client_keys = client.receive_server_ack(&server_ack).unwrap();
 
+        assert_eq!(client_keys.session_id(), server_keys.session_id());
+    }
+
+    #[test]
+    fn authenticates_path_context_inside_noise_handshake() {
+        let keypair = NoiseServerKeyPair::generate().unwrap();
+        let credential = b"test-path-credential";
+        let context = TurnPathContext {
+            group_id: [0x37; 16],
+            path_id: 1,
+            path_count: 3,
+        };
+        let (mut client, client_init) = TurnHandshakeClient::new_with_path_context(
+            keypair.public_key(),
+            credential,
+            context,
+            [0x5b; 16],
+        ).unwrap();
+        let mut server = TurnHandshakeServer::new(&keypair).unwrap();
+        let response = server.receive_client_init(&client_init).unwrap();
+        let finish = client.receive_server_response(&response).unwrap();
+        let (ack, server_keys, received_context) = server
+            .receive_client_finish_with_path_context(
+                &finish,
+                |candidate| candidate == credential,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(received_context, Some(context));
+        let client_keys = client.receive_server_ack(&ack).unwrap();
         assert_eq!(client_keys.session_id(), server_keys.session_id());
     }
 
