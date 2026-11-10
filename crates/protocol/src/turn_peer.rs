@@ -128,6 +128,14 @@ impl TurnPeerRegistry {
         self.permissions.get(&peer_ip).is_some_and(|expires_at| now < *expires_at)
     }
 
+    pub fn permission_expires_at(&self, peer_ip: IpAddr) -> Option<Instant> {
+        self.permissions.get(&peer_ip).copied()
+    }
+
+    pub fn channel_expires_at(&self, channel_number: u16) -> Option<Instant> {
+        self.channels.get(&channel_number).map(|binding| binding.expires_at)
+    }
+
     pub fn channel_for_peer(&mut self, peer: SocketAddr, now: Instant) -> Option<u16> {
         self.expire(now);
         self.peer_channels.get(&peer).copied()
