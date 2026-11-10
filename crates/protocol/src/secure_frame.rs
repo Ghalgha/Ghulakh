@@ -4,6 +4,8 @@
 //! agreement. This module never derives keys from TURN passwords or credentials.
 //! Use independent directional keys and nonce prefixes for each session.
 
+use zeroize::Zeroize;
+
 use chacha20poly1305::{
     aead::{AeadInPlace, KeyInit},
     ChaCha20Poly1305, Key, Nonce, Tag,
@@ -121,13 +123,15 @@ impl FrameSealer {
     }
 
     pub fn new(
-        key: [u8; 32],
+        mut key: [u8; 32],
         nonce_prefix: [u8; 4],
         session_id: [u8; 8],
         direction: FrameDirection,
     ) -> Self {
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        key.zeroize();
         Self {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
+            cipher,
             nonce_prefix,
             session_id,
             direction,
@@ -177,13 +181,15 @@ impl FrameOpener {
     }
 
     pub fn new(
-        key: [u8; 32],
+        mut key: [u8; 32],
         nonce_prefix: [u8; 4],
         session_id: [u8; 8],
         expected_direction: FrameDirection,
     ) -> Self {
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        key.zeroize();
         Self {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(&key)),
+            cipher,
             nonce_prefix,
             session_id,
             expected_direction,
