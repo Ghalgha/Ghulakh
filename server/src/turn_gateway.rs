@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{Atomic64, Ordering},
         Arc, Mutex,
     },
 };
@@ -26,7 +26,6 @@ use tokio::{
 
 const TUN_INGRESS_CAPACITY: usize = 512;
 const UDP_BUFFER_SIZE: usize = 65_507;
-const CLIENT_IPV4_POOL_SIZE: u32 = 65_534;
 
 struct SessionCrypto {
     opener: FrameOpener,
@@ -68,7 +67,6 @@ pub struct TurnGateway {
     clients: RwLock<HashMap<Ipv4Addr, [u8; 8]>>,
     tun_ingress: mpsc::Sender<DataDatagram>,
     handshake: AsyncMutex<Option<super::turn_handshake_service::TurnHandshakeService>>,
-    next_client_host: AtomicU32,
     counters: Counters,
 }
 
@@ -85,7 +83,6 @@ impl TurnGateway {
                 clients: RwLock::new(HashMap::new()),
                 tun_ingress,
                 handshake: AsyncMutex::new(None),
-                next_client_host: AtomicU32::new(2),
                 counters: Counters::default(),
             }),
             tun_receiver,
@@ -107,12 +104,6 @@ impl TurnGateway {
         ensure!(slot.is_none(), "TURN handshake service is already installed");
         *slot = Some(service);
         Ok(())
-    }
-
-    fn allocate_client_ipv4(&self) -> Result<Ipv4Addr> {
-        let host = self.next_client_host.fetch_add(1, Ordering::Relaxed);
-        ensure!(host < CLIENT_IPV4_POOL_SIZE, "TURN client IPv4 pool exhausted");
-        Ok(Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8))
     }
 
     async fn process_handshake(
@@ -137,7 +128,7 @@ impl TurnGateway {
         ensure!(sent == response.len(), "partial TURN handshake response send");
 
         if let Some(established) = established {
-            let client_ipv4 = self.allocate_client_ipv4()?;
+            let client_ipv4 = established.config.virtual_ipv4;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
             self.register_session(
