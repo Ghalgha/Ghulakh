@@ -50,6 +50,8 @@ pub struct TurnAuthContext {
 }
 
 impl TurnAuthContext {
+    /// Construct the legacy SHA-1 integrity profile without password-algorithm
+    /// negotiation. RFC 8489 SHA-256 profiles must use new_with_password_profile.
     pub fn new(
         username: String,
         realm: String,
@@ -57,6 +59,9 @@ impl TurnAuthContext {
         integrity_key: Vec<u8>,
         algorithm: TurnIntegrityAlgorithm,
     ) -> Result<Self, TurnAuthError> {
+        if algorithm != TurnIntegrityAlgorithm::Sha1 {
+            return Err(TurnAuthError::InvalidPasswordProfile);
+        }
         for value in [&username, &realm, &nonce] {
             if value.is_empty()
                 || value.len() > 763
@@ -305,6 +310,17 @@ mod tests {
         let mut invalid = request();
         invalid.attributes.push(StunAttribute { kind: ATTR_USERNAME, value: b"forged".to_vec() });
         assert!(matches!(auth.sign_request(&invalid), Err(TurnAuthError::InvalidRequest)));
+    }
+
+    #[test]
+    fn requires_explicit_profile_for_sha256() {
+        assert!(matches!(
+            TurnAuthContext::new(
+                "user".into(), "realm".into(), "nonce".into(), vec![1; 32],
+                TurnIntegrityAlgorithm::Sha256,
+            ),
+            Err(TurnAuthError::InvalidPasswordProfile)
+        ));
     }
 
     #[test]
