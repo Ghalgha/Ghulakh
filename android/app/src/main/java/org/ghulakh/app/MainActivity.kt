@@ -51,6 +51,7 @@ class MainActivity : Activity() {
         credentialInput = addField(content, "Индивидуальный ключ устройства", "Вставьте credential")
         credentialInput.inputType = android.text.InputType.TYPE_CLASS_TEXT or
             android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+        credentialInput.isSaveEnabled = false
 
         certificateStatus = TextView(this).apply {
             text = "Доверенный сертификат не выбран"
