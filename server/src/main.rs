@@ -1,12 +1,15 @@
 use anyhow::{bail, Context, Result};
 use ghulakh_protocol::{
-    validate_envelope, ControlEnvelope, ControlMessage, MAX_CONTROL_BODY, PROTOCOL_VERSION,
+    validate_envelope, validate_message, ControlEnvelope, ControlMessage, MAX_CONTROL_BODY,
+    PROTOCOL_VERSION,
 };
 use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
-use std::{env, fs, fs::File, io::BufReader, net::SocketAddr, sync::Arc};
+use std::{
+    env, fs, fs::File, io::BufReader, net::SocketAddr, sync::Arc, time::Duration,
+};
 use subtle::ConstantTimeEq;
 use tokio::io::AsyncWriteExt;
 
@@ -35,9 +38,12 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
         .context("configure TLS certificate")?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
 
-    let crypto =
-        QuicServerConfig::try_from(tls).context("configure QUIC TLS crypto")?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
+    let crypto = QuicServerConfig::try_from(tls).context("configure QUIC TLS crypto")?;
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    let mut transport = quinn::TransportConfig::default();
+    transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(16));
+    server_config.transport_config(Arc::new(transport));
+    Ok(server_config)
 }
 
 fn load_credential_hashes(path: &str) -> Result<Vec<[u8; 32]>> {
@@ -100,9 +106,12 @@ async fn handle_connection(
             Err(_) => break,
         };
 
-        let bytes = match recv.read_to_end(MAX_CONTROL_BODY).await {
-            Ok(bytes) => bytes,
-            Err(_) => {
+        let bytes = match tokio::time::timeout(
+            Duration::from_secs(15),
+            recv.read_to_end(MAX_CONTROL_BODY),
+        ).await {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(_)) | Err(_) => {
                 let _ = connection.close(0u32.into(), b"invalid control stream");
                 bail!("control stream read failed");
             }
@@ -117,12 +126,13 @@ async fn handle_connection(
             serde_json::from_slice(&bytes).context("decode control envelope")?;
         validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
             .context("validate control envelope")?;
+        validate_message(&envelope.message).context("validate control message")?;
 
         let response = match envelope.message {
             ControlMessage::ClientHello {
                 credential,
                 request_id,
-            } => {
+            } if !authenticated => {
                 if !credential_matches(&credential, credential_hashes.as_slice()) {
                     let _ = connection.close(0u32.into(), b"authentication failed");
                     bail!("client authentication failed");
