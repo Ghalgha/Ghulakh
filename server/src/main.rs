@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use ghulakh_protocol::{validate_envelope, ControlMessage, PROTOCOL_VERSION, MAX_CONTROL_BODY};
+use ghulakh_protocol::{validate_envelope, ControlEnvelope, ControlMessage, PROTOCOL_VERSION, MAX_CONTROL_BODY};
 use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -89,12 +89,12 @@ async fn handle_connection(
             bail!("control message exceeds limit");
         }
 
-        let message: ControlMessage = serde_json::from_slice(&bytes)
-            .context("decode control message")?;
-        validate_envelope(PROTOCOL_VERSION, bytes.len(), request_id(&message))
-            .context("validate control message")?;
+        let envelope: ControlEnvelope = serde_json::from_slice(&bytes)
+            .context("decode control envelope")?;
+        validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
+            .context("validate control envelope")?;
 
-        let response = match message {
+        let response = match envelope.message {
             ControlMessage::ClientHello { credential, request_id } => {
                 if !credential_matches(&credential, credential_hashes.as_slice()) {
                     let _ = connection.close(0u32.into(), b"authentication failed");
@@ -116,7 +116,10 @@ async fn handle_connection(
             }
         };
 
-        let encoded = serde_json::to_vec(&response)?;
+        let encoded = serde_json::to_vec(&ControlEnvelope {
+            version: PROTOCOL_VERSION,
+            message: response,
+        })?;
         if encoded.len() > MAX_CONTROL_BODY {
             bail!("internal response exceeds protocol limit");
         }
