@@ -45,7 +45,7 @@
 
 Supervisor ограничивает повторное согласование тремя challenge retries, обрабатывает первоначальный 401 при Allocate и проверенный 438 при Refresh/CreatePermission/ChannelBind, предоставляет сериализованные control operations и maintenance loop. Он планирует обновление allocation, permissions (с запасом 60 секунд до истечения) и channel bindings (с запасом 120 секунд), повторно устанавливая peer state до истечения срока. Ошибки других классов не запускают автоматические повторные попытки. Локальные permission/channel записи удаляются по истечении их сроков.
 
-Это пока control-plane supervisor, а не полноценный долгоживущий socket actor: `TurnClientDriver::transact` всё ещё временно владеет receive loop во время отдельной control-операции. Непрерывный приём ChannelData и одновременная обработка control/data сообщений должны быть реализованы следующим отдельным изменением через один socket reader и bounded dispatch, а не запуском второго receive loop.
+Supervisor остаётся единственным владельцем control driver. `TurnClientDriver` теперь запускает `TurnSocketActor`: единственный reader/writer task маршрутизирует STUN control и data datagrams в независимые bounded queues. Driver получает control events из своей очереди, а `take_data_receiver()` передаёт data queue отдельному dataplane consumer, который может работать одновременно с control operations. Actor сохраняет исходные wire bytes для последующей MESSAGE-INTEGRITY проверки; transaction matching и проверка целостности остаются у driver. Старый per-transaction receive loop удалён.
 
 ## Единый UDP socket actor
 
@@ -53,7 +53,7 @@ Supervisor ограничивает повторное согласование 
 
 Actor классифицирует UDP ChannelData по корректному RFC framing и STUN сообщения по codec; STUN Data indications направляются в data queue. Он не подтверждает транзакции и не проверяет MESSAGE-INTEGRITY: эти действия остаются у control-plane owner. Отправка сериализована actor task, а Android-путь с заранее защищённым socket descriptor остаётся в UDP adapter.
 
-На этом этапе actor реализован и покрыт mock-UDP тестами на параллельную маршрутизацию control/data, Data indications и отбрасывание некорректного ChannelData. **Он пока не подключён к `TurnClientDriver` и supervisor**: текущий driver всё ещё использует собственный временный receive loop. Следующий шаг — перевести driver на actor handle/control receiver, передать data receiver отдельному потребителю и только после этого удалить старый per-transaction receive loop. До завершения этой интеграции непрерывный TURN data path не считается готовым.
+Actor подключён к `TurnClientDriver`: control transactions отправляются через bounded actor command queue и получают ответы через единственный control receiver; data receiver может быть передан отдельному dataplane consumer. Это устраняет конкурирующие socket receive loops. Сам data receiver пока не подключён к `TurnDataReceiver`, Android TUN и серверному gateway, поэтому сквозной TURN data path ещё не готов.
 
 ## Проверка управляющих ответов
 
