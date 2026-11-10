@@ -357,14 +357,25 @@ impl NoiseServerHandshake {
     }
 
     pub fn receive_client_finish_with_path_context(
-        mut self,
+        self,
         message: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), SessionHandshakeError> {
-        if message.len() > MAX_HANDSHAKE_MESSAGE
-            || AUTH_ACCEPTED.len() + acknowledgement_payload.len() > MAX_HANDSHAKE_MESSAGE
-        {
+        self.receive_client_finish_with_path_context_builder(
+            message,
+            verify_credential,
+            |_| Ok(acknowledgement_payload.to_vec()),
+        )
+    }
+
+    pub fn receive_client_finish_with_path_context_builder(
+        mut self,
+        message: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        build_acknowledgement: impl FnOnce(Option<TurnPathContext>) -> Result<Vec<u8>, SessionHandshakeError>,
+    ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), SessionHandshakeError> {
+        if message.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
         let mut state = self.state.take().ok_or(SessionHandshakeError::InvalidState)?;
@@ -391,12 +402,18 @@ impl NoiseServerHandshake {
             return Err(SessionHandshakeError::CredentialRejected);
         }
 
+        // Allocate the group address only after the encrypted credential has
+        // been verified, but before the authenticated ServerAck is produced.
+        let acknowledgement_payload = build_acknowledgement(path_context)?;
+        if AUTH_ACCEPTED.len() + acknowledgement_payload.len() > MAX_HANDSHAKE_MESSAGE {
+            return Err(SessionHandshakeError::MessageTooLarge);
+        }
         let keys = SessionFrameKeys::derive(state.get_handshake_hash())?;
         let mut transport = state.into_transport_mode().map_err(noise_error)?;
         let mut acknowledgement = [0u8; MAX_HANDSHAKE_MESSAGE];
         let mut acknowledgement_plaintext = Vec::with_capacity(AUTH_ACCEPTED.len() + acknowledgement_payload.len());
         acknowledgement_plaintext.extend_from_slice(AUTH_ACCEPTED);
-        acknowledgement_plaintext.extend_from_slice(acknowledgement_payload);
+        acknowledgement_plaintext.extend_from_slice(&acknowledgement_payload);
         let ack_length = transport.write_message(&acknowledgement_plaintext, &mut acknowledgement)
             .map_err(noise_error)?;
         Ok((acknowledgement[..ack_length].to_vec(), keys, path_context))
