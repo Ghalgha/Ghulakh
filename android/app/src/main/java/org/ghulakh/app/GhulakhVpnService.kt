@@ -36,7 +36,13 @@ class GhulakhVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, notification("Подключение к серверу"))
+        try {
+            startForeground(NOTIFICATION_ID, notification("Подключение к серверу"))
+        } catch (error: Exception) {
+            Log.e(TAG, "Unable to start foreground VPN service", error)
+            stopSelf()
+            return START_NOT_STICKY
+        }
         if (running.compareAndSet(false, true)) {
             isActive = true
             worker = Thread({ runTunnel() }, "ghulakh-vpn-session").apply { start() }
