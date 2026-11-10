@@ -17,11 +17,11 @@ data class ConnectionProfile(
     val serverName: String,
     val credential: String,
     val rootCertificateDer: ByteArray,
-    val turnCredentialsJson: String = "",
+    val vkAccessToken: String = "",
     val pinnedServerPublicKeyHex: String = "",
 )
 
-/** Stores device credentials, VK TURN credentials and the pinned Noise key encrypted with Android Keystore. */
+/** Stores the VK access token, tunnel credential and pinned Noise key encrypted with Android Keystore. */
 class CredentialStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
@@ -29,28 +29,20 @@ class CredentialStore(context: Context) {
         require(profile.host.isNotBlank())
         require(profile.port in 1..65535)
         require(profile.credential.isNotBlank())
-        require(profile.turnCredentialsJson.isNotBlank())
+        require(profile.vkAccessToken.isNotBlank())
         require(profile.pinnedServerPublicKeyHex.matches(Regex("[0-9a-fA-F]{64}")))
 
         val credential = encrypt(profile.credential.toByteArray(StandardCharsets.UTF_8))
-        val certificate = if (profile.rootCertificateDer.isNotEmpty()) {
-            encrypt(profile.rootCertificateDer)
-        } else {
-            null
-        }
-        val turnCredentials = encrypt(profile.turnCredentialsJson.toByteArray(StandardCharsets.UTF_8))
+        val vkToken = encrypt(profile.vkAccessToken.toByteArray(StandardCharsets.UTF_8))
         val pinnedKey = encrypt(profile.pinnedServerPublicKeyHex.lowercase().toByteArray(StandardCharsets.UTF_8))
 
         preferences.edit()
             .putString("host", profile.host)
             .putInt("port", profile.port)
-            .putString("server_name", profile.serverName)
             .putString("credential_iv", credential.first)
             .putString("credential_data", credential.second)
-            .putString("certificate_iv", certificate?.first)
-            .putString("certificate_data", certificate?.second)
-            .putString("turn_credentials_iv", turnCredentials.first)
-            .putString("turn_credentials_data", turnCredentials.second)
+            .putString("vk_access_token_iv", vkToken.first)
+            .putString("vk_access_token_data", vkToken.second)
             .putString("pinned_key_iv", pinnedKey.first)
             .putString("pinned_key_data", pinnedKey.second)
             .apply()
@@ -59,38 +51,27 @@ class CredentialStore(context: Context) {
     fun load(): ConnectionProfile? {
         val host = preferences.getString("host", null) ?: return null
         val port = preferences.getInt("port", 0)
-        val serverName = preferences.getString("server_name", "") ?: ""
         val credentialIv = preferences.getString("credential_iv", null) ?: return null
         val credentialData = preferences.getString("credential_data", null) ?: return null
-        val certificateIv = preferences.getString("certificate_iv", null)
-        val certificateData = preferences.getString("certificate_data", null)
-        val turnCredentialsIv = preferences.getString("turn_credentials_iv", null)
-        val turnCredentialsData = preferences.getString("turn_credentials_data", null)
-        val pinnedKeyIv = preferences.getString("pinned_key_iv", null)
-        val pinnedKeyData = preferences.getString("pinned_key_data", null)
+        val vkTokenIv = preferences.getString("vk_access_token_iv", null) ?: return null
+        val vkTokenData = preferences.getString("vk_access_token_data", null) ?: return null
+        val pinnedKeyIv = preferences.getString("pinned_key_iv", null) ?: return null
+        val pinnedKeyData = preferences.getString("pinned_key_data", null) ?: return null
 
         val credential = decrypt(credentialIv, credentialData)
             .let { String(it, StandardCharsets.UTF_8) }
-        val certificate = if (certificateIv != null && certificateData != null) {
-            decrypt(certificateIv, certificateData)
-        } else {
-            byteArrayOf()
-        }
-        val turnCredentials = if (turnCredentialsIv != null && turnCredentialsData != null) {
-            decrypt(turnCredentialsIv, turnCredentialsData)
-                .let { String(it, StandardCharsets.UTF_8) }
-        } else {
-            ""
-        }
-        val pinnedKey = if (pinnedKeyIv != null && pinnedKeyData != null) {
-            decrypt(pinnedKeyIv, pinnedKeyData)
-                .let { String(it, StandardCharsets.UTF_8) }
-        } else {
-            ""
-        }
+        val vkAccessToken = decrypt(vkTokenIv, vkTokenData)
+            .let { String(it, StandardCharsets.UTF_8) }
+        val pinnedKey = decrypt(pinnedKeyIv, pinnedKeyData)
+            .let { String(it, StandardCharsets.UTF_8) }
         return ConnectionProfile(
-            host, port, serverName, credential, certificate,
-            turnCredentials, pinnedKey,
+            host = host,
+            port = port,
+            serverName = "",
+            credential = credential,
+            rootCertificateDer = byteArrayOf(),
+            vkAccessToken = vkAccessToken,
+            pinnedServerPublicKeyHex = pinnedKey,
         )
     }
 
