@@ -21,6 +21,11 @@
 
 Эти компоненты являются библиотечными примитивами и моделями состояния. Их наличие не означает, что сетевой TURN driver или сквозной туннель уже собран.
 
+## Зафиксированное проектирование
+
+- `docs/TURN_DRIVER_DESIGN.md` описывает ownership единственной allocation, сериализацию control state, обработку 401/438, границу credential/auth providers, data path, bounded queues и критерии готовности вертикального среза.
+- Выбран bounded Tokio queue + один control owner для первого среза. SPSC/ring buffer и packet pool остаются кандидатами для benchmark, а не преждевременной оптимизацией.
+
 ## Что ещё не реализовано в целевом пути
 
 - Реальное получение и обновление VK Calls credentials.
