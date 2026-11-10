@@ -1,4 +1,5 @@
 pub mod turn_gateway;
+pub mod turn_handshake_service;
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
