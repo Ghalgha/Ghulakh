@@ -165,12 +165,19 @@ impl TransactionManager {
         if pending.destination != source || pending.method != response.method {
             return None;
         }
-        let pending = self.pending.remove(&response.transaction_id)?;
         Some(MatchedResponse {
             transaction_id: response.transaction_id,
             response,
             was_retransmitted: pending.retransmitted,
         })
+    }
+
+    /// Complete a transaction only after the caller has verified response
+    /// integrity and accepted the corresponding state transition. Keeping the
+    /// request pending until then prevents unauthenticated datagrams from
+    /// cancelling a live transaction.
+    pub fn complete(&mut self, transaction_id: &[u8; 12]) -> bool {
+        self.pending.remove(transaction_id).is_some()
     }
 
     /// Produce due retransmissions and timeout events. No I/O or sleeping occurs here.
@@ -287,6 +294,8 @@ mod tests {
         let matched = manager.accept_response(response, endpoint()).unwrap();
         assert_eq!(matched.transaction_id, id);
         assert!(!matched.was_retransmitted);
+        assert_eq!(manager.len(), 1);
+        assert!(manager.complete(&id));
         assert!(manager.is_empty());
     }
 
@@ -304,6 +313,8 @@ mod tests {
             attributes: vec![],
         };
         assert!(manager.accept_response(response, endpoint()).unwrap().was_retransmitted);
+        assert_eq!(manager.len(), 1);
+        assert!(manager.complete(&id));
     }
 
     #[test]
