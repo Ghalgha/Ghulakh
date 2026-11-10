@@ -1,6 +1,6 @@
 //! Asynchronous TURN control driver for one VK Calls relay allocation.
 //!
-//! The driver owns the UDP adapter and serializes control transactions. It does
+//! The driver owns a single-reader socket actor and serializes control transactions. It does
 //! not derive TURN keys: callers supply an authenticated context after obtaining
 //! and validating a 401 challenge. A challenge is returned as structured data so
 //! the credential/profile layer can construct the next context without guessing.
