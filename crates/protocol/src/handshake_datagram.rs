@@ -387,22 +387,40 @@ impl HandshakeDatagramDriver {
         Ok(envelope.handshake_id)
     }
 
-    /// Returns only responses matching the exact peer, identifier and expected
-    /// phase. The caller must still authenticate the Noise payload.
-    pub fn accept_response(
-        &mut self,
+    /// Match a response without completing the transaction. The caller must
+    /// authenticate/process the Noise payload and call complete_response only
+    /// after accepting the corresponding state transition.
+    pub fn match_response(
+        &self,
         datagram: &[u8],
         source: SocketAddr,
     ) -> Result<bool, HandshakeDriverError> {
         let envelope = HandshakeEnvelope::decode(datagram)
             .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        Ok(self.pending.values().any(|pending| {
+            pending.destination == source
+                && pending.response_phase == envelope.phase
+                && self.pending.iter().any(|(key, _)| key.0 == envelope.handshake_id
+                    && key.2 == source)
+        }))
+    }
+
+    /// Complete only after the caller has authenticated the Noise message and
+    /// accepted the state transition. Invalid or unauthenticated packets must
+    /// leave the original request eligible for retransmission.
+    pub fn complete_response(
+        &mut self,
+        handshake_id: &[u8; 16],
+        response_phase: HandshakePhase,
+        source: SocketAddr,
+    ) -> bool {
         let key = self.pending.iter().find_map(|(key, pending)| {
-            (key.0 == envelope.handshake_id
+            (key.0 == *handshake_id
                 && pending.destination == source
-                && pending.response_phase == envelope.phase)
+                && pending.response_phase == response_phase)
                 .then_some(*key)
         });
-        Ok(key.is_some_and(|key| self.pending.remove(&key).is_some()))
+        key.is_some_and(|key| self.pending.remove(&key).is_some())
     }
 
     pub fn poll(&mut self, now: Instant) -> Vec<HandshakeDriverEvent> {
@@ -684,12 +702,14 @@ mod tests {
         driver.register_request(
             request, peer(), HandshakePhase::ServerResponse, now,
         ).unwrap();
-        assert!(!driver.accept_response(
+        assert!(!driver.match_response(
             &valid, "192.0.2.45:50000".parse().unwrap(),
         ).unwrap());
         let wrong_phase = envelope(HandshakePhase::ServerAck, [8; 16], b"bad");
-        assert!(!driver.accept_response(&wrong_phase, peer()).unwrap());
-        assert!(driver.accept_response(&valid, peer()).unwrap());
+        assert!(!driver.match_response(&wrong_phase, peer()).unwrap());
+        assert!(driver.match_response(&valid, peer()).unwrap());
+        assert_eq!(driver.pending_len(), 1);
+        assert!(driver.complete_response(&[8; 16], HandshakePhase::ServerResponse, peer()));
         assert_eq!(driver.pending_len(), 0);
     }
 
