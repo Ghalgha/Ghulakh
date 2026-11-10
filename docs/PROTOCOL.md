@@ -40,6 +40,7 @@ Envelope:
       "session_id": "<random-session-id>",
       "client_ipv4": "10.77.0.2",
       "tunnel_enabled": false,
+      "forwarding_enabled": false,
       "request_id": "client-generated-id"
     }
   }
@@ -48,7 +49,7 @@ Envelope:
 
 Поддерживаемые типы:
 - `client_hello` — аутентификация клиента;
-- `server_hello` — подтверждение аутентификации, случайный идентификатор сессии, назначенный IPv4-адрес и признак доступности серверного TUN;
+- `server_hello` — подтверждение аутентификации, случайный идентификатор сессии, назначенный IPv4-адрес, признак доступности серверного TUN и административное подтверждение готовности IP forwarding/NAT/firewall;
 - `ping` / `pong` — проверка управляющего канала;
 - `close` — закрытие соединения.
 
