@@ -65,6 +65,7 @@ impl QuicClient {
         let mut transport = quinn::TransportConfig::default();
         transport.datagram_receive_buffer_size(Some(DATAGRAM_BUFFER));
         transport.datagram_send_buffer_size(DATAGRAM_BUFFER);
+        transport.keep_alive_interval(Some(Duration::from_secs(15)));
         client_config.transport_config(Arc::new(transport));
 
         let endpoint = match options.udp_socket {
