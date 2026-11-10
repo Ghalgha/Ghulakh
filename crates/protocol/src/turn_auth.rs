@@ -4,8 +4,9 @@
 //! not derive keys or decide which password algorithm a remote service uses.
 
 use crate::stun::{
-    StunClass, StunMessage, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM,
+    StunAttribute, StunClass, StunMessage, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_PASSWORD_ALGORITHMS, ATTR_REALM,
 };
+use crate::turn_password::parse_password_algorithms;
 
 const MAX_CHALLENGE_TEXT: usize = 763;
 
@@ -14,6 +15,18 @@ pub struct TurnChallenge {
     pub code: u16,
     pub realm: String,
     pub nonce: String,
+    /// Raw server offer retained for the authenticated follow-up request.
+    /// RFC 8489 requires echoing this attribute to prevent algorithm downgrade.
+    pub password_algorithms: Option<Vec<u8>>,
+}
+
+impl TurnChallenge {
+    pub fn password_algorithms_attribute(&self) -> Option<StunAttribute> {
+        self.password_algorithms.as_ref().map(|value| StunAttribute {
+            kind: ATTR_PASSWORD_ALGORITHMS,
+            value: value.clone(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -30,6 +43,8 @@ pub enum TurnAuthError {
     UnsupportedChallengeCode,
     #[error("challenge text is empty, oversized, or not UTF-8")]
     InvalidChallengeText,
+    #[error("PASSWORD-ALGORITHMS attribute is malformed or duplicated")]
+    InvalidPasswordAlgorithms,
 }
 
 fn unique_attribute(message: &StunMessage, kind: u16) -> Result<&[u8], TurnAuthError> {
@@ -77,7 +92,19 @@ pub fn parse_turn_challenge(
     }
     let realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
     let nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
-    Ok(TurnChallenge { code, realm, nonce })
+    let password_algorithms = match message.attributes.iter()
+        .filter(|attribute| attribute.kind == ATTR_PASSWORD_ALGORITHMS)
+        .collect::<Vec<_>>().as_slice()
+    {
+        [] => None,
+        [attribute] => {
+            parse_password_algorithms(&attribute.value)
+                .map_err(|_| TurnAuthError::InvalidPasswordAlgorithms)?;
+            Some(attribute.value.clone())
+        }
+        _ => return Err(TurnAuthError::InvalidPasswordAlgorithms),
+    };
+    Ok(TurnChallenge { code, realm, nonce, password_algorithms })
 }
 
 #[cfg(test)]
@@ -105,6 +132,7 @@ mod tests {
             assert_eq!(parsed.code, code);
             assert_eq!(parsed.realm, "turn.example.invalid");
             assert_eq!(parsed.nonce, "opaque-server-nonce");
+            assert_eq!(parsed.password_algorithms, None);
         }
     }
 
