@@ -548,7 +548,7 @@ mod tests {
             protected_socket,
             credentials,
             gateway_addr,
-            &pinned_key,
+            pinned_key,
             b"device-secret",
         ).await.unwrap();
         let config = client.config();
