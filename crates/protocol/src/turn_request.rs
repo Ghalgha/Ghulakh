@@ -128,10 +128,10 @@ pub fn channel_bind_request(
     ))
 }
 
-fn unique_attribute<'a>(
-    message: &'a StunMessage,
+fn unique_attribute(
+    message: &StunMessage,
     kind: u16,
-) -> Result<&'a [u8], TurnRequestError> {
+) -> Result<&[u8], TurnRequestError> {
     let mut matches = message.attributes.iter().filter(|a| a.kind == kind);
     let first = matches.next().ok_or(TurnRequestError::MissingOrDuplicateAttribute)?;
     if matches.next().is_some() {
