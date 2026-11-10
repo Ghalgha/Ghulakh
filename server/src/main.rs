@@ -535,6 +535,7 @@ fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
     Ok(())
 }
 
+#[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "--generate-noise-keypair") {
