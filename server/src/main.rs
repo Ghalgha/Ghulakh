@@ -437,11 +437,13 @@ async fn handle_connection(
                     DatagramDisposition::Accepted(packet) => {
                         valid_datagrams = valid_datagrams.saturating_add(1);
                         metrics.accepted.fetch_add(1, Ordering::Relaxed);
-                        if let Some(sender) = &tun_sender {
-                            if sender.try_send(packet).is_ok() {
-                                forwarded_datagrams = forwarded_datagrams.saturating_add(1);
-                            } else {
-                                queue_drops = queue_drops.saturating_add(1);
+                        if forwarding_enabled {
+                            if let Some(sender) = &tun_sender {
+                                if sender.try_send(packet).is_ok() {
+                                    forwarded_datagrams = forwarded_datagrams.saturating_add(1);
+                                } else {
+                                    queue_drops = queue_drops.saturating_add(1);
+                                }
                             }
                         }
                     }
@@ -464,12 +466,13 @@ async fn handle_connection(
 
     if valid_datagrams > 0 || rejected_datagrams > 0 {
         eprintln!(
-            "connection packets: valid={}, rejected={}, forwarded_to_tun={}, queue_drops={}, tun_enabled={}",
+            "connection packets: valid={}, rejected={}, forwarded_to_tun={}, queue_drops={}, tun_enabled={}, forwarding_enabled={}",
             valid_datagrams,
             rejected_datagrams,
             forwarded_datagrams,
             queue_drops,
-            tun_sender.is_some()
+            tun_sender.is_some(),
+            forwarding_enabled
         );
     }
     Ok(())
