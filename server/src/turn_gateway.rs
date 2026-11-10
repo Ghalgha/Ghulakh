@@ -293,6 +293,12 @@ impl TurnGateway {
                 return;
             }
         };
+        if plaintext.as_slice() == ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD {
+            if let Ok(mut last_activity) = session.last_activity.lock() {
+                *last_activity = Instant::now();
+            }
+            return;
+        }
         let packet = match DataDatagram::decode(&plaintext) {
             Ok(packet) if packet.kind == IpPacketKind::Ipv4 => packet,
             _ => {
