@@ -146,3 +146,8 @@ The protocol crate exposes an event-driven allocation state machine with Idle, A
 
 
 TURN 401 challenge parsing also preserves a valid raw `PASSWORD-ALGORITHMS` offer and exposes it as an attribute for the authenticated retry. This is required by RFC 8489 downgrade protection: the client must echo the server's offer in the next authenticated request. The opaque NONCE is retained unchanged; its service-specific security bits are not interpreted by this layer.
+
+
+### TURN ChannelData framing
+
+The UDP ChannelData codec validates the current RFC 8656 channel range `0x4000–0x4FFF`, exact declared payload length, and the UDP payload bound. It accepts both unpadded datagrams and the optional 0–3 bytes of padding permitted for UDP. The codec does not decide whether a channel is bound or whether its peer permission is active; those checks belong to the allocation/session layer.
