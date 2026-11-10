@@ -62,7 +62,7 @@ pub fn decode_channel_data(input: &[u8]) -> Result<ChannelData<'_>, ChannelDataE
     }
     Ok(ChannelData {
         channel_number,
-        data: &input[CHANNEL_DATA_HEADER_LEN..],
+        data: &input[CHANNEL_DATA_HEADER_LEN..CHANNEL_DATA_HEADER_LEN + declared_len],
     })
 }
 
