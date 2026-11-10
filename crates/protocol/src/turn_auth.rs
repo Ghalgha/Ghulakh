@@ -92,12 +92,11 @@ pub fn parse_turn_challenge(
     }
     let realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
     let nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
-    let password_algorithms = match message.attributes.iter()
-        .filter(|attribute| attribute.kind == ATTR_PASSWORD_ALGORITHMS)
-        .collect::<Vec<_>>().as_slice()
-    {
-        [] => None,
-        [attribute] => {
+    let mut offers = message.attributes.iter()
+        .filter(|attribute| attribute.kind == ATTR_PASSWORD_ALGORITHMS);
+    let password_algorithms = match (offers.next(), offers.next()) {
+        (None, None) => None,
+        (Some(attribute), None) => {
             parse_password_algorithms(&attribute.value)
                 .map_err(|_| TurnAuthError::InvalidPasswordAlgorithms)?;
             Some(attribute.value.clone())
@@ -177,6 +176,41 @@ mod tests {
         assert_eq!(
             parse_turn_challenge(&challenge(403), METHOD_ALLOCATE),
             Err(TurnAuthError::UnsupportedChallengeCode)
+        );
+    }
+
+    #[test]
+    fn preserves_password_algorithm_offer_for_authenticated_retry() {
+        let mut response = challenge(401);
+        let offer = vec![0, 1, 0, 0, 0, 2, 0, 0];
+        response.attributes.push(StunAttribute {
+            kind: ATTR_PASSWORD_ALGORITHMS,
+            value: offer.clone(),
+        });
+        let parsed = parse_turn_challenge(&response, METHOD_ALLOCATE).unwrap();
+        assert_eq!(parsed.password_algorithms, Some(offer.clone()));
+        assert_eq!(
+            parsed.password_algorithms_attribute().unwrap(),
+            StunAttribute { kind: ATTR_PASSWORD_ALGORITHMS, value: offer }
+        );
+
+        response.attributes.push(response.attributes.last().unwrap().clone());
+        assert_eq!(
+            parse_turn_challenge(&response, METHOD_ALLOCATE),
+            Err(TurnAuthError::InvalidPasswordAlgorithms)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_password_algorithm_offer() {
+        let mut response = challenge(401);
+        response.attributes.push(StunAttribute {
+            kind: ATTR_PASSWORD_ALGORITHMS,
+            value: vec![0, 1, 0],
+        });
+        assert_eq!(
+            parse_turn_challenge(&response, METHOD_ALLOCATE),
+            Err(TurnAuthError::InvalidPasswordAlgorithms)
         );
     }
 
