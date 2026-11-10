@@ -18,7 +18,7 @@ sha2 = "0.10"
 subtle = "2"
 ghulakh-protocol = { path = "../crates/protocol" }
 tokio = { version = "1", features = ["full"] }
-tun-rs = { version = "2.8.18", default-features = false, features = ["async"] }
+tun-rs = { version = "2.8.18", default-features = false, features = ["async_tokio"] }
 
 [dev-dependencies]
 ghulakh-transport = { path = "../crates/transport" }
