@@ -54,7 +54,8 @@ class GhulakhVpnService : VpnService() {
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
-            vkSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+            val callsSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+            vkSession = callsSession
             val transport = NativeTransport()
             nativeTransport = transport
 
@@ -62,7 +63,7 @@ class GhulakhVpnService : VpnService() {
                 this,
                 profile.host,
                 profile.port,
-                vkSession.turnCredentialsJson,
+                callsSession.turnCredentialsJson,
                 decodeHexKey(profile.pinnedServerPublicKeyHex),
                 profile.credential,
             )
