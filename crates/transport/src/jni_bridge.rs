@@ -1,9 +1,14 @@
 //! JNI boundary for the Android application. No credentials are logged.
 #![allow(non_snake_case)]
 
-use crate::{ClientOptions, QuicClient, turn_client::TurnClientRuntime, turn_credentials::TurnCredentials};
+use crate::{
+    ClientOptions,
+    QuicClient,
+    turn_client::{TurnClientPathGroup, TurnClientRuntime},
+    turn_credentials::TurnCredentials,
+};
 use anyhow::{Context, Result};
-use ghulakh_protocol::{DataDatagram, IpPacketKind};
+use ghulakh_protocol::{DataDatagram, IpPacketKind, turn_path_context::{TurnPathContext, MAX_TURN_PATHS}};
 use jni::{
     objects::{JByteArray, JObject, JString},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
@@ -15,14 +20,14 @@ use std::{
     net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex, OnceLock},
 };
-use tokio::runtime::{Builder, Runtime};
+use tokio::{runtime::{Builder, Runtime}, task::JoinSet};
 #[cfg(target_os = "android")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "android")]
 use jni::objects::JValue;
 
 struct NativeTurnSession {
-    client: TurnClientRuntime,
+    client: TurnClientPathGroup,
     runtime: Runtime,
 }
 
@@ -160,6 +165,7 @@ fn connect_turn_impl(
     turn_credentials_json: JString,
     pinned_server_key: JByteArray,
     credential: JString,
+    path_count: jint,
 ) -> Result<jlong> {
     let gateway_host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
     let turn_credentials_json = env
@@ -169,33 +175,93 @@ fn connect_turn_impl(
     let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
     let pinned_server_key = env.convert_byte_array(pinned_server_key)?;
     anyhow::ensure!(pinned_server_key.len() == 32, "pinned Noise server key must be 32 bytes");
+    anyhow::ensure!(
+        !credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
+        "tunnel credential length is invalid"
+    );
+    let path_count = u16::try_from(path_count).context("TURN path count is invalid")?;
+    anyhow::ensure!(
+        (2..=MAX_TURN_PATHS).contains(&path_count),
+        "TURN path count must be between 2 and 10"
+    );
     let gateway_port = u16::try_from(gateway_port).context("TURN gateway port is invalid")?;
     anyhow::ensure!(gateway_port != 0, "TURN gateway port must not be zero");
     anyhow::ensure!(!gateway_host.trim().is_empty(), "TURN gateway host is empty");
 
-    let protected_socket = make_protected_socket(env, &vpn_service)?
-        .context("Android protected TURN UDP socket is required")?;
+    // Each path owns a separate Android-protected UDP socket and TURN allocation.
+    let mut protected_sockets = Vec::with_capacity(usize::from(path_count));
+    for _ in 0..path_count {
+        protected_sockets.push(
+            make_protected_socket(env, &vpn_service)?
+                .context("Android protected TURN UDP socket is required")?,
+        );
+    }
+
     let runtime = Builder::new_multi_thread()
+        .worker_threads(usize::from(path_count).clamp(2, 10))
         .enable_all()
         .build()
-        .context("create native TURN Tokio runtime")?;
+        .context("create multipath TURN Tokio runtime")?;
     let gateway_addr: SocketAddr = runtime.block_on(async {
         let mut addresses = tokio::net::lookup_host((gateway_host.as_str(), gateway_port)).await?;
         addresses
             .find(SocketAddr::is_ipv4)
             .context("TURN gateway host did not resolve to IPv4")
     })?;
-    let credentials = TurnCredentials::from_vk_response_json(&turn_credentials_json)
-        .context("parse temporary VK Calls TURN credentials")?;
-    let client = runtime.block_on(TurnClientRuntime::connect(
-        protected_socket,
-        credentials,
-        gateway_addr,
-        &pinned_server_key,
-        credential.as_bytes(),
-    )).context("establish protected TURN VPN session")?;
 
-    let native_session = Arc::new(NativeTurnSession { client, runtime });
+    let mut group_id = [0u8; 16];
+    OsRng.fill_bytes(&mut group_id);
+    anyhow::ensure!(group_id.iter().any(|byte| *byte != 0), "invalid random TURN group ID");
+
+    let clients = runtime.block_on(async {
+        let mut tasks = JoinSet::new();
+        for (path_id, protected_socket) in protected_sockets.into_iter().enumerate() {
+            let credentials = TurnCredentials::from_vk_response_json(&turn_credentials_json)
+                .context("parse temporary VK Calls TURN credentials")?;
+            let pinned_key = pinned_server_key.clone();
+            let tunnel_credential = credential.as_bytes().to_vec();
+            let context = TurnPathContext {
+                group_id,
+                path_id: path_id as u16,
+                path_count,
+            };
+            tasks.spawn(async move {
+                TurnClientRuntime::connect_with_path_context(
+                    protected_socket,
+                    credentials,
+                    gateway_addr,
+                    &pinned_key,
+                    &tunnel_credential,
+                    context,
+                ).await
+            });
+        }
+
+        let mut clients = Vec::with_capacity(usize::from(path_count));
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(Ok(client)) => clients.push(client),
+                Ok(Err(error)) => {
+                    tasks.abort_all();
+                    for client in &clients {
+                        client.close();
+                    }
+                    return Err(error).context("establish one of the TURN paths");
+                }
+                Err(error) => {
+                    tasks.abort_all();
+                    for client in &clients {
+                        client.close();
+                    }
+                    return Err(anyhow::anyhow!(error)).context("TURN path task failed");
+                }
+            }
+        }
+        TurnClientPathGroup::new(clients)
+            .context("assemble authenticated TURN path group")
+    })?;
+
+    let native_session = Arc::new(NativeTurnSession { client: clients, runtime });
     let mut registry = turn_sessions()
         .lock()
         .map_err(|_| anyhow::anyhow!("native TURN session registry is unavailable"))?;
