@@ -18,10 +18,11 @@ TURN allocation credentials authorize use of a relay. They do not authenticate a
 
 ## Current limitations — not production-ready yet
 
-- The Noise module remains a cryptographic state machine. `handshake_datagram.rs` now supplies deterministic TURN datagram envelope, retry, response matching and replay-cache primitives, but is not yet wired to the TURN socket actor or Noise state machine.
+- The Noise module remains a cryptographic state machine. `handshake_datagram.rs` supplies deterministic TURN datagram envelope, retry, response matching and replay-cache primitives. The TURN socket actor now unwraps ChannelData, validates the handshake envelope, and routes it to a separate bounded handshake queue; `TurnClientDriver` exposes that queue together with a clone of the actor send handle. The retry/cache manager is not yet wired to this queue or the Noise state machine.
 - The caller must invoke `match_response`, authenticate/process the Noise payload, and only then call `complete_response`. A matched but unauthenticated packet must not cancel the retry transaction.
 - Retry scheduling is caller-driven through `poll(now)`; the module owns no timer, socket, task or runtime. It resends the exact encoded request bytes, uses bounded exponential backoff and expires pending requests after a fixed transmission budget.
-- The response cache is bounded globally and per source, uses a fixed TTL, and rejects transaction-key reuse with different request bytes. The network integration still needs source admission/rate limiting and must cache the response before attempting network send.
+- The response cache is bounded globally and per source, uses a fixed TTL, and rejects transaction-key reuse with different request bytes. Handshake queue overload drops the newest handshake datagram and increments a dedicated counter rather than blocking the sole TURN socket reader.
+- The network integration still needs source admission/rate limiting and must cache the response before attempting network send.
 - The server credential verifier is supplied by the caller. It must use the existing credential store with constant-time digest comparison, expiry/revocation and rate limiting.
 - The server static key pair persistence/rotation and secure client pin distribution are not integrated.
 - The gateway session registry is not yet populated from a completed Noise handshake.
