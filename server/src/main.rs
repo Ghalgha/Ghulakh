@@ -710,7 +710,7 @@ mod tests {
             }
         });
 
-        let client = QuicClient::connect(ClientOptions {
+        let client = Arc::new(QuicClient::connect(ClientOptions {
             server_addr,
             server_name: "localhost".into(),
             root_certificate_der: certificate.cert.der().to_vec(),
@@ -718,7 +718,7 @@ mod tests {
             udp_socket: None,
         })
         .await
-        .unwrap();
+        .unwrap());
 
         assert_eq!(client.session_id().len(), 32);
         assert_eq!(client.client_ipv4(), "10.77.0.2");
@@ -750,7 +750,18 @@ mod tests {
         .await
         .expect("server did not receive the authenticated QUIC datagram");
 
+        // A blocked native receive must be released by close so Android's
+        // VPN worker can terminate without waiting for another packet.
+        let receiver = Arc::clone(&client);
+        let receive_task = tokio::spawn(async move { receiver.receive_packet().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
         client.close();
+        let receive_result = tokio::time::timeout(Duration::from_secs(2), receive_task)
+            .await
+            .expect("closing the client did not unblock a pending receive")
+            .expect("receive task panicked");
+        assert!(receive_result.is_err(), "closed connection returned a packet");
+
         endpoint.close(0u32.into(), b"test complete");
         server_task.abort();
     }
