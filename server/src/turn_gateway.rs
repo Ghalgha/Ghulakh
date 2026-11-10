@@ -7,7 +7,6 @@
 
 use std::{
     collections::HashMap,
-    hash::{Hash, Hasher},
     net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -411,7 +410,7 @@ impl TurnGateway {
         );
         let route = self.clients.read().await.get(&destination).cloned()
             .context("no active TURN session group for packet destination")?;
-        let selected = flow_hash(&packet.packet) as usize % route.sessions.len().max(1);
+        let selected = ghulakh_protocol::ip_flow::flow_hash(&packet.packet) as usize % route.sessions.len().max(1);
         let session_id = *route.sessions.get(selected)
             .context("TURN session group has no active paths")?;
         let session = self.sessions.read().await.get(&session_id).cloned()
@@ -442,26 +441,6 @@ impl TurnGateway {
             downlink_sent: self.counters.downlink_sent.load(Ordering::Relaxed),
         }
     }
-}
-
-fn flow_hash(packet: &[u8]) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    if packet.len() < 20 {
-        packet.hash(&mut hasher);
-        return hasher.finish();
-    }
-    packet[12..20].hash(&mut hasher);
-    packet[9].hash(&mut hasher);
-    let fragment = u16::from_be_bytes([packet[6], packet[7]]);
-    if fragment & 0x1fff != 0 {
-        packet[4..6].hash(&mut hasher);
-    } else {
-        let header_len = usize::from(packet[0] & 0x0f) * 4;
-        if (packet[9] == 6 || packet[9] == 17) && packet.len() >= header_len + 4 {
-            packet[header_len..header_len + 4].hash(&mut hasher);
-        }
-    }
-    hasher.finish()
 }
 
 #[cfg(test)]
