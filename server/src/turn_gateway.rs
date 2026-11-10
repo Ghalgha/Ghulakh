@@ -435,6 +435,15 @@ mod tests {
         assert_eq!(config.mtu, 1100);
 
         let (mut client_tx, _) = keys.into_client_codecs();
+        let session = gateway.sessions.read().await.get(&keys.session_id()).cloned();
+        let session = session.unwrap();
+        let previous_activity = *session.last_activity.lock().unwrap();
+        let keepalive = client_tx.seal(ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD).unwrap();
+        relay.send_to(&keepalive, gateway_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(*session.last_activity.lock().unwrap() > previous_activity);
+        assert!(tun_rx.try_recv().is_err());
+
         let uplink = packet(config.virtual_ipv4, Ipv4Addr::new(1, 1, 1, 1));
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
