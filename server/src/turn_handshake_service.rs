@@ -17,8 +17,9 @@ use ghulakh_protocol::{
     handshake_datagram::{
         HandshakeDatagramDriver, HandshakePhase, HandshakeRetryPolicy,
     },
-    session_handshake::{NoiseServerKeyPair, SessionFrameKeys, TurnSessionConfig},
+    session_handshake::{NoiseServerKeyPair, SessionFrameKeys, SessionHandshakeError, TurnSessionConfig},
     turn_handshake::TurnHandshakeServer,
+    turn_path_context::TurnPathContext,
 };
 
 const MAX_ACTIVE_HANDSHAKES: usize = 1024;
@@ -59,6 +60,13 @@ pub struct EstablishedTurnSession {
     pub relay_peer: SocketAddr,
     pub config: TurnSessionConfig,
     pub frame_keys: SessionFrameKeys,
+    pub path_context: Option<TurnPathContext>,
+}
+
+struct PathGroupLease {
+    virtual_ipv4: Ipv4Addr,
+    path_count: u16,
+    active_paths: HashSet<u16>,
 }
 
 pub struct TurnHandshakeService {
@@ -69,6 +77,7 @@ pub struct TurnHandshakeService {
     peer_rates: HashMap<SocketAddr, PeerRate>,
     next_client_host: u32,
     allocated_ips: HashSet<Ipv4Addr>,
+    path_groups: HashMap<[u8; 16], PathGroupLease>,
 }
 
 impl TurnHandshakeService {
@@ -91,6 +100,7 @@ impl TurnHandshakeService {
             peer_rates: HashMap::with_capacity(MAX_RATE_PEERS),
             next_client_host: 2,
             allocated_ips: HashSet::new(),
+            path_groups: HashMap::new(),
         })
     }
 
@@ -154,41 +164,81 @@ impl TurnHandshakeService {
                     self.pending.remove(&key);
                     bail!("client handshake expired");
                 }
-                let config = TurnSessionConfig {
-                    virtual_ipv4: self.allocate_virtual_ipv4()?,
-                    mtu: SERVER_TUN_MTU,
-                };
-                let config_payload = config.encode()
-                    .context("encode authenticated server session configuration")?;
-                let finish_result = {
-                    let pending = self.pending.get_mut(&key)
-                        .context("no active handshake for ClientFinish")?;
-                    pending.server.receive_client_finish_with_payload(
-                        datagram,
-                        |credential| (self.verify_credential)(credential),
-                        &config_payload,
-                    )
-                };
-                let (response, frame_keys) = match finish_result {
+                let mut pending = self.pending.remove(&key)
+                    .context("no active handshake for ClientFinish")?;
+                let verifier = Arc::clone(&self.verify_credential);
+                let mut reserved_path = None;
+                let mut reserved_legacy_ip = None;
+                let finish_result = pending.server.receive_client_finish_with_path_context_builder(
+                    datagram,
+                    |credential| verifier(credential),
+                    |path_context| {
+                        let virtual_ipv4 = if let Some(context) = path_context {
+                            reserved_path = Some(context);
+                            self.reserve_path(context)
+                                .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?
+                        } else {
+                            let address = self.allocate_virtual_ipv4()
+                                .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
+                            self.allocated_ips.insert(address);
+                            reserved_legacy_ip = Some(address);
+                            address
+                        };
+                        let config = TurnSessionConfig {
+                            virtual_ipv4,
+                            mtu: SERVER_TUN_MTU,
+                        };
+                        Ok(config.encode()?.to_vec())
+                    },
+                );
+                let (response, frame_keys, path_context) = match finish_result {
                     Ok(result) => result,
                     Err(error) => {
-                        // A failed credential consumes this Noise state; discard it
-                        // immediately instead of retaining an unusable pending entry.
-                        self.pending.remove(&key);
+                        if let Some(context) = reserved_path {
+                            self.rollback_path(context);
+                        }
+                        if let Some(address) = reserved_legacy_ip {
+                            self.allocated_ips.remove(&address);
+                        }
                         return Err(error).context("authenticate client Noise finish");
                     }
                 };
+                let config = {
+                    let envelope = ghulakh_protocol::handshake_datagram::HandshakeEnvelope::decode(&response)
+                        .context("decode generated ServerAck envelope")?;
+                    let pending_ack = envelope.payload;
+                    // The exact configuration was generated by the builder and
+                    // encrypted in ServerAck. Reconstruct it from the group lease.
+                    let virtual_ipv4 = if let Some(context) = path_context {
+                        self.path_groups.get(&context.group_id)
+                            .map(|group| group.virtual_ipv4)
+                            .context("reserved path group disappeared before acknowledgement")?
+                    } else {
+                        reserved_legacy_ip.context("legacy virtual IPv4 reservation missing")?
+                    };
+                    TurnSessionConfig { virtual_ipv4, mtu: SERVER_TUN_MTU }
+                };
 
                 // Cache exact ServerAck before exposing response or session keys.
-                self.delivery.cache_response(
+                if let Err(error) = self.delivery.cache_response(
                     datagram,
                     response.clone(),
                     relay_peer,
                     now,
-                ).context("cache ServerAck before sending")?;
-                self.pending.remove(&key);
-                self.allocated_ips.insert(config.virtual_ipv4);
+                ) {
+                    if let Some(context) = reserved_path {
+                        self.rollback_path(context);
+                    }
+                    if let Some(address) = reserved_legacy_ip {
+                        self.allocated_ips.remove(&address);
+                    }
+                    return Err(error).context("cache ServerAck before sending");
+                }
 
+                // Keep the local binding above to make the authenticated config
+                // explicit at the session-registration boundary.
+                let _ = config;
+                let _ = path_context;
                 Ok(TurnHandshakeOutcome::Response {
                     response,
                     established: Some(EstablishedTurnSession {
@@ -196,6 +246,7 @@ impl TurnHandshakeService {
                         relay_peer,
                         config,
                         frame_keys,
+                        path_context,
                     }),
                 })
             }
@@ -236,6 +287,50 @@ impl TurnHandshakeService {
         });
     }
 
+    fn reserve_path(&mut self, context: TurnPathContext) -> Result<Ipv4Addr> {
+        context.validate().context("validate authenticated TURN path context")?;
+        if let Some(group) = self.path_groups.get_mut(&context.group_id) {
+            ensure!(group.path_count == context.path_count, "TURN path group count mismatch");
+            ensure!(
+                group.active_paths.len() < usize::from(group.path_count),
+                "TURN path group is already full"
+            );
+            ensure!(
+                group.active_paths.insert(context.path_id),
+                "TURN path identifier is already registered"
+            );
+            return Ok(group.virtual_ipv4);
+        }
+
+        let virtual_ipv4 = self.allocate_virtual_ipv4()?;
+        self.allocated_ips.insert(virtual_ipv4);
+        let mut active_paths = HashSet::new();
+        active_paths.insert(context.path_id);
+        self.path_groups.insert(context.group_id, PathGroupLease {
+            virtual_ipv4,
+            path_count: context.path_count,
+            active_paths,
+        });
+        Ok(virtual_ipv4)
+    }
+
+    fn rollback_path(&mut self, context: TurnPathContext) -> bool {
+        let Some(group) = self.path_groups.get_mut(&context.group_id) else {
+            return false;
+        };
+        group.active_paths.remove(&context.path_id);
+        if group.active_paths.is_empty() {
+            let address = group.virtual_ipv4;
+            self.path_groups.remove(&context.group_id);
+            self.allocated_ips.remove(&address);
+        }
+        true
+    }
+
+    pub fn release_path(&mut self, context: TurnPathContext) -> bool {
+        self.rollback_path(context)
+    }
+
     fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
         for _ in 0..65_532 {
             let host = self.next_client_host;
@@ -249,6 +344,12 @@ impl TurnHandshakeService {
     }
 
     pub fn release_virtual_ipv4(&mut self, address: Ipv4Addr) -> bool {
+        let groups: Vec<[u8; 16]> = self.path_groups.iter()
+            .filter_map(|(id, group)| (group.virtual_ipv4 == address).then_some(*id))
+            .collect();
+        for id in groups {
+            self.path_groups.remove(&id);
+        }
         self.allocated_ips.remove(&address)
     }
 
