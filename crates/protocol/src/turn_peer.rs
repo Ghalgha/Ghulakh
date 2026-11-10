@@ -230,6 +230,22 @@ mod tests {
     }
 
     #[test]
+    fn exposes_permission_and_channel_refresh_deadlines() {
+        let now = Instant::now();
+        let mut registry = registry();
+        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        assert_eq!(
+            registry.permission_expires_at(peer().ip()),
+            Some(now + PERMISSION_LIFETIME)
+        );
+        assert_eq!(
+            registry.channel_expires_at(0x4001),
+            Some(now + CHANNEL_BINDING_LIFETIME)
+        );
+        assert_eq!(registry.channel_expires_at(0x4002), None);
+    }
+
+    #[test]
     fn channel_bind_installs_permission_and_tracks_both_directions() {
         let now = Instant::now();
         let mut registry = registry();
