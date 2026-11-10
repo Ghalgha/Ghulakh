@@ -9,7 +9,7 @@
 ## Что уже есть
 
 - Rust workspace и общий протокольный crate.
-- STUN codec: framing, method/class, TLV attributes, XOR address IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1 primitives, FINGERPRINT CRC-32 и unit tests.
+- STUN codec: framing, method/class, TLV attributes, XOR address IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1, FINGERPRINT CRC-32; отдельный bounded parser TURN challenge 401/438.
 - Экспериментальный QUIC-клиент и QUIC-сервер с TLS 1.3.
 - Экспериментальная передача IP-датаграмм через QUIC DATAGRAM.
 - Серверный IPv4 TUN, адресный пул, source-IP validation и базовая egress ACL.
@@ -21,7 +21,7 @@
 
 - VK Calls credential provider.
 - TURN client/allocation manager в Ghulakh.
-- TURN long-term authentication, challenge handling и согласованный credential/key derivation profile; integrity primitives реализованы, но не подключены к сетевому transaction manager.
+- TURN long-term credential/key derivation и сетевой auth flow; bounded parser challenge 401/438 реализован, но не подключён к transaction manager.
 - TURN UDP/TCP/TLS data path между Android-клиентом и серверным gateway.
 - Вертикальный end-to-end срез одного allocation и обратного relay-пути.
 - Защищённый data framing для целевого TURN-пути.
@@ -55,7 +55,7 @@ README всех шести указанных пользователем исх�
 - XOR address для IPv4 и IPv6.
 - MESSAGE-INTEGRITY HMAC-SHA1: добавление и constant-time проверка с внешним ключом, включая корректную обработку следующего FINGERPRINT.
 - FINGERPRINT CRC-32: добавление и проверка; не используется как аутентификация.
-- Unit tests round-trip для всех STUN classes, integrity/fingerprint tampering, malformed length/cookie и XOR address.
+- Unit tests round-trip для STUN classes, integrity/fingerprint tampering, malformed framing, XOR address и challenge parser cases.
 
 Кодек не является TURN-клиентом: long-term credential/key derivation, authentication challenge handling, transaction retries и allocation state machine ещё не реализованы. Integrity verification требует внешнего ключа и пока не встроена в сетевой приёмник. Сетевые сообщения нельзя считать аутентифицированными без обязательной проверки MESSAGE-INTEGRITY.
 
