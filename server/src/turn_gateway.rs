@@ -412,7 +412,7 @@ mod tests {
             turn_client::{TurnClientRuntime, DEFAULT_TURN_CHANNEL},
             turn_credentials::TurnCredentials,
         };
-        use tokio::sync::oneshot;
+        use tokio::{net::UdpSocket as TokioUdpSocket, sync::oneshot};
 
         let relay = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
