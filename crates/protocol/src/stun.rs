@@ -22,8 +22,14 @@ pub const ATTR_NONCE: u16 = 0x0015;
 pub const ATTR_XOR_RELAYED_ADDRESS: u16 = 0x0016;
 pub const ATTR_REQUESTED_TRANSPORT: u16 = 0x0019;
 pub const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
-pub const ATTR_CHANNEL_BINDING: u16 = 0x000C;
 pub const ATTR_FINGERPRINT: u16 = 0x8028;
+
+pub const METHOD_ALLOCATE: u16 = 0x003;
+pub const METHOD_REFRESH: u16 = 0x004;
+pub const METHOD_SEND: u16 = 0x006;
+pub const METHOD_DATA: u16 = 0x007;
+pub const METHOD_CREATE_PERMISSION: u16 = 0x008;
+pub const METHOD_CHANNEL_BIND: u16 = 0x009;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StunError {
