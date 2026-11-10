@@ -6,7 +6,7 @@ use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
-use std::{env, fs::File, io::BufReader, net::SocketAddr, sync::Arc};
+use std::{env, fs, fs::File, io::BufReader, net::SocketAddr, sync::Arc};
 use subtle::ConstantTimeEq;
 
 const ALPN: &[u8] = b"ghulakh/1";
@@ -37,6 +37,30 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
     let crypto =
         QuicServerConfig::try_from(tls).context("configure QUIC TLS crypto")?;
     Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
+}
+
+fn load_credential_hashes(path: &str) -> Result<Vec<[u8; 32]>> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("read credential digest file: {path}"))?;
+    let mut hashes = Vec::new();
+
+    for (line_number, line) in content.lines().enumerate() {
+        let value = line.trim();
+        if value.is_empty() || value.starts_with('#') {
+            continue;
+        }
+
+        let decoded = hex::decode(value)
+            .with_context(|| format!("invalid hex credential digest on line {}", line_number + 1))?;
+        let digest: [u8; 32] = decoded.try_into().map_err(|_| {
+            anyhow::anyhow!("credential digest on line {} must be 32 bytes", line_number + 1)
+        })?;
+        hashes.push(digest);
+    }
+
+    anyhow::ensure!(!hashes.is_empty(), "credential digest file contains no credentials");
+    anyhow::ensure!(hashes.len() <= 10_000, "credential digest file exceeds 10000 entries");
+    Ok(hashes)
 }
 
 fn credential_matches(candidate: &str, expected_hashes: &[[u8; 32]]) -> bool {
@@ -139,12 +163,9 @@ async fn handle_connection(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let token = env::var("GHULAKH_BOOTSTRAP_TOKEN")
-        .context("set GHULAKH_BOOTSTRAP_TOKEN to a unique high-entropy credential")?;
-    anyhow::ensure!(
-        token.len() >= 32,
-        "credential must contain at least 32 characters"
-    );
+    let credential_path = env::var("GHULAKH_CREDENTIAL_HASHES")
+        .context("set GHULAKH_CREDENTIAL_HASHES to a file of SHA-256 credential digests")?;
+    let credential_hashes = Arc::new(load_credential_hashes(&credential_path)?);
 
     let cert_path = env::var("GHULAKH_TLS_CERT")
         .context("set GHULAKH_TLS_CERT to a PEM certificate chain")?;
@@ -155,8 +176,6 @@ async fn main() -> Result<()> {
         .parse()
         .context("invalid GHULAKH_QUIC_BIND address")?;
 
-    let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-    let credential_hashes = Arc::new(vec![digest]);
     let server_config = load_server_config(&cert_path, &key_path)?;
     let endpoint = Endpoint::server(server_config, bind)?;
 
