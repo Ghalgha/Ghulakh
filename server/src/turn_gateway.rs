@@ -410,11 +410,20 @@ impl TurnGateway {
         );
         let route = self.clients.read().await.get(&destination).cloned()
             .context("no active TURN session group for packet destination")?;
-        let selected = ghulakh_protocol::ip_flow::flow_hash(&packet.packet) as usize % route.sessions.len().max(1);
-        let session_id = *route.sessions.get(selected)
-            .context("TURN session group has no active paths")?;
-        let session = self.sessions.read().await.get(&session_id).cloned()
-            .context("TURN path disappeared during downlink routing")?;
+        let now = Instant::now();
+        let sessions = self.sessions.read().await;
+        let active_paths: Vec<Arc<GatewaySession>> = route.sessions.iter()
+            .filter_map(|session_id| {
+                let session = sessions.get(session_id)?.clone();
+                let last_activity = *session.last_activity.lock().ok()?;
+                (now.saturating_duration_since(last_activity) < SESSION_IDLE_TIMEOUT)
+                    .then_some(session)
+            })
+            .collect();
+        drop(sessions);
+        ensure!(!active_paths.is_empty(), "TURN session group has no recently authenticated paths");
+        let selected = ghulakh_protocol::ip_flow::flow_hash(&packet.packet) as usize % active_paths.len();
+        let session = Arc::clone(&active_paths[selected]);
         let encoded = {
             let mut crypto = session.crypto.lock().map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
             crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
@@ -423,9 +432,8 @@ impl TurnGateway {
         let sent = self.socket.send_to(&encoded, session.relay_peer).await
             .context("send raw downlink payload to observed TURN relay peer")?;
         ensure!(sent == encoded.len(), "partial TURN gateway UDP datagram send");
-        if let Ok(mut last_activity) = session.last_activity.lock() {
-            *last_activity = Instant::now();
-        }
+        // Only authenticated client traffic refreshes path liveness. A local
+        // UDP send succeeding does not prove the TURN allocation is still alive.
         self.counters.downlink_sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
