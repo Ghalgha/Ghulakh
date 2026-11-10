@@ -398,9 +398,11 @@ mod tests {
             net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
         };
         use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
+        use md5::{Digest, Md5};
         use ghulakh_protocol::{
             session_handshake::NoiseServerKeyPair,
             stun::{
+                append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
                 decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
                 ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
                 ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
@@ -463,6 +465,21 @@ mod tests {
                                 } else {
                                     let request = StunMessage::decode(&buffer[..length]).unwrap();
                                     assert_eq!(request.class, StunClass::Request);
+                                    if request.attribute(ATTR_USERNAME).is_none() {
+                                        assert_eq!(request.method, METHOD_ALLOCATE);
+                                        let challenge = StunMessage {
+                                            method: request.method,
+                                            class: StunClass::ErrorResponse,
+                                            transaction_id: request.transaction_id,
+                                            attributes: vec![
+                                                StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                                                StunAttribute { kind: ATTR_REALM, value: b"turn.mock".to_vec() },
+                                                StunAttribute { kind: ATTR_NONCE, value: b"mock-nonce-1".to_vec() },
+                                            ],
+                                        }.encode().unwrap();
+                                        relay_socket.send_to(&challenge, source).await.unwrap();
+                                        continue;
+                                    }
                                     let mut attributes = Vec::new();
                                     match request.method {
                                         METHOD_ALLOCATE => {
@@ -506,7 +523,11 @@ mod tests {
                                         class: StunClass::SuccessResponse,
                                         transaction_id: request.transaction_id,
                                         attributes,
-                                    }.encode().unwrap();
+                                    };
+                                    let mut digest = Md5::new();
+                                    digest.update(b"temporary-user:turn.mock:temporary-password");
+                                    let integrity_key = digest.finalize();
+                                    let response = append_message_integrity(&response, &integrity_key).unwrap();
                                     relay_socket.send_to(&response, source).await.unwrap();
                                 }
                             } else if source == gateway_addr {
