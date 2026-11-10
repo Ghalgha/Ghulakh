@@ -134,7 +134,80 @@ impl StunMessage {
     }
 }
 
-pub fn encode_xor_address(address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
+
+/// Append RFC 5389 MESSAGE-INTEGRITY (HMAC-SHA1) as the final attribute.
+/// The caller supplies the already-derived long-term key; credential derivation
+/// is intentionally kept outside this codec.
+pub fn append_message_integrity(message: &StunMessage, key: &[u8]) -> Result<Vec<u8>, StunError> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    if key.is_empty() || message.attributes.iter().any(|a| a.kind == ATTR_MESSAGE_INTEGRITY || a.kind == ATTR_FINGERPRINT) {
+        return Err(StunError::InvalidIntegrityLayout);
+    }
+    let mut signed = message.clone();
+    signed.attributes.push(StunAttribute { kind: ATTR_MESSAGE_INTEGRITY, value: vec![0; 20] });
+    let mut encoded = signed.encode()?;
+    let attr_offset = encoded.len() - 24;
+    let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
+    mac.update(&encoded[..attr_offset]);
+    let tag = mac.finalize().into_bytes();
+    encoded[attr_offset + 4..attr_offset + 24].copy_from_slice(&tag);
+    Ok(encoded)
+}
+
+/// Verify MESSAGE-INTEGRITY before any received request can mutate TURN state.
+pub fn verify_message_integrity(input: &[u8], key: &[u8]) -> Result<(), StunError> {
+    use hmac::{Hmac, Mac};
+    use sha1::Sha1;
+
+    let message = StunMessage::decode(input)?;
+    let positions: Vec<usize> = message.attributes.iter().enumerate()
+        .filter_map(|(i, a)| (a.kind == ATTR_MESSAGE_INTEGRITY).then_some(i)).collect();
+    if positions.len() != 1 || positions[0] + 1 != message.attributes.len() || key.is_empty() {
+        return Err(StunError::InvalidIntegrityLayout);
+    }
+    let attr_index = positions[0];
+    let offset = HEADER_LEN + message.attributes[..attr_index].iter()
+        .map(|a| 4 + ((a.value.len() + 3) & !3)).sum::<usize>();
+    if input.len() != offset + 24 { return Err(StunError::InvalidIntegrityLayout); }
+    let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
+    mac.update(&input[..offset]);
+    mac.verify_slice(&input[offset + 4..offset + 24]).map_err(|_| StunError::IntegrityMismatch)
+}
+
+/// Append the STUN FINGERPRINT attribute (CRC-32 XOR 0x5354554e).
+pub fn append_fingerprint(input: &[u8]) -> Result<Vec<u8>, StunError> {
+    let message = StunMessage::decode(input)?;
+    if message.attributes.iter().any(|a| a.kind == ATTR_FINGERPRINT) {
+        return Err(StunError::InvalidFingerprintLayout);
+    }
+    let mut out = input.to_vec();
+    let new_len = out.len().checked_add(8).ok_or(StunError::MessageTooLarge)?;
+    if new_len > MAX_MESSAGE_LEN { return Err(StunError::MessageTooLarge); }
+    let body_len = u16::try_from(new_len - HEADER_LEN).map_err(|_| StunError::MessageTooLarge)?;
+    out[2..4].copy_from_slice(&body_len.to_be_bytes());
+    let crc = crc32fast::hash(&out) ^ 0x5354_554e;
+    out.extend_from_slice(&ATTR_FINGERPRINT.to_be_bytes());
+    out.extend_from_slice(&4u16.to_be_bytes());
+    out.extend_from_slice(&crc.to_be_bytes());
+    Ok(out)
+}
+
+/// Verify a final FINGERPRINT attribute. This is corruption detection, not authentication.
+pub fn verify_fingerprint(input: &[u8]) -> Result<(), StunError> {
+    let message = StunMessage::decode(input)?;
+    if message.attributes.last().map(|a| a.kind) != Some(ATTR_FINGERPRINT) {
+        return Err(StunError::InvalidFingerprintLayout);
+    }
+    let offset = input.len().checked_sub(8).ok_or(StunError::InvalidFingerprintLayout)?;
+    if input[offset + 2..offset + 4] != [0, 4] { return Err(StunError::InvalidFingerprintLayout); }
+    let expected = u32::from_be_bytes(input[offset + 4..offset + 8].try_into().unwrap());
+    let actual = crc32fast::hash(&input[..offset]) ^ 0x5354_554e;
+    if actual != expected { return Err(StunError::FingerprintMismatch); }
+    Ok(())
+}
+\npub fn encode_xor_address(address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
     let mut out = Vec::with_capacity(20);
     out.push(0);
     match address.ip() {
@@ -186,7 +259,7 @@ mod tests {
             StunAttribute { kind: 0xC001, value: vec![1,2,3] },
         ]}
     }
-    #[test] fn message_round_trip_all_classes() {
+    #[test] fn message_integrity_round_trip_and_tamper_detection() {\n        let m = sample(StunClass::Request);\n        let encoded = append_message_integrity(&m, b\"test-key\").unwrap();\n        verify_message_integrity(&encoded, b\"test-key\").unwrap();\n        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;\n        assert_eq!(verify_message_integrity(&tampered, b\"test-key\"), Err(StunError::IntegrityMismatch));\n    }\n    #[test] fn fingerprint_round_trip_and_tamper_detection() {\n        let encoded = sample(StunClass::Request).encode().unwrap();\n        let encoded = append_fingerprint(&encoded).unwrap();\n        verify_fingerprint(&encoded).unwrap();\n        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;\n        assert_eq!(verify_fingerprint(&tampered), Err(StunError::FingerprintMismatch));\n    }\n    #[test] fn message_round_trip_all_classes() {
         for class in [StunClass::Request,StunClass::Indication,StunClass::SuccessResponse,StunClass::ErrorResponse] {
             let m=sample(class); assert_eq!(StunMessage::decode(&m.encode().unwrap()).unwrap(),m);
         }
@@ -218,7 +291,7 @@ mod tests {
     }
     #[test] fn xor_ipv6_round_trip() {
         let id=[9u8;12]; let a="[2001:db8::1]:5349".parse().unwrap();
-        let v=encode_xor_address(ATTR_XOR_MAPPED_ADDRESS,a,&id);
+        let v=encode_xor_address(a,&id);
         assert_eq!(decode_xor_address(&v,&id).unwrap(),a);
     }
 }
