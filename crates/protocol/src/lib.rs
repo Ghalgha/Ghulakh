@@ -3,6 +3,7 @@
 pub mod stun;
 pub mod turn_auth;
 pub mod turn_transaction;
+pub mod turn_request;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
