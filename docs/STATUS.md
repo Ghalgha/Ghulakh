@@ -4,7 +4,9 @@
 
 ## Целевая функция
 
-Единственный транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC не является целевым транспортом и пока остаётся действующим экспериментальным путём в Android и сервере. До полной замены QUIC целевым TURN-путём приложение нельзя считать реализующим основную функцию.
+Единственный поддерживаемый транспорт — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). TURN-реле выступает транспортным посредником; сервер Ghulakh является peer/gateway, а не TURN-сервером. На клиентской стороне TURN ChannelData используется между приложением и TURN-сервером. На peer-facing стороне TURN-сервер снимает ChannelData framing и пересылает gateway исходную UDP-нагрузку.
+
+QUIC не является целевым транспортом. Его runtime на сервере выключен по умолчанию и может быть включён только явным GHULAKH_QUIC_ENABLED=true для временной диагностики. Android VPN service использует TURN runtime.
 
 ## Реализованные компоненты
 
@@ -15,57 +17,59 @@
 - Конструкторы Allocate/Refresh/CreatePermission/ChannelBind и parser успешных Allocate/Refresh ответов.
 - Allocation state machine с lease, expiry, refresh deadline и обработкой неудачного refresh.
 - Peer registry для permissions и channel bindings с expiry/cooldown.
-- UDP adapter, включая принятие заранее созданного Android socket после `VpnService.protect(fd)`.
-- Единый bounded TURN socket actor: один reader/writer task, раздельные control/data queues, классификация STUN/ChannelData/Data indications, явная drop-newest политика для data overload, сохранение исходных wire bytes и счётчики malformed/drop.
-- TURN control driver поверх socket actor: Allocate/Refresh/CreatePermission/ChannelBind, matching ответов, MESSAGE-INTEGRITY verification, retransmission/timeout и изменение allocation/peer state только после принятого успешного ответа.
-- TURN session supervisor: обработка 401/438 с ограниченными повторами, внешний `TurnAuthProvider`, планирование Refresh allocation и обновления permission/channel binding.
-- TURN auth context с раздельными профилями password derivation и MESSAGE-INTEGRITY HMAC. Добавлен изолированный legacy VK Calls provider: MD5(username:realm:password) → HMAC-SHA1, по совпадающему подходу в трёх актуальных Rust-реализациях исходных репозиториев. Он отклоняет PASSWORD-ALGORITHMS offers, которые пока не подтверждены профилем VK. Vendor attribute 0x8021 не добавлен: его необходимость требует проверки на реальном relay. Этот provider обрабатывает TURN 401/438, но получение самих временных VK Calls credentials через VK API ещё не реализовано и live-профиль не подтверждён.
+- UDP adapter, включая принятие заранее созданного Android socket после VpnService.protect(fd).
+- Единый bounded TURN socket actor: один reader/writer task, раздельные control/data/handshake queues, классификация STUN/ChannelData/Data indications, явная drop-newest политика для data overload, сохранение исходных wire bytes и счётчики malformed/drop.
+- TURN control driver и session supervisor: Allocate/Refresh/CreatePermission/ChannelBind, matching ответов, MESSAGE-INTEGRITY verification, 401/438 retry, обновление allocation/permission/channel binding.
+- Изолированный legacy VK Calls TURN auth provider: MD5(username:realm:password) → HMAC-SHA1, по совпадающему подходу в трёх актуальных Rust-реализациях исходных репозиториев. Он отклоняет PASSWORD-ALGORITHMS offers, пока не подтверждён профиль VK. Vendor attribute 0x8021 намеренно не добавлен: его необходимость требует live-проверки. Этот provider не доказывает live-совместимость с relay.
 - Protected frame codec: directional AEAD, session ID, sequence numbers и replay window.
-- Noise XX session handshake: pinned server static key, client credential внутри encrypted handshake message, encrypted server acknowledgement, HKDF-SHA256 directional frame keys. Реализована протокольная state machine поверх TURN handshake envelope: ClientInit → ServerResponse → ClientFinish → ServerAck, проверка handshake ID/phase, выдача frame keys клиенту только после проверки encrypted acknowledgement и серверу только после проверки credential. Отдельно реализованы deterministic retry driver с exact-byte retransmission, response matching без завершения до явного подтверждения после Noise-аутентификации, bounded per-peer/global pending limits, bounded exact-response cache и TTL. Socket actor распознаёт handshake payload внутри TURN ChannelData на клиентской стороне и передаёт его через отдельную bounded queue с drop counter. На клиентской стороне добавлен `run_turn_client_handshake`: единый task владеет Noise state, bounded retry driver и входящей handshake queue; проверяет source endpoint TURN-сервера, выполняет точные retransmissions через socket actor и завершает retry transaction только после успешной Noise-проверки ServerResponse/ServerAck. Он возвращает directional frame keys и конфигурацию туннеля (виртуальный IPv4 и MTU), полученную внутри encrypted ServerAck. На серверной стороне реализован bounded `TurnHandshakeService`: replay-cache lookup выполняется до Noise state advancement; точные ServerResponse/ServerAck кэшируются до отправки; действуют per-relay-tuple rate limits, TTL и ограничения активных рукопожатий. После проверки credential сервер включает в encrypted ServerAck назначенный виртуальный IPv4 и MTU; после помещения ServerAck в replay cache gateway регистрирует сессию до отправки ответа, исключая гонку с первым uplink-пакетом.
-- Client TURN dataplane: bounded uplink/downlink queues, проверка relay source, ChannelData/channel, AEAD, session/direction/replay и формата IP-пакета. Доступен через `TurnSessionSupervisor::take_data_plane_parts()`.
-- Server TURN gateway: принимает raw UDP payloads от TURN relay (TURN удаляет ChannelData framing на peer-facing стороне), выполняет Noise handshake, отправляет raw handshake response обратно на relay и после отправки ServerAck регистрирует session ID, назначенный виртуальный IPv4 и directional frame codecs. Защищённый dataplane проверяет relay source tuple, session ID, AEAD/replay и внутренний IPv4 source; uplink поступает в bounded TUN queue, downlink маршрутизируется по destination IPv4 на зарегистрированный relay tuple. Gateway подключён к server TUN lifecycle при заданных `GHULAKH_TURN_GATEWAY_BIND`, `GHULAKH_NOISE_PRIVATE_KEY` и `GHULAKH_NOISE_PUBLIC_KEY`; ключи читаются из hex-файлов, credential verifier использует существующий список SHA-256 digest. Это интеграция серверной стороны, но ещё не сквозной клиентский VPN.
-- Mock UDP tests для TURN socket actor, client dataplane и server gateway; gateway tests используют raw peer-facing UDP payloads, включая интегрированный Noise handshake → encrypted session config → session registration → protected uplink. Отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и клиентскую сторону ChannelData forwarding. Протокольные tests покрывают полный Noise XX обмен через handshake envelopes, mismatch handshake ID, отказ credential и передачу конфигурации туннеля внутри encrypted ServerAck.
-- Экспериментальный QUIC-клиент/сервер, серверный TUN и Android VpnService/JNI-интеграция.
+- Noise XX session handshake: pinned server static key, client credential внутри encrypted handshake message, encrypted server acknowledgement, HKDF-SHA256 directional frame keys. Конфигурация сессии (виртуальный IPv4 и MTU) передаётся внутри encrypted ServerAck.
+- Клиентский run_turn_client_handshake: единый task владеет Noise state, bounded retry driver и отдельной incoming handshake queue; проверяет relay endpoint и завершает transaction только после проверки Noise authentication и encrypted ServerAck.
+- Серверный TurnHandshakeService: bounded active handshakes, per-relay-tuple rate limits, TTL и exact-response replay cache. Cache lookup выполняется до Noise state advancement; ServerResponse/ServerAck кэшируются до отправки. Неверный credential удаляет использованное Noise state.
+- Server TURN gateway интегрирован с UDP receive loop и TUN lifecycle. Он принимает raw UDP peer payloads, обрабатывает handshake, регистрирует session после cache ServerAck и до отправки ответа (чтобы исключить гонку с первым uplink), проверяет relay source tuple, session ID, AEAD/replay и внутренний IPv4 source. Uplink поступает в bounded TUN queue; downlink маршрутизируется по назначенному destination IPv4 на зарегистрированный relay tuple.
+- Сервер загружает постоянную Noise keypair из hex-файлов и проверяет совпадение публичной/приватной частей. Добавлена команда ghulakh-server --generate-noise-keypair <private-hex-file> <public-hex-file>; private key создаётся с правами 0600 без перезаписи существующих файлов.
+- Высокоуровневый TurnClientRuntime: protected UDP socket → Allocate → Permission → ChannelBind → Noise handshake → authenticated tunnel config → bounded bidirectional dataplane; allocation/peer refresh работает отдельной задачей.
+- JNI-интерфейс Android для подключения, передачи и приёма IP-пакетов, получения виртуального IPv4/MTU и закрытия TURN-сессии.
+- Android VpnService использует TURN runtime, защищает UDP socket через VpnService.protect(fd), настраивает TUN из authenticated session config и передаёт IP-пакеты в native dataplane.
+- Android VkCallsCredentialProvider получает временные credentials через messages.getCallToken, auth.anonymLogin, vchat.startConversation и vchat.getConversationParams; при завершении вызывает vchat.hangupConversation. HTTP использует обычный HTTPS без имитации браузерного TLS fingerprint. VK access token, tunnel credential и pinned Noise key хранятся зашифрованными Android Keystore. Временные TURN credentials заново запрашиваются при каждом подключении.
+- Mock UDP tests покрывают socket actor, client dataplane, server gateway и интегрированный Noise handshake → encrypted session config → session registration → protected uplink. Отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и клиентскую ChannelData forwarding.
 
-## Что эти компоненты пока не означают
+## Ограничения текущего этапа
 
-Наличие codec, driver, supervisor и gateway core не означает, что сквозной VPN уже работает. Client dataplane и server gateway протестированы на loopback/mock UDP, но не связаны между собой через реальную TURN allocation, production TUN и единый authenticated session manager.
+Наличие компонентов и успешных mock-тестов не доказывает совместимость с реальными VK Calls API, TURN allocation policy или relay network behavior. Физические Android/VPS испытания намеренно отложены до завершения программной вертикали.
+
+Android пока требует вручную предоставить пользовательский VK access token; встроенный OAuth/login flow не реализован. VK Calls API flow и legacy TURN authentication profile не проверены на реальном аккаунте/relay. Не подтверждены необходимость vendor attribute 0x8021, поведение PASSWORD-ALGORITHMS и ротация TURN credentials.
+
+Сквозной тест реального TURN allocation → handshake → protected uplink/downlink → Android TUN ещё не выполнен. На сервере и клиенте компоненты собраны, но их совместная работа пока подтверждена отдельными mock-сценариями, а не реальным VK relay.
+
+Туннель первой версии передаёт IPv4. Android захватывает IPv6 для предотвращения утечки, но серверный gateway не маршрутизирует IPv6.
 
 ## Оставшиеся критические задачи
 
-- Проверить текущий VK Calls credential flow и реализовать получение/обновление временных TURN credentials.
-- Подтвердить фактический VK TURN authentication profile на реальном relay: normalization, legacy MD5 key derivation, MESSAGE-INTEGRITY HMAC-SHA1, необходимость vendor attribute 0x8021, поведение при PASSWORD-ALGORITHMS и rotation. Исходные Rust-реализации сходятся на MD5(username:realm:password) и HMAC-SHA1, но этого недостаточно для заявления о live-совместимости.
-- Довести Noise XX до production: реализовать серверный handshake task с cache-before-state-advance/cache-before-send и duplicate suppression; добавить сетевой rate limiting/admission; добавить сетевой rate limiting/admission, persistent server key integration, pinned key distribution, credential verifier/rate limiting и session registry integration. Snow security review обязательна.
-- Создать единый session manager, который связывает authenticated identity, назначенный virtual IPv4, TURN relayed address, channel binding и frame keys.
-- Подключить server gateway к production server TUN reader/writer и проверенному session manager.
-- Подключить client dataplane к Android TUN worker/JNI и protected TURN UDP socket.
-- Удалить QUIC из production runtime Android/server после завершения и тестирования TURN vertical slice; fallback с TURN на QUIC не добавлять.
-- Завершить сквозные mock-тесты Allocate → Permission → ChannelBind → protected uplink → gateway → protected downlink → TUN.
-- Проверить MTU/fragmentation, IPv4/IPv6 scope, queue saturation, packet loss, replay, source spoofing, reconnect и credential rotation.
-- Провести fuzz/property tests, сетевую симуляцию, нагрузочные и энергопотребительские измерения. Физические Android/VPS испытания — ближе к завершению проекта.
+- Проверить VK API credential flow на тестовом аккаунте, не логируя access token, call token, session key или TURN credentials; проверить завершение call при штатном отключении и ошибках.
+- Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
+- Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
+- Проверить lifecycle server TUN, IP forwarding/NAT/firewall и очистку idle/expired gateway sessions.
+- Завершить end-to-end mock test полного пути через mock TURN relay: Allocate → Permission → ChannelBind → Noise handshake → protected uplink → server TUN → protected downlink → client TUN.
+- Добавить fuzz/property tests, network loss/reorder simulation, queue saturation, MTU/fragmentation, replay, source spoofing, reconnect и credential rotation.
+- Провести security review Noise/session protocol; библиотека Snow не заявляется как формально аудированная.
+- Удалить остаточный QUIC runtime и код после успешного TURN vertical slice и тестирования; TURN→QUIC fallback не добавлять.
+- Провести физические Android/VPS испытания ближе к завершению проекта, затем измерить throughput, loss, CPU wakeups, энергопотребление и память.
 
 ## Архитектурные решения
 
 - Первая реализация — одна TURN allocation на устройство.
-- Control plane и dataplane разделены; один socket actor владеет UDP socket и выполняет единственный receive loop.
-- Все межзадачные очереди ограничены. Data overload использует явный drop-newest; control queue применяет backpressure.
+- Control plane, handshake и dataplane разделены; один socket actor владеет UDP socket и выполняет единственный receive loop.
+- Межзадачные очереди ограничены. Data overload использует явный drop-newest; control queue применяет backpressure.
 - Packet pool/SPSC/ring buffer не вводить до benchmark: сравнивать throughput, loss, queue drops, CPU wakeups и память.
 - Все retry ограничены и классифицируются по TURN/STUN error code.
-- Сервер отвечает на фактический relay source tuple, заранее закреплённый при authenticated session registration. Не использовать адрес, извлечённый из незашифрованного IP payload.
-- Key agreement, TURN credentials и TURN long-term authentication — отдельные security boundaries.
+- Сервер отвечает на фактический relay source tuple, закреплённый при authenticated session registration. Не использовать адрес, извлечённый из незашифрованного IP payload.
+- Key agreement, VK access token, временные TURN credentials, TURN long-term authentication и tunnel credential — отдельные security boundaries.
 
-## Проверенные mock-сценарии
+## Сравнительный аудит и производительность
 
-- Socket actor маршрутизирует STUN control и ChannelData/Data indications через один reader.
-- Client dataplane передаёт защищённый IP packet через actor и принимает ответ с независимыми directional keys.
-- Server gateway проверяет relay source tuple, channel, AEAD, inner source IP и replay; downlink отправляется на зарегистрированный relay tuple.
-- Mock control-plane test моделирует Allocate, CreatePermission, ChannelBind, Refresh и двусторонний ChannelData forwarding.
+Одинаковые функции в исходных реализациях сравниваются по владению ресурсами, количеству копирований, очередям, wakeups, retry policy и устойчивости к перегрузке. В актуальных Rust-реализациях источников обнаружен общий legacy-профиль MD5(username:realm:password) + HMAC-SHA1; vendor attribute 0x8021 требует отдельного подтверждения. Для peer-facing datapath выбран raw UDP payload, поскольку TURN снимает ChannelData framing перед пересылкой пиру.
 
-Mock-тесты не являются испытаниями VK Calls и не доказывают совместимость с реальными VK TURN relay credentials, allocation policy или network behavior.
-
-## Производительность и сравнительный аудит
-
-При выборе реализации сравниваются одинаковые функции, владение ресурсами, количество копирований, очереди, wakeups, retry policy и устойчивость к перегрузке. Для первого среза выбраны bounded Tokio queues и один socket actor: это упрощает ownership и backpressure. Более сложные packet pools и ring buffers остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
+Для первого среза выбраны bounded Tokio queues и один socket actor: это упрощает ownership и backpressure. Более сложные packet pools и ring buffers остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
 
 ## Лицензирование
 
