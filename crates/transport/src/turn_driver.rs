@@ -6,7 +6,7 @@
 //! the credential/profile layer can construct the next context without guessing.
 
 use std::{
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     time::{Duration, Instant},
 };
 
@@ -18,7 +18,7 @@ use ghulakh_protocol::{
     turn_peer::TurnPeerRegistry,
     turn_request::{
         allocate_request, channel_bind_request, create_permission_request,
-        parse_success_response, refresh_request, TurnSuccess,
+        parse_success_response, refresh_request,
     },
     turn_transaction::{TransactionEvent, TransactionManager, TransactionPolicy},
 };
@@ -238,6 +238,17 @@ impl TurnClientDriver {
                     if response.class == StunClass::ErrorResponse {
                         let challenge = parse_turn_challenge(&response, request.method).ok();
                         if let Some(challenge) = challenge {
+                            // A 438 stale-nonce response follows an authenticated
+                            // request and must itself pass integrity verification.
+                            if challenge.code == 438 {
+                                if let Some(context) = auth {
+                                    context.verify_response(&buffer[..length])
+                                        .context("verify authenticated stale-nonce response")?;
+                                } else {
+                                    self.transactions.complete(&id);
+                                    return Err(TurnDriverError::MissingAuthentication.into());
+                                }
+                            }
                             self.transactions.complete(&id);
                             return Err(TurnDriverError::Challenge(challenge).into());
                         }
