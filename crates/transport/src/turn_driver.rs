@@ -183,11 +183,20 @@ impl TurnClientDriver {
                 return Err(error);
             }
         };
-        let success = parse_success_response(&response, response.method)
-            .context("parse TURN Refresh success")?;
-        let lease = self.allocations.accept_refresh(id, success, Instant::now())
-            .map_err(|e| anyhow::anyhow!("accept TURN refresh: {e}"))?
-            .cloned();
+        let success = match parse_success_response(&response, response.method) {
+            Ok(success) => success,
+            Err(error) => {
+                let _ = self.allocations.refresh_failed(id);
+                return Err(error).context("parse TURN Refresh success");
+            }
+        };
+        let lease = match self.allocations.accept_refresh(id, success, Instant::now()) {
+            Ok(lease) => lease.cloned(),
+            Err(error) => {
+                let _ = self.allocations.refresh_failed(id);
+                return Err(anyhow::anyhow!("accept TURN refresh: {error}"));
+            }
+        };
         if lease.is_none() {
             self.peers = None;
         }
