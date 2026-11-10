@@ -195,6 +195,10 @@ class MainActivity : Activity() {
     }
 
     private fun testConnection() {
+        if (GhulakhVpnService.isActive) {
+            status.text = "Остановите VPN перед отдельной проверкой соединения."
+            return
+        }
         val profile = try {
             store.load() ?: throw IllegalStateException("Сначала сохраните настройки")
         } catch (error: Exception) {
@@ -252,6 +256,10 @@ class MainActivity : Activity() {
     }
 
     private fun startVpn() {
+        if (GhulakhVpnService.isActive) {
+            status.text = "VPN уже запущен."
+            return
+        }
         val profileAvailable = try {
             store.load() != null
         } catch (error: Exception) {
