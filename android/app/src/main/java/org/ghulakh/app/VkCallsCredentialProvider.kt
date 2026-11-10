@@ -9,14 +9,12 @@ import java.util.UUID
 
 data class VkCallsSession(
     val turnCredentialsJson: String,
-    private val accessToken: String,
     private val apiUrl: String,
     private val sessionKey: String,
     private val conversationId: String,
 ) {
     fun finish() {
         VkCallsCredentialProvider.finishConversation(
-            accessToken,
             apiUrl,
             sessionKey,
             conversationId,
@@ -85,28 +83,28 @@ object VkCallsCredentialProvider {
             .put("community_user_id", 0)
             .put("caller_app_id", VK_APP_ID)
             .toString()
-        val started = postForm(
-            apiUrl,
-            mapOf(
-                "conversationId" to conversationId,
-                "isVideo" to "true",
-                "protocolVersion" to "5",
-                "createJoinLink" to "true",
-                "payload" to payload,
-                "onlyAdminCanShareMovie" to "false",
-                "externalIds" to "",
-                "method" to "vchat.startConversation",
-                "format" to "JSON",
-                "application_key" to OK_APPLICATION_KEY,
-                "session_key" to sessionKey,
-            ),
-        )
-        checkApiError(started)
-        require(started.optString("join_link").isNotBlank()) {
-            "Calls backend did not return a join link"
-        }
-
         try {
+            val started = postForm(
+                apiUrl,
+                mapOf(
+                    "conversationId" to conversationId,
+                    "isVideo" to "true",
+                    "protocolVersion" to "5",
+                    "createJoinLink" to "true",
+                    "payload" to payload,
+                    "onlyAdminCanShareMovie" to "false",
+                    "externalIds" to "",
+                    "method" to "vchat.startConversation",
+                    "format" to "JSON",
+                    "application_key" to OK_APPLICATION_KEY,
+                    "session_key" to sessionKey,
+                ),
+            )
+            checkApiError(started)
+            require(started.optString("join_link").isNotBlank()) {
+                "Calls backend did not return a join link"
+            }
+
             val parameters = postForm(
                 apiUrl,
                 mapOf(
@@ -133,19 +131,17 @@ object VkCallsCredentialProvider {
             val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
             return VkCallsSession(
                 turnCredentialsJson = credentialsJson,
-                accessToken = accessToken,
                 apiUrl = apiUrl,
                 sessionKey = sessionKey,
                 conversationId = conversationId,
             )
         } catch (error: Throwable) {
-            runCatching { finishConversation(accessToken, apiUrl, sessionKey, conversationId) }
+            runCatching { finishConversation(apiUrl, sessionKey, conversationId) }
             throw error
         }
     }
 
     internal fun finishConversation(
-        accessToken: String,
         apiUrl: String,
         sessionKey: String,
         conversationId: String,
@@ -163,8 +159,6 @@ object VkCallsCredentialProvider {
                 ),
             )
         }
-        // The VK token is intentionally not logged or included in exceptions.
-        accessToken.length
     }
 
     private fun validateApiUrl(value: String): String {
