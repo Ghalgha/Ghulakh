@@ -132,10 +132,6 @@ impl QuicClient {
         self.tunnel_enabled
     }
 
-    pub fn tunnel_enabled(&self) -> bool {
-        self.tunnel_enabled
-    }
-
     pub fn max_datagram_size(&self) -> Option<usize> {
         self.connection.max_datagram_size()
     }
