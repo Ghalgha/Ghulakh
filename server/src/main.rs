@@ -11,7 +11,7 @@ use std::{
     env, fs, fs::File, io::BufReader, net::SocketAddr, sync::Arc, time::Duration,
 };
 use subtle::ConstantTimeEq;
-use tokio::io::AsyncWriteExt;
+use tokio::{io::AsyncWriteExt, sync::Semaphore};
 
 const ALPN: &[u8] = b"ghulakh/1";
 
@@ -112,13 +112,13 @@ async fn handle_connection(
         ).await {
             Ok(Ok(bytes)) => bytes,
             Ok(Err(_)) | Err(_) => {
-                let _ = connection.close(0u32.into(), b"invalid control stream");
+                connection.close(0u32.into(), b"invalid control stream");
                 bail!("control stream read failed");
             }
         };
 
         if bytes.len() > MAX_CONTROL_BODY {
-            let _ = connection.close(0u32.into(), b"control message too large");
+            connection.close(0u32.into(), b"control message too large");
             bail!("control message exceeds limit");
         }
 
@@ -134,7 +134,7 @@ async fn handle_connection(
                 request_id,
             } if !authenticated => {
                 if !credential_matches(&credential, credential_hashes.as_slice()) {
-                    let _ = connection.close(0u32.into(), b"authentication failed");
+                    connection.close(0u32.into(), b"authentication failed");
                     bail!("client authentication failed");
                 }
                 authenticated = true;
@@ -147,11 +147,11 @@ async fn handle_connection(
                 ControlMessage::Pong { request_id }
             }
             ControlMessage::Close { .. } if authenticated => {
-                let _ = connection.close(0u32.into(), b"client requested close");
+                connection.close(0u32.into(), b"client requested close");
                 break;
             }
             _ => {
-                let _ = connection.close(0u32.into(), b"unexpected control message");
+                connection.close(0u32.into(), b"unexpected control message");
                 bail!("unexpected control message or unauthenticated request");
             }
         };
@@ -194,9 +194,15 @@ async fn main() -> Result<()> {
         "ГӀулакх QUIC control endpoint listening on {}",
         endpoint.local_addr()?
     );
+    let connection_limit = Arc::new(Semaphore::new(1024));
     while let Some(connecting) = endpoint.accept().await {
+        let permit = Arc::clone(&connection_limit)
+            .acquire_owned()
+            .await
+            .context("connection limit semaphore closed")?;
         let hashes = Arc::clone(&credential_hashes);
         tokio::spawn(async move {
+            let _permit = permit;
             match connecting.await {
                 Ok(connection) => {
                     if let Err(error) = handle_connection(connection, hashes).await {
