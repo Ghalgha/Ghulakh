@@ -114,3 +114,6 @@ README всех шести указанных пользователем исх�
 - Tracks relayed address, granted lifetime, monotonic expiry and an 80%-lifetime refresh deadline.
 - Rejects transaction mismatches and unexpected response types; supports refresh failure recovery and expiry/deletion.
 - No socket integration, credentials, permission/channel binding lifecycle or data plane is implied by this state machine.
+
+
+- TURN 401/438 challenge parser now validates and preserves a server `PASSWORD-ALGORITHMS` offer, rejects duplicate/malformed offers, and exposes the original attribute for the authenticated retry. This supports RFC 8489 downgrade protection. NONCE remains opaque and is retained unchanged.
