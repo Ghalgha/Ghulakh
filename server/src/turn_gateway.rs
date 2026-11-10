@@ -784,4 +784,56 @@ mod tests {
         assert_eq!(gateway.stats().rejected_source, 1);
         gateway_task.abort();
     }
+
+
+    #[tokio::test]
+    async fn accepts_packet_loss_and_reordering_but_rejects_replay() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        gateway.register_session(
+            SESSION,
+            CLIENT_IP,
+            relay_addr,
+            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+        ).await.unwrap();
+
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let destination = Ipv4Addr::new(203, 0, 113, 17);
+        let mut client_tx = FrameSealer::new(
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
+        );
+
+        // Sequence 1 is intentionally lost. Deliver sequence 2 before 0 to
+        // model network reordering without weakening replay protection.
+        let lost = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
+        let reordered = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
+        let first = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
+        drop(lost);
+
+        relay.send_to(&first, gateway.local_addr().unwrap()).await.unwrap();
+        relay.send_to(&reordered, gateway.local_addr().unwrap()).await.unwrap();
+
+        let received_a = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        let received_b = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        let expected = packet(CLIENT_IP, destination);
+        assert_eq!(received_a, expected);
+        assert_eq!(received_b, expected);
+        assert_eq!(gateway.stats().accepted, 2);
+
+        // Replaying an authenticated datagram must still be rejected.
+        relay.send_to(&reordered, gateway.local_addr().unwrap()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(gateway.stats().accepted, 2);
+        assert_eq!(gateway.stats().rejected_packet, 1);
+        gateway_task.abort();
+    }
 }
