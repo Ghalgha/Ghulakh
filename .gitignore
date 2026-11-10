@@ -1,0 +1,11 @@
+/target
+**/build
+**/.gradle
+.idea
+*.iml
+local.properties
+.env
+*.jks
+*.keystore
+*.pem
+*.key
