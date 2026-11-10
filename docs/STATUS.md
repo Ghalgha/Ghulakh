@@ -21,7 +21,7 @@
 - TURN session supervisor: обработка 401/438 с ограниченными повторами, внешний `TurnAuthProvider`, планирование Refresh allocation и обновления permission/channel binding.
 - TURN auth context с раздельными профилями password derivation и MESSAGE-INTEGRITY HMAC. Integrity key передаётся извне; автоматическое получение/выведение из VK credentials не реализовано.
 - Protected frame codec: directional AEAD, session ID, sequence numbers и replay window.
-- Noise XX session handshake primitive: pinned server static key, client credential внутри encrypted handshake message, encrypted server acknowledgement, HKDF-SHA256 directional frame keys. Не подключён к TURN datagram transport/session registry; TURN handshake envelope codec и bounded exact-response cache реализованы как протокольные примитивы; сетевой retransmission driver и expiry ещё не реализованы.
+- Noise XX session handshake primitive: pinned server static key, client credential внутри encrypted handshake message, encrypted server acknowledgement, HKDF-SHA256 directional frame keys. Не подключён к TURN datagram transport/session registry; TURN handshake envelope, deterministic retry driver с exact-byte retransmission, matching ответа без завершения до отдельного подтверждения после Noise-аутентификации, bounded per-peer/global pending limits, bounded exact-response cache и TTL реализованы как протокольные примитивы; интеграция с socket actor и Noise state machine ещё не выполнена.
 - Client TURN dataplane: bounded uplink/downlink queues, проверка relay source, ChannelData/channel, AEAD, session/direction/replay и формата IP-пакета. Доступен через `TurnSessionSupervisor::take_data_plane_parts()`.
 - Server TURN gateway core: lookup по session ID, проверка зарегистрированного relay source tuple и channel, AEAD/replay, проверка внутреннего IPv4 source, bounded TUN-ingress queue и downlink на зарегистрированный relay tuple. Реализован в `server/src/turn_gateway.rs`, но пока не включён в production server TUN/session lifecycle.
 - Mock UDP tests для TURN socket actor, client dataplane и server gateway; отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и ChannelData forwarding.
@@ -35,7 +35,7 @@
 
 - Проверить текущий VK Calls credential flow и реализовать получение/обновление временных TURN credentials.
 - Подтвердить фактический VK TURN authentication profile: normalization, password derivation, MESSAGE-INTEGRITY key и поведение при rotation. Нельзя предполагать совместимость профиля только по RFC или fixture-тестам.
-- Довести Noise XX до production: TURN datagram retransmission driver, cache admission/expiry и duplicate suppression в сетевом пути; persistent server key integration, pinned key distribution, credential verifier/rate limiting и session registry integration. Snow security review обязательна.
+- Довести Noise XX до production: интеграция handshake driver с TURN socket actor и Noise state machine, сетевой rate limiting/admission, cache-before-send и duplicate suppression в сетевом пути; persistent server key integration, pinned key distribution, credential verifier/rate limiting и session registry integration. Snow security review обязательна.
 - Создать единый session manager, который связывает authenticated identity, назначенный virtual IPv4, TURN relayed address, channel binding и frame keys.
 - Подключить server gateway к production server TUN reader/writer и проверенному session manager.
 - Подключить client dataplane к Android TUN worker/JNI и protected TURN UDP socket.
