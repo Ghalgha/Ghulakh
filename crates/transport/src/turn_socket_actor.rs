@@ -33,7 +33,7 @@ const DATA_CAPACITY: usize = 128;
 #[derive(Debug)]
 pub enum TurnInbound {
     /// A decoded STUN message and its actual UDP source endpoint.
-    Control { message: StunMessage, source: SocketAddr },
+    Control { message: StunMessage, wire: Vec<u8>, source: SocketAddr },
     /// A complete ChannelData or Data-indication datagram from the relay.
     Data { datagram: Vec<u8>, source: SocketAddr },
 }
@@ -155,7 +155,7 @@ impl TurnSocketActor {
                             Ok(message) => {
                                 // Control traffic is not silently dropped. If the consumer
                                 // stalls, bounded backpressure eventually reaches the UDP socket.
-                                if control_tx.send(TurnInbound::Control { message, source }).await.is_err() {
+                                if control_tx.send(TurnInbound::Control { message, wire: packet.to_vec(), source }).await.is_err() {
                                     break;
                                 }
                             }
