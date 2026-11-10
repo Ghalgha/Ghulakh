@@ -49,16 +49,20 @@ Android пока требует вручную предоставить поль
 - Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
 - Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
 - Проверить lifecycle server TUN, IP forwarding/NAT/firewall и session cleanup под нагрузкой.
-- Расширить end-to-end mock TURN tunnel test сценариями переполнения очередей, отказа/повторного создания allocation и ротации credentials. Потеря отдельного sequence, переупорядочивание и replay rejection уже покрыты отдельным gateway test.
-- Добавить fuzz/property tests, deterministic network fault simulation на полном пути TURN, queue saturation, MTU/fragmentation, source spoofing, reconnect и credential rotation.
+- Реализовать multipath tunnel group: зашифрованные group/path metadata в Noise handshake, общий lease виртуального IPv4, регистрацию нескольких session IDs и cleanup адреса после последнего path.
+- Реализовать независимые клиентские TurnPath allocations, flow-aware scheduler, общий group sequence и bounded reorder buffers uplink/downlink.
+- Расширить mock end-to-end TURN tunnel test двумя и более paths: распределение нагрузки, reorder, loss/gap timeout, path failure/recovery, queue saturation и cleanup.
+- Добавить fuzz/property tests, deterministic network fault simulation на полном multipath пути TURN, MTU/fragmentation, source spoofing, reconnect и credential rotation.
 - Провести security review Noise/session protocol; библиотека Snow не заявляется как формально аудированная.
 - Удалить остаточный QUIC runtime и код после успешного TURN vertical slice и тестирования; TURN→QUIC fallback не добавлять.
 - Провести физические Android/VPS испытания ближе к завершению проекта, затем измерить throughput, loss, CPU wakeups, энергопотребление и память.
 
 ## Архитектурные решения
 
-- Первая реализация — одна TURN allocation на устройство.
-- Control plane, handshake и dataplane разделены; один socket actor владеет UDP socket и выполняет единственный receive loop.
+- Целевая многопутевая модель — одна tunnel group на устройство и несколько независимых TURN allocations (transport paths), каждая со своим protected UDP socket, TURN permission/ChannelBind, Noise handshake, ключами и bounded queues. Один Android TUN и один виртуальный IPv4 принадлежат tunnel group.
+- Один socket actor владеет UDP socket каждого path и выполняет единственный receive loop. TUN reader/writer остаются единственными владельцами Android TUN I/O.
+- Распределение по независимым paths должно использовать flow-aware scheduling и общий защищённый group sequence с bounded reorder buffer в обоих направлениях; простой packet round-robin без восстановления порядка не допускается.
+- Число TURN paths, число async tasks и число OS threads — разные параметры. Многопоточность обязательна; число paths ограничивается политиками клиента/сервера и уточняется после измерений.
 - Межзадачные очереди ограничены. Data overload использует явный drop-newest; control queue применяет backpressure.
 - Packet pool/SPSC/ring buffer не вводить до benchmark: сравнивать throughput, loss, queue drops, CPU wakeups и память.
 - Все retry ограничены и классифицируются по TURN/STUN error code.
@@ -75,7 +79,19 @@ Android пока требует вручную предоставить поль
 
 Для VK Calls auth profile в актуальных Rust-вариантах прослеживается общий подход MD5(username:realm:password) + HMAC-SHA1, однако vendor attribute 0x8021 и поведение PASSWORD-ALGORITHMS требуют подтверждения на реальном relay. Для peer-facing datapath выбран raw UDP payload, поскольку TURN снимает ChannelData framing перед пересылкой пиру.
 
-Для первого среза выбраны bounded Tokio queues и один socket actor: это упрощает ownership и backpressure. Более сложные packet pools и ring buffers остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
+Для одного TURN path выбраны bounded Tokio queues и один socket actor. Это решение сохраняется внутри каждого независимого path, но не ограничивает tunnel group одной allocation. Параллельная работа нескольких paths обязательна. Более сложные packet pools, ring buffers и batched UDP I/O остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
+
+## Многопутевая архитектура
+
+Обязательное требование — несколько независимых TURN allocations в одной логической VPN-сессии. Дополнительные OS threads поверх одной allocation не устраняют ограничение скорости отдельного relay-потока. Каждая allocation становится отдельным transport path с собственным UDP socket, permission, ChannelBind, Noise keys и очередями; tunnel group использует один виртуальный IPv4 и один TUN.
+
+Сравнение datapath решений показало два класса распределения. Ранние Go-варианты распределяют последовательные chunks пакетов между worker sessions, имеют per-worker queues и переключаются при перегрузке. Это агрегирует трафик, но простое пакетное чередование между relay paths способно переупорядочить TCP. Более поздние Rust-варианты используют независимые TURN allocations, flow-aware selection и deficit scheduling. Это лучше сохраняет порядок внутри flow, однако жёсткая привязка одного flow к одному path ограничивает скорость одного flow скоростью одного relay-потока. В более поздней версии добавлена временная pinning-политика для малых UDP и ограничение удержания bulk flow на одном path; это уменьшает длительное закрепление, но требует reorder handling и измерения.
+
+Поэтому Ghulakh не будет копировать конкретный dispatcher. Выбрано самостоятельное решение: несколько независимых paths, flow-aware scheduling, общий защищённый sequence на tunnel group и bounded reorder buffers в обоих направлениях. Это позволяет распределять даже один IP flow между paths, сохраняя порядок на границе TUN. Потерянный кадр не должен блокировать очередь бесконечно: gap timeout, окно и лимит памяти обязательны.
+
+В актуальных Go-реализациях обнаружены 9 worker sessions на группу и chunk-based distribution; в Rust-реализациях — 10 workers на группу, pacing запуска и адаптивный deficit scheduler. Это параметры конкретных реализаций, а не измеренные оптимумы и не основание жёстко выбирать 9 или 10. Ghulakh задаст минимальную многопутевую конфигурацию и безопасный верхний предел, а итоговое число paths будет определяться нагрузочными и физическими испытаниями с учётом TURN quota.
+
+Профили энергопотребления и тест скорости — функции после завершения и стабилизации основного multipath-туннеля. Тест скорости должен отдельно показывать single-flow и aggregate multi-flow throughput; профили должны управлять числом активных paths, batching, keepalive и concurrency, не снижая уровень защиты.
 
 ## Лицензирование
 
