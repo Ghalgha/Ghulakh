@@ -33,7 +33,7 @@ const APP_QUEUE_CAPACITY: usize = 128;
 pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     uplink: mpsc::Sender<DataDatagram>,
-    downlink: mpsc::Receiver<DataDatagram>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
 }
@@ -118,7 +118,7 @@ impl TurnClientRuntime {
         Ok(Self {
             config,
             uplink,
-            downlink,
+            downlink: tokio::sync::Mutex::new(downlink),
             dataplane_task,
             maintenance_task,
         })
@@ -132,15 +132,15 @@ impl TurnClientRuntime {
         self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
     }
 
-    pub async fn receive_packet(&mut self) -> Result<DataDatagram> {
-        self.downlink.recv().await.context("TURN VPN downlink queue closed")
+    pub async fn receive_packet(&self) -> Result<DataDatagram> {
+        self.downlink.lock().await.recv().await.context("TURN VPN downlink queue closed")
     }
 
     pub fn dataplane_finished(&self) -> bool {
         self.dataplane_task.is_finished() || self.maintenance_task.is_finished()
     }
 
-    pub fn close(&mut self) {
+    pub fn close(&self) {
         self.dataplane_task.abort();
         self.maintenance_task.abort();
     }
