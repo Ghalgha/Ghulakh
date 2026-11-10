@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -17,7 +17,7 @@ use ghulakh_protocol::{
     handshake_datagram::{
         HandshakeDatagramDriver, HandshakePhase, HandshakeRetryPolicy,
     },
-    session_handshake::{NoiseServerKeyPair, SessionFrameKeys},
+    session_handshake::{NoiseServerKeyPair, SessionFrameKeys, TurnSessionConfig},
     turn_handshake::TurnHandshakeServer,
 };
 
@@ -28,6 +28,7 @@ const MAX_REQUESTS_PER_WINDOW: u32 = 12;
 const HANDSHAKE_TTL: Duration = Duration::from_secs(30);
 const CACHE_CAPACITY: usize = 4096;
 const CACHE_PER_PEER: usize = 16;
+const SERVER_TUN_MTU: u16 = 1100;
 
 pub type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
 
@@ -56,6 +57,7 @@ pub enum TurnHandshakeOutcome {
 pub struct EstablishedTurnSession {
     pub handshake_id: [u8; 16],
     pub relay_peer: SocketAddr,
+    pub config: TurnSessionConfig,
     pub frame_keys: SessionFrameKeys,
 }
 
@@ -65,6 +67,7 @@ pub struct TurnHandshakeService {
     delivery: HandshakeDatagramDriver,
     pending: HashMap<(SocketAddr, [u8; 16]), PendingHandshake>,
     peer_rates: HashMap<SocketAddr, PeerRate>,
+    next_client_host: u32,
 }
 
 impl TurnHandshakeService {
@@ -85,6 +88,7 @@ impl TurnHandshakeService {
             ).context("initialize bounded handshake delivery cache")?,
             pending: HashMap::with_capacity(MAX_ACTIVE_HANDSHAKES),
             peer_rates: HashMap::with_capacity(MAX_RATE_PEERS),
+            next_client_host: 2,
         })
     }
 
@@ -148,12 +152,21 @@ impl TurnHandshakeService {
                     self.pending.remove(&key);
                     bail!("client handshake expired");
                 }
+                ensure!(self.next_client_host < 65_534, "server virtual IPv4 pool exhausted");
+                let host = self.next_client_host;
+                let config = TurnSessionConfig {
+                    virtual_ipv4: Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8),
+                    mtu: SERVER_TUN_MTU,
+                };
+                let config_payload = config.encode()
+                    .context("encode authenticated server session configuration")?;
                 let finish_result = {
                     let pending = self.pending.get_mut(&key)
                         .context("no active handshake for ClientFinish")?;
-                    pending.server.receive_client_finish(
+                    pending.server.receive_client_finish_with_payload(
                         datagram,
                         |credential| (self.verify_credential)(credential),
+                        &config_payload,
                     )
                 };
                 let (response, frame_keys) = match finish_result {
@@ -174,12 +187,14 @@ impl TurnHandshakeService {
                     now,
                 ).context("cache ServerAck before sending")?;
                 self.pending.remove(&key);
+                self.next_client_host += 1;
 
                 Ok(TurnHandshakeOutcome::Response {
                     response,
                     established: Some(EstablishedTurnSession {
                         handshake_id: envelope.handshake_id,
                         relay_peer,
+                        config,
                         frame_keys,
                     }),
                 })
@@ -278,7 +293,11 @@ mod tests {
         assert_eq!(established.relay_peer, peer);
         assert_eq!(service.active_handshakes(), 0);
         assert_eq!(service.cached_responses(), 2);
-        let client_keys = client.receive_server_ack(&server_ack).unwrap();
+        let (client_keys, client_config_payload) =
+            client.receive_server_ack_with_payload(&server_ack).unwrap();
+        let client_config = TurnSessionConfig::decode(&client_config_payload).unwrap();
+        assert_eq!(client_config, established.config);
+        assert_eq!(client_config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
         assert_eq!(client_keys.session_id(), established.frame_keys.session_id());
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
