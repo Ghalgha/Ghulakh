@@ -15,7 +15,7 @@ use ghulakh_protocol::{
     handshake_datagram::{
         HandshakeDatagramDriver, HandshakeDriverEvent, HandshakePhase, HandshakeRetryPolicy,
     },
-    session_handshake::SessionFrameKeys,
+    session_handshake::{SessionFrameKeys, TurnSessionConfig},
     turn_handshake::TurnHandshakeClient,
 };
 use rand::{rngs::OsRng, RngCore};
@@ -25,6 +25,12 @@ use crate::turn_socket_actor::{TurnInbound, TurnSocketHandle};
 
 const RETRY_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const MAX_HANDSHAKE_DURATION: Duration = Duration::from_secs(30);
+
+/// Client-side authenticated parameters and directional frame keys.
+pub struct TurnClientSession {
+    pub frame_keys: SessionFrameKeys,
+    pub config: TurnSessionConfig,
+}
 
 /// Run the complete client Noise XX exchange over an already allocated and
 /// ChannelBound TURN peer. The caller must protect the UDP socket before
@@ -39,7 +45,7 @@ pub async fn run_turn_client_handshake(
     channel_number: u16,
     pinned_server_key: &[u8],
     credential: &[u8],
-) -> Result<SessionFrameKeys> {
+) -> Result<TurnClientSession> {
     anyhow::ensure!(
         (0x4000..=0x7fff).contains(&channel_number),
         "TURN channel number is outside the valid range"
@@ -123,13 +129,18 @@ pub async fn run_turn_client_handshake(
                         ).await?;
                     }
                     HandshakePhase::ServerAck => {
-                        let keys = noise.receive_server_ack(&datagram)
+                        let (keys, config_payload) = noise.receive_server_ack_with_payload(&datagram)
                             .context("verify encrypted Noise server acknowledgement")?;
+                        let config = TurnSessionConfig::decode(&config_payload)
+                            .context("decode authenticated server tunnel configuration")?;
                         anyhow::ensure!(
                             delivery.complete_response(&handshake_id, HandshakePhase::ServerAck, source),
                             "could not complete authenticated ServerAck transaction"
                         );
-                        return Ok(keys);
+                        return Ok(TurnClientSession {
+                            frame_keys: keys,
+                            config,
+                        });
                     }
                     _ => bail!("unexpected response phase in client handshake task"),
                 }
