@@ -15,6 +15,8 @@ class NativeTransport {
         credential: String,
     ): Long
 
+    external fun nativeClientIpv4(session: Long): String
+
     external fun nativeSendPacket(session: Long, packet: ByteArray): Boolean
 
     /** Blocks until a validated IPv4/IPv6 packet arrives or the session fails. */
