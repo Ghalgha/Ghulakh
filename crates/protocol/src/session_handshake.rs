@@ -8,7 +8,7 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::secure_frame::{FrameDirection, FrameOpener, FrameSealer};
 
