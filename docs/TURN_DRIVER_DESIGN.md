@@ -47,6 +47,14 @@ Supervisor ограничивает повторное согласование 
 
 Это пока control-plane supervisor, а не полноценный долгоживущий socket actor: `TurnClientDriver::transact` всё ещё временно владеет receive loop во время отдельной control-операции. Непрерывный приём ChannelData и одновременная обработка control/data сообщений должны быть реализованы следующим отдельным изменением через один socket reader и bounded dispatch, а не запуском второго receive loop.
 
+## Единый UDP socket actor
+
+Добавлен `crates/transport/src/turn_socket_actor.rs`. Actor получает владение `TurnUdpSocket` и запускает единственный reader/writer task. Все отправки проходят через bounded command queue ёмкостью 32; STUN control events направляются в bounded queue ёмкостью 32 с backpressure, ChannelData и TURN Data indications — в bounded data queue ёмкостью 128 с политикой drop-newest. Некорректные datagrams отбрасываются и учитываются отдельным счётчиком; переполнение data queue также учитывается. Источник каждого входящего datagram сохраняется.
+
+Actor классифицирует UDP ChannelData по корректному RFC framing и STUN сообщения по codec; STUN Data indications направляются в data queue. Он не подтверждает транзакции и не проверяет MESSAGE-INTEGRITY: эти действия остаются у control-plane owner. Отправка сериализована actor task, а Android-путь с заранее защищённым socket descriptor остаётся в UDP adapter.
+
+На этом этапе actor реализован и покрыт mock-UDP тестами на параллельную маршрутизацию control/data, Data indications и отбрасывание некорректного ChannelData. **Он пока не подключён к `TurnClientDriver` и supervisor**: текущий driver всё ещё использует собственный временный receive loop. Следующий шаг — перевести driver на actor handle/control receiver, передать data receiver отдельному потребителю и только после этого удалить старый per-transaction receive loop. До завершения этой интеграции непрерывный TURN data path не считается готовым.
+
 ## Проверка управляющих ответов
 
 Каждый ответ сначала сопоставляется по transaction ID, method и точному source SocketAddr. До изменения состояния проверяется MESSAGE-INTEGRITY согласно согласованному auth profile. TransactionManager.complete вызывается только после успешной проверки целостности и принятия ожидаемого перехода состояния.
