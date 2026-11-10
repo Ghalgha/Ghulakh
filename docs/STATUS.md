@@ -29,7 +29,8 @@ QUIC не является целевым транспортом. Его runtime
 - Сервер загружает постоянную Noise keypair из hex-файлов и проверяет совпадение публичной/приватной частей. Добавлена команда ghulakh-server --generate-noise-keypair <private-hex-file> <public-hex-file>; private key создаётся с правами 0600 без перезаписи существующих файлов.
 - Высокоуровневый TurnClientRuntime: protected UDP socket → Allocate → Permission → ChannelBind → Noise handshake → authenticated tunnel config → bounded bidirectional dataplane; allocation/peer refresh работает отдельной задачей.
 - JNI-интерфейс Android для подключения, передачи и приёма IP-пакетов, получения виртуального IPv4/MTU и закрытия TURN-сессии.
-- Android VpnService использует TURN runtime, защищает UDP socket через VpnService.protect(fd), настраивает TUN из authenticated session config и передаёт IP-пакеты в native dataplane.
+- Rust TurnClientPathGroup объединяет 2–10 независимых TurnClientRuntime, проверяет общий group ID/IPv4/MTU и уникальность path ID, объединяет downlink queues и отслеживает доступность путей. Uplink использует детерминированный IPv4 flow hash и flow affinity: разные flows распределяются по независимым paths, пакеты одного flow сохраняют порядок.
+- Android JNI создаёт отдельный VpnService.protect(fd)-защищённый UDP socket для каждого path, поднимает allocations параллельно в Tokio multi-thread runtime (число worker threads равно числу путей), выполняет отдельный Noise handshake для каждого path и передаёт собранную группу в один native handle. Android VpnService по умолчанию запрашивает пять paths, настраивает один TUN по общей authenticated session config и передаёт пакеты в native path group.
 - Android VkCallsCredentialProvider получает временные credentials через messages.getCallToken, auth.anonymLogin, vchat.startConversation и vchat.getConversationParams; при завершении вызывает vchat.hangupConversation. HTTP использует обычный HTTPS без имитации браузерного TLS fingerprint. VK access token, tunnel credential и pinned Noise key хранятся зашифрованными Android Keystore. Временные TURN credentials заново запрашиваются при каждом подключении.
 - Mock UDP tests покрывают socket actor, client dataplane, server gateway и интегрированный Noise handshake → encrypted session config → session registration → protected uplink. Full mock TURN tunnel test дополнительно проверяет Allocate/Permission/ChannelBind, authenticated Noise handshake, protected uplink через server TUN, protected downlink до client TUN и Refresh. Эмулятор TURN использует отдельные client-facing и peer-facing UDP sockets, поэтому gateway видит адрес allocation relay, а не адрес TURN control endpoint. Отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и клиентскую ChannelData forwarding.
 
@@ -49,9 +50,9 @@ Android пока требует вручную предоставить поль
 - Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
 - Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
 - Проверить lifecycle server TUN, IP forwarding/NAT/firewall и session cleanup под нагрузкой.
-- Подключить TurnPathContext к TurnHandshakeService: общий lease виртуального IPv4, проверка path count/уникальности path ID, регистрация нескольких session IDs и cleanup адреса после последнего path.
-- Реализовать независимые клиентские TurnPath allocations, flow-aware scheduler, общий group sequence и bounded reorder buffers uplink/downlink.
-- Расширить mock end-to-end TURN tunnel test двумя и более paths: распределение нагрузки, reorder, loss/gap timeout, path failure/recovery, queue saturation и cleanup.
+- Добавить end-to-end mock multipath tunnel test: две и более allocations, общий виртуальный IPv4, распределение uplink/downlink, сохранение порядка внутри flow, отказ пути и деградация группы.
+- Проверить восстановление отдельной allocation без пересоздания всей tunnel group; проверить cleanup путей при остановке Android service.
+- После стабилизации flow-affinity multipath решить по измерениям, нужен ли striping одного flow с общим group sequence и reorder buffers.
 - Добавить fuzz/property tests, deterministic network fault simulation на полном multipath пути TURN, MTU/fragmentation, source spoofing, reconnect и credential rotation.
 - Провести security review Noise/session protocol; библиотека Snow не заявляется как формально аудированная.
 - Удалить остаточный QUIC runtime и код после успешного TURN vertical slice и тестирования; TURN→QUIC fallback не добавлять.
@@ -61,7 +62,7 @@ Android пока требует вручную предоставить поль
 
 - Целевая многопутевая модель — одна tunnel group на устройство и несколько независимых TURN allocations (transport paths), каждая со своим protected UDP socket, TURN permission/ChannelBind, Noise handshake, ключами и bounded queues. Один Android TUN и один виртуальный IPv4 принадлежат tunnel group.
 - Один socket actor владеет UDP socket каждого path и выполняет единственный receive loop. TUN reader/writer остаются единственными владельцами Android TUN I/O.
-- Распределение по независимым paths должно использовать flow-aware scheduling и общий защищённый group sequence с bounded reorder buffer в обоих направлениях; простой packet round-robin без восстановления порядка не допускается.
+- Начальный режим распределяет flows по независимым paths с flow affinity; общий group sequence и bounded reorder buffer понадобятся только для будущего striping одного flow. Простой packet round-robin без восстановления порядка не допускается.
 - Число TURN paths, число async tasks и число OS threads — разные параметры. Многопоточность обязательна; число paths ограничивается политиками клиента/сервера и уточняется после измерений.
 - Межзадачные очереди ограничены. Data overload использует явный drop-newest; control queue применяет backpressure.
 - Packet pool/SPSC/ring buffer не вводить до benchmark: сравнивать throughput, loss, queue drops, CPU wakeups и память.
