@@ -375,6 +375,7 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
     turn_credentials_json: JString,
     pinned_server_key: JByteArray,
     credential: JString,
+    path_count: jint,
 ) -> jlong {
     match connect_turn_impl(
         &mut env,
@@ -384,6 +385,7 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
         turn_credentials_json,
         pinned_server_key,
         credential,
+        path_count,
     ) {
         Ok(handle) => handle,
         Err(error) => {
