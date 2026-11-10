@@ -9,7 +9,7 @@
 ## Что уже есть
 
 - Rust workspace и общий протокольный crate.
-- STUN codec: framing, method/class, TLV attributes, XOR address IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1, FINGERPRINT CRC-32; отдельный bounded parser TURN challenge 401/438.
+- STUN codec: framing, method/class, TLV attributes, XOR address IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1/SHA-256, FINGERPRINT CRC-32; отдельный bounded parser TURN challenge 401/438.
 - Экспериментальный QUIC-клиент и QUIC-сервер с TLS 1.3.
 - Экспериментальная передача IP-датаграмм через QUIC DATAGRAM.
 - Серверный IPv4 TUN, адресный пул, source-IP validation и базовая egress ACL.
@@ -96,3 +96,5 @@ README всех шести указанных пользователем исх�
 ### TURN request layer
 
 Добавлены независимые конструкторы Allocate/Refresh/CreatePermission/ChannelBind и структурный разбор успешных Allocate/Refresh ответов. Они не подменяют проверку подлинности: вызывающий код обязан проверить совпадение transaction ID/method/source endpoint и MESSAGE-INTEGRITY до применения результата. VK Calls credential provider и конкретный алгоритм MESSAGE-INTEGRITY остаются не подтверждены.
+
+- Добавлена поддержка `MESSAGE-INTEGRITY-SHA256` по RFC 8489 с полной 32-байтовой подписью, проверкой constant-time и тестом совместного расположения SHA-1 → SHA-256 → FINGERPRINT. Вывод ключа остаётся за внешним auth provider.
