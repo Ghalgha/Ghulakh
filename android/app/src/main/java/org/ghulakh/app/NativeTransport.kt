@@ -12,6 +12,7 @@ class NativeTransport {
         turnCredentialsJson: String,
         pinnedServerKey: ByteArray,
         credential: String,
+        pathCount: Int,
     ): Long
 
     external fun nativeTurnClientIpv4(session: Long): String
