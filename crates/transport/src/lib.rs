@@ -31,6 +31,7 @@ pub struct QuicClient {
     _endpoint: Endpoint,
     connection: Connection,
     session_id: String,
+    client_ipv4: String,
 }
 
 impl QuicClient {
@@ -85,11 +86,12 @@ impl QuicClient {
         )
         .await?;
 
-        let session_id = match response {
+        let (session_id, client_ipv4) = match response {
             ControlMessage::ServerHello {
                 session_id,
+                client_ipv4,
                 request_id: response_id,
-            } if response_id == request_id => session_id,
+            } if response_id == request_id => (session_id, client_ipv4),
             _ => {
                 connection.close(0u32.into(), b"invalid server authentication response");
                 bail!("server returned an unexpected authentication response");
@@ -100,11 +102,16 @@ impl QuicClient {
             _endpoint: endpoint,
             connection,
             session_id,
+            client_ipv4,
         })
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn client_ipv4(&self) -> &str {
+        &self.client_ipv4
     }
 
     pub fn max_datagram_size(&self) -> Option<usize> {
