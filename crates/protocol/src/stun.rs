@@ -1,8 +1,8 @@
 //! Bounded STUN message codec used by the TURN control plane.
 //!
 //! This module deliberately handles framing and address attributes only.
-//! MESSAGE-INTEGRITY, credential derivation and TURN state transitions are
-//! separate concerns and must be implemented with audited cryptographic APIs.
+//! STUN framing, address attributes, integrity and fingerprint primitives.
+//! TURN authentication-key derivation and allocation state remain separate.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -41,6 +41,11 @@ pub enum StunError {
     AttributeTooLarge,
     InvalidAddress,
     UnsupportedAddressFamily,
+    InvalidIntegrityLayout,
+    InvalidIntegrityKey,
+    IntegrityMismatch,
+    InvalidFingerprintLayout,
+    FingerprintMismatch,
 }
 
 impl std::fmt::Display for StunError {
@@ -207,7 +212,7 @@ pub fn verify_fingerprint(input: &[u8]) -> Result<(), StunError> {
     if actual != expected { return Err(StunError::FingerprintMismatch); }
     Ok(())
 }
-\npub fn encode_xor_address(address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
+pub fn encode_xor_address(address: SocketAddr, transaction_id: &[u8; 12]) -> Vec<u8> {
     let mut out = Vec::with_capacity(20);
     out.push(0);
     match address.ip() {
