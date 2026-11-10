@@ -26,10 +26,10 @@ def main() -> int:
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
     descriptor = os.open(path, flags, 0o600)
-    try:
-        os.write(descriptor, (digest + "\n").encode("ascii"))
-    finally:
-        os.close(descriptor)
+    with os.fdopen(descriptor, "a", encoding="ascii") as digest_file:
+        digest_file.write(digest + "\n")
+        digest_file.flush()
+        os.fsync(digest_file.fileno())
 
     os.chmod(path, 0o600)
     sys.stdout.write(credential + "\n")
