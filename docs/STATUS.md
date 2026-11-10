@@ -138,3 +138,8 @@ README всех шести указанных пользователем исх�
 - Enforces 300-second permission lifetime, 600-second channel-binding lifetime, unique channel↔peer mapping, and 300-second reuse cooldown after binding expiry.
 - ChannelBind success also refreshes the peer IP permission in local state.
 - Registry does not issue TURN requests; callers must authenticate the response before recording success.
+
+
+- Added a Tokio UDP socket adapter for the TURN client transport.
+- Supports raw STUN/TURN control datagrams, ChannelData sends, source-preserving UDP receive, and adoption of an already-bound socket suitable for Android VPN protection.
+- Android JNI/VpnService socket protection and integration with TURN transaction/allocation state remain outstanding.
