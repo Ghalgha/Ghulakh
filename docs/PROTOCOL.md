@@ -6,7 +6,7 @@
 
 Целевой транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC-формат ниже сохранён только как описание экспериментального прототипа и не должен использоваться для передачи пользовательских IP-пакетов в целевой конфигурации.
 
-В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Это только кодек сообщений. Он не реализует TURN transaction state machine, long-term credential authentication, MESSAGE-INTEGRITY, FINGERPRINT, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
+В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Кодек реализует MESSAGE-INTEGRITY на HMAC-SHA1 с внешним ключом и FINGERPRINT на CRC-32. Он не выводит long-term ключи, не реализует TURN transaction state machine, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
 
 Следующие обязательные компоненты: TURN long-term authentication, Allocate/Refresh/CreatePermission/ChannelBind state machine, UDP transaction manager, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
 
@@ -104,4 +104,14 @@ STUN сообщения используют 20-байтовый заголов�
 - границы каждого TLV и padding;
 - допустимые family и длину XOR address.
 
-Кодек пока не проверяет MESSAGE-INTEGRITY или FINGERPRINT. До появления криптографической проверки сообщения от сети нельзя считать аутентифицированными. Приём STUN-пакета сам по себе не должен менять состояние allocation; state transition разрешается только после проверки transaction ID, ожидаемого method, source endpoint и integrity согласно выбранному TURN auth profile.
+MESSAGE-INTEGRITY проверяется HMAC-SHA1 с constant-time MAC verification. FINGERPRINT проверяется CRC-32 и служит только для обнаружения повреждений, а не для аутентификации. Проверка MESSAGE-INTEGRITY требует заранее выведенного ключа; механизм его вывода и согласование auth profile с VK Calls ещё не реализованы. До проверки MESSAGE-INTEGRITY сообщения от сети нельзя считать аутентифицированными. Приём STUN-пакета сам по себе не должен менять состояние allocation; state transition разрешается только после проверки transaction ID, ожидаемого method, source endpoint и integrity согласно выбранному TURN auth profile.
+
+
+### Integrity primitives
+
+- `append_message_integrity` добавляет MESSAGE-INTEGRITY с HMAC-SHA1; ключ передаётся вызывающей стороной.
+- `verify_message_integrity` проверяет единственный MESSAGE-INTEGRITY, допускает следующий за ним final FINGERPRINT и корректно учитывает STUN header length при вычислении HMAC.
+- `append_fingerprint` и `verify_fingerprint` реализуют CRC-32 XOR 0x5354554e. FINGERPRINT не является аутентификацией.
+- Проверка HMAC выполняется constant-time через криптографическую библиотеку.
+
+TURN long-term credential derivation, challenge handling (401/438), transaction management и allocation lifecycle пока не реализованы.
