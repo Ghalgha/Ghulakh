@@ -11,7 +11,7 @@ use std::{
 use anyhow::{Context, Result};
 use ghulakh_protocol::DataDatagram;
 use tokio::{
-    sync::mpsc,
+    sync::{mpsc, watch},
     task::JoinHandle,
 };
 
@@ -112,8 +112,20 @@ impl TurnClientRuntime {
         );
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
-        let dataplane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
-        let maintenance_task = tokio::spawn(async move { supervisor.maintain_allocation().await });
+        let (maintenance_stopped_tx, maintenance_stopped_rx) = watch::channel(false);
+        let maintenance_task = tokio::spawn(async move {
+            let result = supervisor.maintain_allocation().await;
+            let _ = maintenance_stopped_tx.send(true);
+            result
+        });
+        let dataplane_task = tokio::spawn(async move {
+            tokio::select! {
+                result = plane.run(uplink_rx, downlink_tx) => result,
+                _ = maintenance_stopped_rx.changed() => {
+                    anyhow::bail!("TURN allocation maintenance stopped")
+                }
+            }
+        });
 
         Ok(Self {
             config,
