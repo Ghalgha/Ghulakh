@@ -43,7 +43,7 @@
 
 ## Граница аутентификации
 
-`TurnCredentialProvider` получает и обновляет временные credentials VK Calls. `TurnAuthProvider` предоставляет явно сконфигурированный профиль: нормализацию строк, выбранный PASSWORD-ALGORITHM, точный список PASSWORD-ALGORITHMS из challenge и функцию получения MESSAGE-INTEGRITY key. Если сервер прислал PASSWORD-ALGORITHMS, клиент обязан вернуть тот же список без изменений; последующие запросы используют MESSAGE-INTEGRITY-SHA256. Алгоритм вывода ключа и алгоритм HMAC — разные параметры профиля.
+`TurnCredentialProvider` получает и обновляет временные credentials VK Calls. `TurnAuthProvider` предоставляет явно сконфигурированный профиль: нормализацию строк, первый поддерживаемый клиентом PASSWORD-ALGORITHM в порядке серверного списка, точный список PASSWORD-ALGORITHMS из challenge и функцию получения MESSAGE-INTEGRITY key. Если сервер прислал PASSWORD-ALGORITHMS, клиент обязан вернуть тот же список без изменений; последующие запросы используют MESSAGE-INTEGRITY-SHA256. Алгоритм вывода ключа и алгоритм HMAC — разные параметры профиля.
 
 Эти интерфейсы не взаимозаменяемы. VK Calls credential не является ключом шифрования IP-пакетов и не передаётся в AEAD frame codec. Парсер и auth context сохраняют и проверяют согласованный список алгоритмов, но не выполняют password-key derivation. Пока реальный профиль VK TURN не подтверждён тестовыми ответами или надёжной спецификацией, production driver обязан завершать запуск диагностируемой ошибкой конфигурации, а не угадывать нормализацию или MD5/SHA-256 derivation.
 
