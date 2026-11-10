@@ -2,7 +2,7 @@ package org.ghulakh.app
 
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
+import javax.net.ssl.HttpsURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
@@ -178,8 +178,11 @@ object VkCallsCredentialProvider {
     }
 
     private fun postForm(endpoint: String, fields: Map<String, String>): JSONObject {
-        val connection = URL(endpoint).openConnection() as HttpURLConnection
+        val url = URL(endpoint)
+        require(url.protocol == "https") { "VK Calls API endpoint must use HTTPS" }
+        val connection = url.openConnection() as HttpsURLConnection
         try {
+            connection.instanceFollowRedirects = false
             connection.requestMethod = "POST"
             connection.connectTimeout = CONNECT_TIMEOUT_MS
             connection.readTimeout = READ_TIMEOUT_MS
