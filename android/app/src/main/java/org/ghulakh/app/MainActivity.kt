@@ -142,6 +142,14 @@ class MainActivity : Activity() {
     @Deprecated("Deprecated by Android; retained for the minimal file picker flow")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_VPN_PERMISSION) {
+            status.text = if (resultCode == RESULT_OK) {
+                "Разрешение VPN выдано. Туннель пока не активируется."
+            } else {
+                "Разрешение VPN не выдано."
+            }
+            return
+        }
         if (requestCode != REQUEST_CERTIFICATE || resultCode != RESULT_OK) return
         val uri = data?.data ?: return
         try {
@@ -188,9 +196,10 @@ class MainActivity : Activity() {
 
         status.text = "Проверка QUIC-соединения…"
         Thread {
-            val transport = NativeTransport()
+            var transport: NativeTransport? = null
             var session = 0L
             try {
+                transport = NativeTransport()
                 session = transport.nativeConnect(
                     profile.host,
                     profile.port,
@@ -198,14 +207,15 @@ class MainActivity : Activity() {
                     profile.rootCertificateDer,
                     profile.credential,
                 )
-                transport.nativePing(session)
+                check(transport.nativePing(session)) { "Сервер не подтвердил ping" }
                 transport.nativeClose(session)
+                session = 0L
                 runOnUiThread {
                     status.text = "QUIC-соединение, проверка TLS и аутентификация прошли успешно. VPN-трафик пока не маршрутизируется."
                 }
             } catch (error: Throwable) {
                 if (session != 0L) {
-                    runCatching { transport.nativeClose(session) }
+                    runCatching { transport?.nativeClose(session) }
                 }
                 runOnUiThread {
                     status.text = "Ошибка соединения: ${error.message}"
