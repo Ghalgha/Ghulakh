@@ -13,8 +13,8 @@ import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * IPv4 packet bridge between Android's TUN descriptor and the native QUIC core.
- * The QUIC UDP socket is protected by the JNI layer before the VPN routes are installed.
+ * Bridges Android's packet TUN to the native QUIC transport.
+ * The native layer protects the underlying UDP socket before VPN routes are installed.
  */
 class GhulakhVpnService : VpnService() {
     private val running = AtomicBoolean(false)
@@ -71,13 +71,13 @@ class GhulakhVpnService : VpnService() {
                 .addAddress(clientAddress, 32)
                 .addAddress("fd77::2", 128)
                 .addRoute("0.0.0.0", 0)
-                // IPv6 is deliberately captured and dropped by the current IPv4-only server.
+                // IPv6 is captured to prevent leaks; the current server drops IPv6 packets.
                 .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
                 .establish()
                 ?: throw IllegalStateException("Android не создал TUN-интерфейс")
             tunnelDescriptor = descriptor
-            updateNotification("VPN активен · IPv4 через защищённый QUIC")
+            updateNotification("VPN активен · IPv4 через QUIC · IPv6 отключён")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -127,11 +127,11 @@ class GhulakhVpnService : VpnService() {
     private fun failSession(message: String, error: Throwable) {
         Log.e(TAG, message, error)
         updateNotification("$message: ${error.message ?: "ошибка"}")
-        running.set(false)
         stopTunnel()
         stopSelf()
     }
 
+    @Synchronized
     private fun stopTunnel() {
         running.set(false)
         try {
@@ -176,22 +176,12 @@ class GhulakhVpnService : VpnService() {
                 ),
             )
         }
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-                .setContentTitle("Ghulakh")
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setOngoing(true)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setContentTitle("Ghulakh")
-                .setContentText(message)
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setOngoing(true)
-                .build()
-        }
+        return Notification.Builder(this, CHANNEL_ID)
+            .setContentTitle("Ghulakh")
+            .setContentText(message)
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setOngoing(true)
+            .build()
     }
 
     private fun updateNotification(message: String) {
