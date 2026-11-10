@@ -8,7 +8,7 @@
 
 В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Это только кодек сообщений. Он не реализует TURN transaction state machine, long-term credential authentication, MESSAGE-INTEGRITY, FINGERPRINT, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
 
-Следующие обязательные компоненты: проверяемая реализация STUN integrity/fingerprint, TURN long-term authentication, Allocate/Refresh/CreatePermission/ChannelBind state machine, UDP transaction manager, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
+Следующие обязательные компоненты: TURN long-term authentication, Allocate/Refresh/CreatePermission/ChannelBind state machine, UDP transaction manager, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
 
 ## Экспериментальный QUIC прототип (не целевой транспорт)
 
