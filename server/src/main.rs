@@ -332,19 +332,36 @@ enum DatagramDisposition {
 }
 
 fn destination_allowed(address: Ipv4Addr) -> bool {
+    let octets = address.octets();
+    let in_subnet = |a: u8, b: u8, c: u8, mask: u8| {
+        let value = u32::from(octets[0]) << 24
+            | u32::from(octets[1]) << 16
+            | u32::from(octets[2]) << 8
+            | u32::from(octets[3]);
+        let network = u32::from(a) << 24
+            | u32::from(b) << 16
+            | u32::from(c) << 8;
+        let prefix_mask = u32::MAX << (32 - mask);
+        value & prefix_mask == network & prefix_mask
+    };
+
     address != Ipv4Addr::BROADCAST
         && !address.is_private()
         && !address.is_loopback()
         && !address.is_link_local()
         && !address.is_multicast()
         && !address.is_unspecified()
-        && address.octets()[0] != 0
-        && address.octets()[0] < 240
-        && !(address.octets()[0] == 100
-            && (64..=127).contains(&address.octets()[1]))
-        && !(address.octets()[0] == 192
-            && address.octets()[1] == 0
-            && address.octets()[2] == 0)
+        && octets[0] != 0
+        && octets[0] < 224
+        // Shared address space (100.64.0.0/10) is not public egress.
+        && !(octets[0] == 100 && (64..=127).contains(&octets[1]))
+        // IETF protocol assignments, documentation and benchmarking ranges.
+        && !in_subnet(192, 0, 0, 24)
+        && !in_subnet(192, 0, 2, 24)
+        && !in_subnet(192, 88, 99, 24)
+        && !in_subnet(198, 18, 0, 15)
+        && !in_subnet(198, 51, 100, 24)
+        && !in_subnet(203, 0, 113, 24)
 }
 
 fn inspect_datagram(
@@ -635,6 +652,11 @@ mod tests {
         assert!(!destination_allowed(Ipv4Addr::new(10, 0, 0, 1)));
         assert!(!destination_allowed(Ipv4Addr::new(192, 168, 1, 1)));
         assert!(!destination_allowed(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(192, 0, 2, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(198, 18, 0, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(198, 51, 100, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(203, 0, 113, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(100, 64, 0, 1)));
         assert!(destination_allowed(Ipv4Addr::new(1, 1, 1, 1)));
     }
 
