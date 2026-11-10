@@ -264,7 +264,21 @@ mod tests {
             StunAttribute { kind: 0xC001, value: vec![1,2,3] },
         ]}
     }
-    #[test] fn message_integrity_round_trip_and_tamper_detection() {\n        let m = sample(StunClass::Request);\n        let encoded = append_message_integrity(&m, b\"test-key\").unwrap();\n        verify_message_integrity(&encoded, b\"test-key\").unwrap();\n        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;\n        assert_eq!(verify_message_integrity(&tampered, b\"test-key\"), Err(StunError::IntegrityMismatch));\n    }\n    #[test] fn fingerprint_round_trip_and_tamper_detection() {\n        let encoded = sample(StunClass::Request).encode().unwrap();\n        let encoded = append_fingerprint(&encoded).unwrap();\n        verify_fingerprint(&encoded).unwrap();\n        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;\n        assert_eq!(verify_fingerprint(&tampered), Err(StunError::FingerprintMismatch));\n    }\n    #[test] fn message_round_trip_all_classes() {
+    #[test] fn message_integrity_round_trip_and_tamper_detection() {
+        let m = sample(StunClass::Request);
+        let encoded = append_message_integrity(&m, b"test-key").unwrap();
+        verify_message_integrity(&encoded, b"test-key").unwrap();
+        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;
+        assert_eq!(verify_message_integrity(&tampered, b"test-key"), Err(StunError::IntegrityMismatch));
+    }
+    #[test] fn fingerprint_round_trip_and_tamper_detection() {
+        let encoded = sample(StunClass::Request).encode().unwrap();
+        let encoded = append_fingerprint(&encoded).unwrap();
+        verify_fingerprint(&encoded).unwrap();
+        let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;
+        assert_eq!(verify_fingerprint(&tampered), Err(StunError::FingerprintMismatch));
+    }
+    #[test] fn message_round_trip_all_classes() {
         for class in [StunClass::Request,StunClass::Indication,StunClass::SuccessResponse,StunClass::ErrorResponse] {
             let m=sample(class); assert_eq!(StunMessage::decode(&m.encode().unwrap()).unwrap(),m);
         }
