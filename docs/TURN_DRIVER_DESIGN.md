@@ -33,6 +33,12 @@
 11. Только после подтверждённого ChannelBind открыть data path.
 12. Обновлять allocation, permission и channel до истечения их сроков; при потере allocation полностью очистить peer state и выполнить ограниченный reconnect.
 
+## Реализация первого control-driver среза
+
+`crates/transport/src/turn_driver.rs` связывает UDP adapter, transaction manager, auth context, allocation manager и peer registry. Он предоставляет отдельные операции Allocate, CreatePermission, ChannelBind и Refresh; все операции выполняются через один mutable driver, поэтому control transactions не конкурируют за один socket receive loop. Начальный unauthenticated 401 возвращается как структурированный challenge для credential/auth слоя. 438 принимается только после проверки MESSAGE-INTEGRITY; authenticated 401 не используется для повторного согласования credentials. Состояние allocation/peer обновляется только после проверки ответа.
+
+Это ещё не автоматический session supervisor: nonce rotation/credential renewal, повтор Allocate после challenge, reconnect, непрерывный ChannelData receive path и TUN data path остаются отдельными задачами. Driver намеренно не выводит integrity key из VK Calls username/password.
+
 ## Проверка управляющих ответов
 
 Каждый ответ сначала сопоставляется по transaction ID, method и точному source SocketAddr. До изменения состояния проверяется MESSAGE-INTEGRITY согласно согласованному auth profile. TransactionManager.complete вызывается только после успешной проверки целостности и принятия ожидаемого перехода состояния.
