@@ -9,7 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ghulakh_protocol::DataDatagram;
+use ghulakh_protocol::{DataDatagram, turn_path_context::TurnPathContext};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -20,7 +20,9 @@ use crate::{
     turn_data::{TurnDataReceiver, TurnDataSender},
     turn_dataplane::{TurnDataPlane, TurnDataPlaneStats},
     turn_driver::TurnClientDriver,
-    turn_handshake_task::{run_turn_client_handshake, TurnClientSession},
+    turn_handshake_task::{
+        run_turn_client_handshake, run_turn_client_handshake_with_path_context, TurnClientSession,
+    },
     turn_supervisor::TurnSessionSupervisor,
     turn_udp::TurnUdpSocket,
     turn_credentials::{TurnCredentials, TurnScheme, TurnWireTransport},
@@ -32,6 +34,7 @@ const APP_QUEUE_CAPACITY: usize = 128;
 /// Fully assembled client-side TURN VPN dataplane.
 pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
+    path_context: Option<TurnPathContext>,
     uplink: mpsc::Sender<DataDatagram>,
     downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
@@ -48,6 +51,37 @@ impl TurnClientRuntime {
         gateway_peer: SocketAddr,
         pinned_server_key: &[u8],
         tunnel_credential: &[u8],
+    ) -> Result<Self> {
+        Self::connect_inner(
+            protected_socket, credentials, gateway_peer, pinned_server_key, tunnel_credential, None,
+        ).await
+    }
+
+    pub async fn connect_with_path_context(
+        protected_socket: StdUdpSocket,
+        credentials: TurnCredentials,
+        gateway_peer: SocketAddr,
+        pinned_server_key: &[u8],
+        tunnel_credential: &[u8],
+        path_context: TurnPathContext,
+    ) -> Result<Self> {
+        Self::connect_inner(
+            protected_socket,
+            credentials,
+            gateway_peer,
+            pinned_server_key,
+            tunnel_credential,
+            Some(path_context),
+        ).await
+    }
+
+    async fn connect_inner(
+        protected_socket: StdUdpSocket,
+        credentials: TurnCredentials,
+        gateway_peer: SocketAddr,
+        pinned_server_key: &[u8],
+        tunnel_credential: &[u8],
+        path_context: Option<TurnPathContext>,
     ) -> Result<Self> {
         anyhow::ensure!(gateway_peer.port() != 0, "TURN gateway peer port is zero");
         anyhow::ensure!(pinned_server_key.len() == 32, "pinned Noise server key must be 32 bytes");
@@ -90,14 +124,27 @@ impl TurnClientRuntime {
         let (handshake_socket, handshake_inbound) = supervisor
             .take_handshake_plane_parts()
             .context("take isolated TURN handshake queue")?;
-        let TurnClientSession { frame_keys, config } = run_turn_client_handshake(
-            handshake_socket,
-            handshake_inbound,
-            relay_endpoint,
-            DEFAULT_TURN_CHANNEL,
-            pinned_server_key,
-            tunnel_credential,
-        ).await.context("authenticate VPN session over TURN")?;
+        let handshake = match path_context {
+            Some(context) => run_turn_client_handshake_with_path_context(
+                handshake_socket,
+                handshake_inbound,
+                relay_endpoint,
+                DEFAULT_TURN_CHANNEL,
+                pinned_server_key,
+                tunnel_credential,
+                context,
+            ).await,
+            None => run_turn_client_handshake(
+                handshake_socket,
+                handshake_inbound,
+                relay_endpoint,
+                DEFAULT_TURN_CHANNEL,
+                pinned_server_key,
+                tunnel_credential,
+            ).await,
+        };
+        let TurnClientSession { frame_keys, config } =
+            handshake.context("authenticate VPN session over TURN")?;
 
         let (data_socket, data_inbound) = supervisor
             .take_data_plane_parts()
@@ -129,6 +176,7 @@ impl TurnClientRuntime {
 
         Ok(Self {
             config,
+            path_context,
             uplink,
             downlink: tokio::sync::Mutex::new(downlink),
             dataplane_task,
