@@ -6,6 +6,10 @@
 
 use std::{
     net::{SocketAddr, UdpSocket as StdUdpSocket},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::{Context, Result};
