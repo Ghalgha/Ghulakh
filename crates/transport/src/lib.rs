@@ -12,6 +12,8 @@ use rustls::{pki_types::CertificateDer, RootCertStore};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::io::AsyncWriteExt;
 
+pub mod jni_bridge;
+
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_BUFFER: usize = MAX_DATAGRAM_SIZE * 32;
 
