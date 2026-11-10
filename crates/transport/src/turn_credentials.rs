@@ -25,7 +25,7 @@ pub enum TurnWireTransport {
     Tls,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TurnEndpoint {
     pub scheme: TurnScheme,
     pub host: String,
@@ -33,6 +33,19 @@ pub struct TurnEndpoint {
     pub transport: TurnWireTransport,
     /// Query parameters are retained verbatim, including unknown parameters.
     pub query: Vec<(String, String)>,
+}
+
+impl fmt::Debug for TurnEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TurnEndpoint")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("transport", &self.transport)
+            .field("query", &"<redacted>")
+            .finish()
+    }
 }
 
 impl TurnEndpoint {
