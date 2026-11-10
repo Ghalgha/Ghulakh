@@ -29,6 +29,7 @@ pub enum ControlMessage {
         session_id: String,
         client_ipv4: String,
         tunnel_enabled: bool,
+        forwarding_enabled: bool,
         request_id: String,
     },
     Ping {
