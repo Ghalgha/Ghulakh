@@ -217,7 +217,10 @@ impl TurnClientDriver {
             Instant::now(),
             self.transaction_policy,
         ).map_err(|e| anyhow::anyhow!("register TURN transaction: {e}"))?;
-        self.socket.send_datagram(&wire).await.context("send TURN request")?;
+        if let Err(error) = self.socket.send_datagram(&wire).await {
+            self.transactions.cancel(&id);
+            return Err(error).context("send TURN request");
+        }
 
         let mut buffer = vec![0u8; RECEIVE_BUFFER_SIZE];
         loop {
@@ -242,8 +245,10 @@ impl TurnClientDriver {
                             // request and must itself pass integrity verification.
                             if challenge.code == 438 {
                                 if let Some(context) = auth {
-                                    context.verify_response(&buffer[..length])
-                                        .context("verify authenticated stale-nonce response")?;
+                                    if let Err(error) = context.verify_response(&buffer[..length]) {
+                                        self.transactions.complete(&id);
+                                        return Err(error).context("verify authenticated stale-nonce response");
+                                    }
                                 } else {
                                     self.transactions.complete(&id);
                                     return Err(TurnDriverError::MissingAuthentication.into());
@@ -253,8 +258,10 @@ impl TurnClientDriver {
                             return Err(TurnDriverError::Challenge(challenge).into());
                         }
                         if let Some(context) = auth {
-                            context.verify_response(&buffer[..length])
-                                .context("verify authenticated TURN error response")?;
+                            if let Err(error) = context.verify_response(&buffer[..length]) {
+                                self.transactions.complete(&id);
+                                return Err(error).context("verify authenticated TURN error response");
+                            }
                         }
                         let code = response.attributes.iter()
                             .find(|attribute| attribute.kind == ghulakh_protocol::stun::ATTR_ERROR_CODE)
@@ -264,8 +271,10 @@ impl TurnClientDriver {
                         return Err(TurnDriverError::ServerError { code: code.unwrap_or(0) }.into());
                     }
                     if let Some(context) = auth {
-                        context.verify_response(&buffer[..length])
-                            .context("verify TURN success response")?;
+                        if let Err(error) = context.verify_response(&buffer[..length]) {
+                            self.transactions.complete(&id);
+                            return Err(error).context("verify TURN success response");
+                        }
                     } else {
                         self.transactions.complete(&id);
                         return Err(TurnDriverError::MissingAuthentication.into());
@@ -277,9 +286,14 @@ impl TurnClientDriver {
                     for event in self.transactions.poll(Instant::now()) {
                         match event {
                             TransactionEvent::Retransmit { request, destination, .. } => {
-                                self.socket.send_datagram(&request).await
-                                    .context("retransmit TURN request")?;
-                                anyhow::ensure!(destination == self.socket.server_addr(), "TURN retry destination changed");
+                                if destination != self.socket.server_addr() {
+                                    self.transactions.cancel(&id);
+                                    anyhow::bail!("TURN retry destination changed");
+                                }
+                                if let Err(error) = self.socket.send_datagram(&request).await {
+                                    self.transactions.cancel(&id);
+                                    return Err(error).context("retransmit TURN request");
+                                }
                             }
                             TransactionEvent::TimedOut { transaction_id, .. } if transaction_id == id => {
                                 return Err(TurnDriverError::Timeout.into());
