@@ -236,7 +236,7 @@ pub struct VkCallsTurnAuthProvider {
 }
 
 impl VkCallsTurnAuthProvider {
-    pub fn new(username: String, password: String) -> Result<Self> {
+    pub fn new(username: String, password: String) -> anyhow::Result<Self> {
         anyhow::ensure!(!username.is_empty(), "VK Calls TURN username is empty");
         anyhow::ensure!(!password.is_empty(), "VK Calls TURN password is empty");
         anyhow::ensure!(username.len() <= 4096 && password.len() <= 4096, "VK Calls TURN credential is too large");
@@ -246,7 +246,7 @@ impl VkCallsTurnAuthProvider {
         })
     }
 
-    pub fn from_credentials(credentials: TurnCredentials) -> Result<Self> {
+    pub fn from_credentials(credentials: TurnCredentials) -> anyhow::Result<Self> {
         Self::new(
             credentials.username().to_owned(),
             credentials.password().to_owned(),
