@@ -98,3 +98,11 @@ README всех шести указанных пользователем исх�
 Добавлены независимые конструкторы Allocate/Refresh/CreatePermission/ChannelBind и структурный разбор успешных Allocate/Refresh ответов. Они не подменяют проверку подлинности: вызывающий код обязан проверить совпадение transaction ID/method/source endpoint и MESSAGE-INTEGRITY до применения результата. VK Calls credential provider и конкретный алгоритм MESSAGE-INTEGRITY остаются не подтверждены.
 
 - Добавлена поддержка `MESSAGE-INTEGRITY-SHA256` по RFC 8489 с полной 32-байтовой подписью, проверкой constant-time и тестом совместного расположения SHA-1 → SHA-256 → FINGERPRINT. Вывод ключа остаётся за внешним auth provider.
+
+
+### TURN password algorithm attributes
+
+- Added bounded parsing/encoding for RFC 8489 `PASSWORD-ALGORITHMS` and `PASSWORD-ALGORITHM`.
+- Unknown algorithm identifiers are retained; duplicate IDs, malformed lengths, and oversized parameter blocks are rejected.
+- Generic selection prefers SHA-256 when offered and otherwise MD5. This is protocol negotiation logic only, not evidence that VK Calls currently offers either algorithm.
+- Credential normalization, key derivation, and VK Calls profile confirmation remain unimplemented.
