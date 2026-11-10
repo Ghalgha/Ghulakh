@@ -112,7 +112,7 @@ impl TurnClientRuntime {
         );
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
-        let (maintenance_stopped_tx, maintenance_stopped_rx) = watch::channel(false);
+        let (maintenance_stopped_tx, mut maintenance_stopped_rx) = watch::channel(false);
         let maintenance_task = tokio::spawn(async move {
             let result = supervisor.maintain_allocation().await;
             let _ = maintenance_stopped_tx.send(true);
