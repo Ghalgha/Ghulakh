@@ -102,6 +102,23 @@ mod tests {
     }
 
     #[test]
+    fn encodes_authenticated_keepalive_without_ip_payload() {
+        let mut sender = pair().0;
+        let encoded = sender.encode_keepalive().unwrap();
+        let channel = decode_channel_data(&encoded).unwrap();
+        let mut opener = FrameOpener::new(
+            [0x42; 32],
+            [0x31; 4],
+            [0x77; 8],
+            FrameDirection::ClientToServer,
+        );
+        assert_eq!(
+            opener.open(channel.data).unwrap().as_slice(),
+            ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD,
+        );
+    }
+
+    #[test]
     fn rejects_wrong_channel_before_decryption() {
         let (mut sender, _) = pair();
         let mut encoded = sender.encode_packet(&ipv4_packet()).unwrap();
