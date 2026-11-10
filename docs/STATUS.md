@@ -53,7 +53,7 @@ README всех шести указанных пользователем исх�
 - Строгое ограничение message length, проверка magic cookie и TLV boundaries/padding.
 - Сохранение неизвестных атрибутов.
 - XOR address для IPv4 и IPv6.
-- MESSAGE-INTEGRITY HMAC-SHA1: добавление и constant-time проверка с внешним ключом.
+- MESSAGE-INTEGRITY HMAC-SHA1: добавление и constant-time проверка с внешним ключом, включая корректную обработку следующего FINGERPRINT.
 - FINGERPRINT CRC-32: добавление и проверка; не используется как аутентификация.
 - Unit tests round-trip для всех STUN classes, malformed length/cookie и XOR address.
 
