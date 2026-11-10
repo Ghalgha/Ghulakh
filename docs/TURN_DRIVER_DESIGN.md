@@ -55,6 +55,14 @@ Actor классифицирует UDP ChannelData по корректному R
 
 Actor подключён к `TurnClientDriver`: control transactions отправляются через bounded actor command queue и получают ответы через единственный control receiver; data receiver может быть передан отдельному dataplane consumer. Это устраняет конкурирующие socket receive loops. Сам data receiver пока не подключён к `TurnDataReceiver`, Android TUN и серверному gateway, поэтому сквозной TURN data path ещё не готов.
 
+## Защищённый TURN dataplane
+
+Добавлен `crates/transport/src/turn_dataplane.rs`. Он соединяет bounded data queue socket actor с `TurnDataReceiver` и `TurnDataSender`: uplink принимает целые `DataDatagram` от TUN-facing consumer, защищает их directional AEAD frame и отправляет через ChannelData; downlink принимает только датаграммы от настроенного TURN endpoint, проверяет channel number, AEAD, session/direction/replay и формат IP-пакета, после чего передаёт пакет в bounded очередь TUN-facing consumer. Пакеты от неожиданного UDP source отбрасываются до AEAD decode. Ошибки аутентификации/формата учитываются как rejected frames, а не завершают весь dataplane.
+
+`TurnClientDriver::take_data_plane_parts()` передаёт data receiver и clone actor send handle без передачи socket ownership. Control driver продолжает использовать тот же actor. Key agreement, TURN credentials, allocation, CreatePermission и ChannelBind по-прежнему должны быть завершены до запуска dataplane; сам dataplane не создаёт ключи и не считает наличие AEAD PSK достаточным доказательством установления сессии.
+
+Добавлен mock-UDP тест, который проводит IP packet через actor, ChannelData и обе directional AEAD стороны. Это проверяет локальную композицию компонентов, но не является испытанием реального TURN relay или VK Calls.
+
 ## Проверка управляющих ответов
 
 Каждый ответ сначала сопоставляется по transaction ID, method и точному source SocketAddr. До изменения состояния проверяется MESSAGE-INTEGRITY согласно согласованному auth profile. TransactionManager.complete вызывается только после успешной проверки целостности и принятия ожидаемого перехода состояния.
