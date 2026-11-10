@@ -420,8 +420,8 @@ mod path_group_tests {
     async fn saturated_flow_queue_drops_newest_without_blocking_or_reassigning() {
         let (sender, mut receiver) = mpsc::channel(1);
         let dropped = AtomicU64::new(0);
-        let first = DataDatagram { kind: IpPacketKind::Ipv4, packet: packet(12000) };
-        let second = DataDatagram { kind: IpPacketKind::Ipv4, packet: packet(12001) };
+        let first = DataDatagram { kind: ghulakh_protocol::IpPacketKind::Ipv4, packet: packet(12000) };
+        let second = DataDatagram { kind: ghulakh_protocol::IpPacketKind::Ipv4, packet: packet(12001) };
 
         enqueue_uplink_packet(&sender, first.clone(), &dropped).unwrap();
         assert!(matches!(
