@@ -18,7 +18,7 @@ use std::{
 use anyhow::{Context, Result};
 use ghulakh_protocol::{
     stun::{StunClass, StunMessage, METHOD_DATA},
-    turn_channel_data::decode_channel_data,
+    turn_channel_data::{decode_channel_data, encode_channel_data},
     handshake_datagram::HandshakeEnvelope,
 };
 use tokio::{
@@ -85,6 +85,21 @@ impl TurnSocketHandle {
             .await
             .context("TURN socket actor dropped send result")?
             .map_err(anyhow::Error::msg)
+    }
+
+    /// Send a validated handshake envelope as TURN ChannelData over the
+    /// existing socket actor. The caller must have completed ChannelBind for
+    /// this peer/channel before using this method.
+    pub async fn send_handshake(
+        &self,
+        channel_number: u16,
+        envelope: &[u8],
+    ) -> Result<usize> {
+        HandshakeEnvelope::decode(envelope)
+            .context("validate outgoing TURN handshake envelope")?;
+        let datagram = encode_channel_data(channel_number, envelope)
+            .context("encode TURN handshake ChannelData")?;
+        self.send_datagram(datagram).await
     }
 
     pub fn stats(&self) -> TurnSocketActorStats {
@@ -314,6 +329,25 @@ mod tests {
         assert!(receivers.control.try_recv().is_err());
         assert!(receivers.data.try_recv().is_err());
         relay_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_handshake_envelope_inside_turn_channel_data() {
+        let (handle, _receivers, relay, _) = pair().await;
+        let envelope = HandshakeEnvelope {
+            phase: ghulakh_protocol::handshake_datagram::HandshakePhase::ClientInit,
+            handshake_id: [9; 16],
+            payload: b"noise-message-1".to_vec(),
+        }.encode().unwrap();
+
+        handle.send_handshake(0x4001, &envelope).await.unwrap();
+
+        let mut buffer = [0u8; 256];
+        let (length, _) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        let channel = decode_channel_data(&buffer[..length]).unwrap();
+        assert_eq!(channel.channel_number, 0x4001);
+        assert_eq!(channel.data, envelope);
     }
 
     #[tokio::test]
