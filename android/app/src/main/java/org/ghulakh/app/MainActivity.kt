@@ -83,8 +83,15 @@ class MainActivity : Activity() {
         }
         content.addView(status)
         content.addView(Button(this).apply {
-            text = "Запросить разрешение Android VPN"
-            setOnClickListener { requestVpnPermission() }
+            text = "Запустить VPN"
+            setOnClickListener { startVpn() }
+        })
+        content.addView(Button(this).apply {
+            text = "Остановить VPN"
+            setOnClickListener {
+                stopService(Intent(this@MainActivity, GhulakhVpnService::class.java))
+                status.text = "Запрос на остановку VPN отправлен."
+            }
         })
 
         setContentView(ScrollView(this).apply {
@@ -144,10 +151,10 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_VPN_PERMISSION) {
-            status.text = if (resultCode == RESULT_OK) {
-                "Разрешение VPN выдано. Туннель пока не активируется."
+            if (resultCode == RESULT_OK) {
+                startVpnService()
             } else {
-                "Разрешение VPN не выдано."
+                status.text = "Разрешение VPN не выдано."
             }
             return
         }
@@ -244,13 +251,26 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun requestVpnPermission() {
+    private fun startVpn() {
+        if (store.load() == null) {
+            status.text = "Сначала сохраните профиль соединения."
+            return
+        }
         val permissionIntent = VpnService.prepare(this)
         if (permissionIntent == null) {
-            status.text = "Разрешение VPN уже выдано. Туннель пока не активируется."
+            startVpnService()
         } else {
             @Suppress("DEPRECATION")
             startActivityForResult(permissionIntent, REQUEST_VPN_PERMISSION)
+        }
+    }
+
+    private fun startVpnService() {
+        try {
+            status.text = "Запуск VPN-сервиса…"
+            startForegroundService(Intent(this, GhulakhVpnService::class.java))
+        } catch (error: Exception) {
+            status.text = "Не удалось запустить VPN: ${error.message}"
         }
     }
 
