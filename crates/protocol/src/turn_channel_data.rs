@@ -5,7 +5,7 @@
 //! separately.
 
 pub const CHANNEL_NUMBER_MIN: u16 = 0x4000;
-pub const CHANNEL_NUMBER_MAX: u16 = 0x7fff;
+pub const CHANNEL_NUMBER_MAX: u16 = 0x4fff;
 pub const CHANNEL_DATA_HEADER_LEN: usize = 4;
 pub const MAX_UDP_CHANNEL_DATA_PAYLOAD: usize = 65_503;
 
@@ -17,7 +17,7 @@ pub struct ChannelData<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ChannelDataError {
-    #[error("channel number is outside 0x4000..=0x7fff")]
+    #[error("channel number is outside 0x4000..=0x4fff")]
     InvalidChannelNumber,
     #[error("ChannelData header is truncated")]
     Truncated,
@@ -42,7 +42,7 @@ pub fn encode_channel_data(channel_number: u16, data: &[u8]) -> Result<Vec<u8>, 
     Ok(output)
 }
 
-/// Decode a complete, unpadded UDP ChannelData datagram.
+/// Decode a complete UDP ChannelData datagram, allowing optional 0–3 byte padding.
 pub fn decode_channel_data(input: &[u8]) -> Result<ChannelData<'_>, ChannelDataError> {
     if input.len() < CHANNEL_DATA_HEADER_LEN {
         return Err(ChannelDataError::Truncated);
@@ -55,7 +55,9 @@ pub fn decode_channel_data(input: &[u8]) -> Result<ChannelData<'_>, ChannelDataE
     if declared_len > MAX_UDP_CHANNEL_DATA_PAYLOAD {
         return Err(ChannelDataError::PayloadTooLarge);
     }
-    if input.len() != CHANNEL_DATA_HEADER_LEN + declared_len {
+    let unpadded_len = CHANNEL_DATA_HEADER_LEN + declared_len;
+    let padded_len = (unpadded_len + 3) & !3;
+    if input.len() != unpadded_len && input.len() != padded_len {
         return Err(ChannelDataError::InvalidLength);
     }
     Ok(ChannelData {
@@ -78,7 +80,7 @@ mod tests {
 
     #[test]
     fn accepts_empty_payload() {
-        let encoded = encode_channel_data(0x7fff, &[]).unwrap();
+        let encoded = encode_channel_data(0x4fff, &[]).unwrap();
         assert_eq!(decode_channel_data(&encoded).unwrap().data, &[]);
     }
 
@@ -86,6 +88,7 @@ mod tests {
     fn rejects_invalid_channel_numbers() {
         assert_eq!(encode_channel_data(0x3fff, b"x"), Err(ChannelDataError::InvalidChannelNumber));
         assert_eq!(decode_channel_data(&[0x3f, 0xff, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
+        assert_eq!(decode_channel_data(&[0x50, 0, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
         assert_eq!(decode_channel_data(&[0x80, 0, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
     }
 
@@ -94,6 +97,14 @@ mod tests {
         assert_eq!(decode_channel_data(&[0x40, 0, 0]), Err(ChannelDataError::Truncated));
         assert_eq!(decode_channel_data(&[0x40, 0, 0, 2, 1]), Err(ChannelDataError::InvalidLength));
         assert_eq!(decode_channel_data(&[0x40, 0, 0, 1, 1, 0]), Err(ChannelDataError::InvalidLength));
+    }
+
+    #[test]
+    fn accepts_optional_udp_padding() {
+        let encoded = [0x40, 0x01, 0, 1, 0xaa, 0, 0, 0];
+        let decoded = decode_channel_data(&encoded).unwrap();
+        assert_eq!(decoded.channel_number, 0x4001);
+        assert_eq!(decoded.data, &[0xaa]);
     }
 
     #[test]
