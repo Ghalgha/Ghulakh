@@ -4,7 +4,7 @@
 //! provider is called only when TURN returns an initial or stale-nonce challenge.
 //! This supervisor serializes allocation and refresh and bounds challenge retries.
 
-use std::{future::Future, net::SocketAddr, pin::Pin, time::Instant};
+use std::{collections::BTreeMap, future::Future, net::{IpAddr, SocketAddr}, pin::Pin, time::{Duration, Instant}};
 
 use anyhow::{Context, Result};
 use ghulakh_protocol::turn_auth::TurnChallenge;
@@ -33,6 +33,8 @@ pub struct TurnSessionSupervisor<P> {
     provider: P,
     auth: Option<TurnAuthContext>,
     max_challenge_retries: usize,
+    permission_peers: BTreeMap<IpAddr, SocketAddr>,
+    channel_bindings: BTreeMap<u16, SocketAddr>,
 }
 
 impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
@@ -42,6 +44,8 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
             provider,
             auth: None,
             max_challenge_retries: MAX_CHALLENGE_RETRIES,
+            permission_peers: BTreeMap::new(),
+            channel_bindings: BTreeMap::new(),
         }
     }
 
@@ -115,20 +119,58 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
     /// The same supervisor must remain the sole owner of the driver.
     pub async fn maintain_allocation(&mut self) -> Result<()> {
         loop {
-            let (refresh_at, lifetime_seconds) = {
-                let lease = self.driver.allocation()
-                    .context("TURN allocation is not active")?;
-                (lease.refresh_at, lease.lifetime_seconds)
-            };
-            tokio::time::sleep_until(tokio::time::Instant::from_std(refresh_at)).await;
-            if self.driver.allocation().is_none() {
-                anyhow::bail!("TURN allocation ended before refresh deadline");
+            let now = Instant::now();
+            let lease = self.driver.allocation().context("TURN allocation is not active")?;
+            let mut next_deadline = lease.refresh_at;
+            if let Some(registry) = self.driver.peer_registry() {
+                for peer in self.permission_peers.keys() {
+                    if let Some(expiry) = registry.permission_expires_at(*peer) {
+                        next_deadline = next_deadline.min(expiry.checked_sub(Duration::from_secs(60)).unwrap_or(now));
+                    }
+                }
+                for channel in self.channel_bindings.keys() {
+                    if let Some(expiry) = registry.channel_expires_at(*channel) {
+                        next_deadline = next_deadline.min(expiry.checked_sub(Duration::from_secs(120)).unwrap_or(now));
+                    }
+                }
             }
-            self.refresh(lifetime_seconds).await.context("maintain TURN allocation")?;
+            let lifetime_seconds = lease.lifetime_seconds;
+            tokio::time::sleep_until(tokio::time::Instant::from_std(next_deadline)).await;
+            let now = Instant::now();
+            let allocation_due = self.driver.allocation()
+                .is_some_and(|active| now >= active.refresh_at);
+            if allocation_due {
+                self.refresh(lifetime_seconds).await.context("maintain TURN allocation")?;
+            }
+
+            let due_channels: Vec<(u16, SocketAddr)> = self.channel_bindings.iter()
+                .filter_map(|(channel, peer)| {
+                    let due = self.driver.peer_registry()
+                        .and_then(|registry| registry.channel_expires_at(*channel))
+                        .is_some_and(|expiry| now >= expiry.checked_sub(Duration::from_secs(120)).unwrap_or(now));
+                    due.then_some((*channel, *peer))
+                })
+                .collect();
+            for (channel, peer) in due_channels {
+                self.channel_bind(channel, peer).await.context("refresh TURN channel binding")?;
+            }
+
+            let due_permissions: Vec<SocketAddr> = self.permission_peers.iter()
+                .filter_map(|(ip, peer)| {
+                    let due = self.driver.peer_registry()
+                        .and_then(|registry| registry.permission_expires_at(*ip))
+                        .is_some_and(|expiry| now >= expiry.checked_sub(Duration::from_secs(60)).unwrap_or(now));
+                    due.then_some(*peer)
+                })
+                .collect();
+            if !due_permissions.is_empty() {
+                self.create_permission(&due_permissions).await.context("refresh TURN permissions")?;
+            }
+
+            self.expire_peer_state();
             if self.driver.allocation().is_none() {
                 anyhow::bail!("TURN allocation was deallocated");
             }
-            self.expire_peer_state();
         }
     }
 
@@ -138,17 +180,58 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
     }
 
     pub async fn create_permission(&mut self, peers: &[SocketAddr]) -> Result<()> {
-        let auth = self.auth.as_ref().context("TURN auth context is not initialized")?;
-        self.driver.create_permission(peers, auth).await
+        for attempt in 0..=self.max_challenge_retries {
+            let auth = self.auth.as_ref().context("TURN auth context is not initialized")?;
+            match self.driver.create_permission(peers, auth).await {
+                Ok(()) => {
+                    for peer in peers {
+                        self.permission_peers.insert(peer.ip(), *peer);
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    let Some(challenge) = challenge_from_error(&error) else {
+                        return Err(error).context("TURN CreatePermission");
+                    };
+                    if challenge.code != 438 || attempt == self.max_challenge_retries {
+                        return Err(error).context("TURN CreatePermission challenge retry limit reached");
+                    }
+                    self.auth = Some(self.provider.context_for_challenge(challenge).await
+                        .context("obtain TURN auth context for CreatePermission stale nonce")?);
+                }
+            }
+        }
+        anyhow::bail!("TURN CreatePermission retry loop exhausted")
     }
 
     pub async fn channel_bind(&mut self, channel_number: u16, peer: SocketAddr) -> Result<()> {
-        let auth = self.auth.as_ref().context("TURN auth context is not initialized")?;
-        self.driver.channel_bind(channel_number, peer, auth).await
+        for attempt in 0..=self.max_challenge_retries {
+            let auth = self.auth.as_ref().context("TURN auth context is not initialized")?;
+            match self.driver.channel_bind(channel_number, peer, auth).await {
+                Ok(()) => {
+                    self.permission_peers.insert(peer.ip(), peer);
+                    self.channel_bindings.insert(channel_number, peer);
+                    return Ok(());
+                }
+                Err(error) => {
+                    let Some(challenge) = challenge_from_error(&error) else {
+                        return Err(error).context("TURN ChannelBind");
+                    };
+                    if challenge.code != 438 || attempt == self.max_challenge_retries {
+                        return Err(error).context("TURN ChannelBind challenge retry limit reached");
+                    }
+                    self.auth = Some(self.provider.context_for_challenge(challenge).await
+                        .context("obtain TURN auth context for ChannelBind stale nonce")?);
+                }
+            }
+        }
+        anyhow::bail!("TURN ChannelBind retry loop exhausted")
     }
 
     pub fn close(&mut self) {
         self.auth = None;
+        self.permission_peers.clear();
+        self.channel_bindings.clear();
         self.driver.close();
     }
 }
