@@ -20,6 +20,8 @@ class NativeTransport {
 
     external fun nativeTunnelEnabled(session: Long): Boolean
 
+    external fun nativeForwardingEnabled(session: Long): Boolean
+
     external fun nativeSendPacket(session: Long, packet: ByteArray): Boolean
 
     /** Blocks until a validated IPv4/IPv6 packet arrives or the session fails. */
