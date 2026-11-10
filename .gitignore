@@ -9,3 +9,4 @@ local.properties
 *.keystore
 *.pem
 *.key
+android/app/src/main/jniLibs/**/*.so
