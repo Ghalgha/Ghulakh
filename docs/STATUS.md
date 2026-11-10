@@ -124,3 +124,11 @@ README всех шести указанных пользователем исх�
 - Added a UDP ChannelData encoder/decoder with declared-length validation and optional UDP padding support.
 - Corrected ChannelBind and ChannelData channel-number validation to the RFC 8656 range `0x4000–0x4FFF` (not the older wider range).
 - Channel binding registry, permission expiry, peer validation, authenticated frame protection and relay socket integration remain outstanding.
+
+
+### Protected TURN data frames
+
+- Added a ChaCha20-Poly1305 frame codec with authenticated session ID, direction, sequence and payload length.
+- Added per-direction nonce construction from a 32-bit prefix and monotonic 64-bit sequence.
+- Added a 128-packet replay window; unauthenticated frames do not advance replay state.
+- Key agreement/key provisioning and integration with TURN UDP sockets, Android TUN and server gateway remain outstanding.
