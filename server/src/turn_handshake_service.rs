@@ -340,6 +340,19 @@ mod tests {
     }
 
     #[test]
+    fn virtual_ipv4_addresses_can_be_released_and_reused() {
+        let (mut service, _) = service(b"secret");
+        let first = service.allocate_virtual_ipv4().unwrap();
+        service.allocated_ips.insert(first);
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert!(service.release_virtual_ipv4(first));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        service.next_client_host = u32::from(first.octets()[2]) * 256
+            + u32::from(first.octets()[3]);
+        assert_eq!(service.allocate_virtual_ipv4().unwrap(), first);
+    }
+
+    #[test]
     fn per_peer_rate_limit_is_bounded() {
         let (mut service, _) = service(b"secret");
         let now = Instant::now();
