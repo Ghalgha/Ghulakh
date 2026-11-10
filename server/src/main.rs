@@ -115,7 +115,7 @@ fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> 
                 continue;
             };
             if encoded.len() <= maximum {
-                let _ = connection.send_datagram_wait(Bytes::from(encoded)).await;
+                let _ = connection.send_datagram(Bytes::from(encoded));
             }
         }
     });
@@ -323,8 +323,13 @@ fn destination_allowed(address: Ipv4Addr) -> bool {
         && !address.is_link_local()
         && !address.is_multicast()
         && !address.is_unspecified()
+        && address.octets()[0] != 0
+        && address.octets()[0] < 240
         && !(address.octets()[0] == 100
             && (64..=127).contains(&address.octets()[1]))
+        && !(address.octets()[0] == 192
+            && address.octets()[1] == 0
+            && address.octets()[2] == 0)
 }
 
 fn inspect_datagram(
@@ -475,7 +480,7 @@ async fn main() -> Result<()> {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let sender = start_tun(&name, Arc::clone(&sessions))?;
         eprintln!(
-            "TUN interface {} is active at {}/24 with MTU {}",
+            "TUN interface {} is active at {}/16 with MTU {}",
             name, TUN_SERVER_IPV4, TUN_MTU
         );
         Some(sender)
