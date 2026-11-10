@@ -221,7 +221,7 @@ mod tests {
                 "nonce-value".into(),
                 vec![0x5a; 32],
                 algorithm,
-                Some(PasswordAlgorithmId::Sha256),
+                Some(PasswordAlgorithmId::Md5),
                 Some(vec![0, 1, 0, 0, 0, 2, 0, 0]),
             ).unwrap(),
         }
@@ -249,7 +249,7 @@ mod tests {
         let signed = StunMessage::decode(&wire).unwrap();
         assert_eq!(
             signed.attribute(ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHM).unwrap(),
-            &[0, 2, 0, 0]
+            &[0, 1, 0, 0]
         );
         assert_eq!(
             signed.attribute(ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHMS).unwrap(),
