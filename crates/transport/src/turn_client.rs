@@ -23,7 +23,7 @@ use crate::{
     turn_handshake_task::{run_turn_client_handshake, TurnClientSession},
     turn_supervisor::TurnSessionSupervisor,
     turn_udp::TurnUdpSocket,
-    turn_credentials::{TurnCredentials, TurnWireTransport},
+    turn_credentials::{TurnCredentials, TurnScheme, TurnWireTransport},
 };
 
 pub const DEFAULT_TURN_CHANNEL: u16 = 0x4001;
@@ -63,8 +63,8 @@ impl TurnClientRuntime {
             .context("VK Calls response has no UDP TURN endpoint")?
             .clone();
         anyhow::ensure!(
-            endpoint.transport == TurnWireTransport::Udp,
-            "only UDP TURN transport is currently supported"
+            endpoint.scheme == TurnScheme::Turn && endpoint.transport == TurnWireTransport::Udp,
+            "only plain UDP TURN URIs are currently supported"
         );
         let mut addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
             .await
