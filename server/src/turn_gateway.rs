@@ -405,8 +405,6 @@ mod tests {
                 METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
             },
             turn_channel_data::{decode_channel_data, encode_channel_data},
-            turn_request::parse_success_response,
-            DataDatagram, IpPacketKind,
         };
         use ghulakh_transport::{
             turn_client::{TurnClientRuntime, DEFAULT_TURN_CHANNEL},
@@ -440,6 +438,7 @@ mod tests {
         }).to_string();
         let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
 
+        let pinned_key = keypair.public_key();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let relay_task = {
             let relay = Arc::new(relay);
@@ -526,7 +525,7 @@ mod tests {
             protected_socket,
             credentials,
             gateway_addr,
-            keypair.public_key(),
+            &pinned_key,
             b"device-secret",
         ).await.unwrap();
         let config = client.config();
