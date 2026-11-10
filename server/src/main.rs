@@ -65,7 +65,11 @@ fn ipv4_endpoints(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     ))
 }
 
-fn start_tun(\n    name: &str,\n    sessions: SessionMap,\n    turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,\n) -> Result<mpsc::Sender<Vec<u8>>> {
+fn start_tun(
+    name: &str,
+    sessions: SessionMap,
+    turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,
+) -> Result<mpsc::Sender<Vec<u8>>> {
     let device = Arc::new(
         DeviceBuilder::new()
             .name(name)
