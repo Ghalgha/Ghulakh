@@ -27,6 +27,7 @@ pub enum ControlMessage {
     },
     ServerHello {
         session_id: String,
+        client_ipv4: String,
         request_id: String,
     },
     Ping {
