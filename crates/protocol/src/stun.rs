@@ -191,6 +191,18 @@ mod tests {
             let m=sample(class); assert_eq!(StunMessage::decode(&m.encode().unwrap()).unwrap(),m);
         }
     }
+    #[test] fn method_high_bits_round_trip() {
+        let mut m = sample(StunClass::Request);
+        m.method = METHOD_CHANNEL_BIND;
+        assert_eq!(StunMessage::decode(&m.encode().unwrap()).unwrap(), m);
+    }
+    #[test] fn rejects_truncated_attribute_value() {
+        let mut b = sample(StunClass::Request).encode().unwrap();
+        let last = b.len() - 1;
+        b[last] = 0;
+        b[HEADER_LEN + 2..HEADER_LEN + 4].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(StunMessage::decode(&b), Err(StunError::Truncated));
+    }
     #[test] fn rejects_trailing_or_short_body() {
         let mut b=sample(StunClass::Request).encode().unwrap(); b.push(0);
         assert_eq!(StunMessage::decode(&b),Err(StunError::InvalidLength));
