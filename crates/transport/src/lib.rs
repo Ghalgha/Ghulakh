@@ -60,7 +60,7 @@ impl QuicClient {
         transport.datagram_send_buffer_size(DATAGRAM_BUFFER);
         client_config.transport_config(Arc::new(transport));
 
-        let endpoint = Endpoint::client("0.0.0.0:0".parse()?)
+        let endpoint = Endpoint::client("[::]:0".parse()?)
             .context("bind QUIC client endpoint")?;
         let connection = tokio::time::timeout(
             Duration::from_secs(15),
@@ -154,13 +154,16 @@ impl QuicClient {
         }
     }
 
-    pub fn close(self) {
+    pub fn close(&self) {
         self.connection.close(0u32.into(), b"client closed session");
         self._endpoint.close(0u32.into(), b"client closed endpoint");
     }
 }
 
-async fn exchange_control(connection: &Connection, message: ControlMessage) -> Result<ControlMessage> {
+async fn exchange_control(
+    connection: &Connection,
+    message: ControlMessage,
+) -> Result<ControlMessage> {
     let expected_request_id = request_id(&message).to_owned();
     let encoded = serde_json::to_vec(&ControlEnvelope {
         version: PROTOCOL_VERSION,
@@ -172,7 +175,7 @@ async fn exchange_control(connection: &Connection, message: ControlMessage) -> R
         .open_bi()
         .await
         .context("open QUIC control stream")?;
-    tokio::io::AsyncWriteExt::write_all(&mut send, &encoded)
+    send.write_all(&encoded)
         .await
         .context("write QUIC control request")?;
     send.finish().context("finish QUIC control request")?;
