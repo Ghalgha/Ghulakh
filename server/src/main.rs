@@ -214,6 +214,7 @@ async fn handle_control_stream(
     sessions: SessionMap,
     ip_allocator: Arc<IpAllocator>,
     client_address: Arc<tokio::sync::Mutex<Option<Ipv4Addr>>>,
+    tunnel_enabled: bool,
 ) -> Result<()> {
     let bytes = match tokio::time::timeout(
         Duration::from_secs(15),
@@ -284,6 +285,7 @@ async fn handle_control_stream(
             ControlMessage::ServerHello {
                 session_id: session_id.as_ref().clone(),
                 client_ipv4: address.to_string(),
+                tunnel_enabled,
                 request_id,
             }
         }
@@ -373,6 +375,7 @@ async fn handle_connection(
     tun_sender: Option<mpsc::Sender<Vec<u8>>>,
     sessions: SessionMap,
     ip_allocator: Arc<IpAllocator>,
+    tunnel_enabled: bool,
 ) -> Result<()> {
     let session_id = Arc::new(new_session_id());
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -396,6 +399,7 @@ async fn handle_connection(
                 let session_map = Arc::clone(&sessions);
                 let allocator = Arc::clone(&ip_allocator);
                 let assigned_address = Arc::clone(&client_address);
+                let tun_active = tunnel_enabled;
                 let _control_stream_task = tokio::spawn(async move {
                     if let Err(error) = handle_control_stream(
                         connection.clone(),
@@ -407,6 +411,7 @@ async fn handle_connection(
                         session_map,
                         allocator,
                         assigned_address,
+                        tun_active,
                     ).await {
                         eprintln!("control stream rejected: {error:#}");
                     }
@@ -526,6 +531,7 @@ async fn main() -> Result<()> {
                         sender,
                         session_map,
                         allocator,
+                        tun_enabled,
                     )
                     .await
                     {
@@ -670,6 +676,7 @@ mod tests {
                             None,
                             sessions,
                             allocator,
+                            false,
                         )
                         .await;
                     }
