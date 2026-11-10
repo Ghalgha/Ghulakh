@@ -1,4 +1,4 @@
-//! Shared, versioned control-plane message types.
+//! Shared, versioned control-plane and data-plane message types.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -7,6 +7,10 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_BODY: usize = 16 * 1024;
 pub const MAX_REQUEST_ID_LEN: usize = 128;
 pub const MAX_CREDENTIAL_LEN: usize = 256;
+pub const DATAGRAM_VERSION: u8 = 1;
+pub const DATAGRAM_HEADER_LEN: usize = 8;
+pub const MAX_DATAGRAM_SIZE: usize = 1200;
+const DATAGRAM_MAGIC: &[u8; 4] = b"GHLK";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlEnvelope {
@@ -34,6 +38,103 @@ pub enum ControlMessage {
     Close {
         request_id: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum IpPacketKind {
+    Ipv4 = 4,
+    Ipv6 = 6,
+}
+
+impl TryFrom<u8> for IpPacketKind {
+    type Error = DatagramError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            4 => Ok(Self::Ipv4),
+            6 => Ok(Self::Ipv6),
+            _ => Err(DatagramError::UnsupportedPacketKind),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataDatagram {
+    pub kind: IpPacketKind,
+    pub packet: Vec<u8>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum DatagramError {
+    #[error("invalid datagram magic")]
+    InvalidMagic,
+    #[error("unsupported datagram version")]
+    UnsupportedVersion,
+    #[error("unsupported IP packet kind")]
+    UnsupportedPacketKind,
+    #[error("datagram length is invalid")]
+    InvalidLength,
+    #[error("datagram exceeds the maximum size")]
+    TooLarge,
+    #[error("IP packet version does not match datagram kind")]
+    IpVersionMismatch,
+}
+
+impl DataDatagram {
+    pub fn encode(&self) -> Result<Vec<u8>, DatagramError> {
+        let total_len = DATAGRAM_HEADER_LEN + self.packet.len();
+        if total_len > MAX_DATAGRAM_SIZE {
+            return Err(DatagramError::TooLarge);
+        }
+        if self.packet.is_empty() {
+            return Err(DatagramError::InvalidLength);
+        }
+        let expected_version = self.packet[0] >> 4;
+        if expected_version != self.kind as u8 {
+            return Err(DatagramError::IpVersionMismatch);
+        }
+
+        let payload_len = u16::try_from(self.packet.len())
+            .map_err(|_| DatagramError::TooLarge)?;
+        let mut encoded = Vec::with_capacity(total_len);
+        encoded.extend_from_slice(DATAGRAM_MAGIC);
+        encoded.push(DATAGRAM_VERSION);
+        encoded.push(self.kind as u8);
+        encoded.extend_from_slice(&payload_len.to_be_bytes());
+        encoded.extend_from_slice(&self.packet);
+        Ok(encoded)
+    }
+
+    pub fn decode(encoded: &[u8]) -> Result<Self, DatagramError> {
+        if encoded.len() > MAX_DATAGRAM_SIZE {
+            return Err(DatagramError::TooLarge);
+        }
+        if encoded.len() < DATAGRAM_HEADER_LEN {
+            return Err(DatagramError::InvalidLength);
+        }
+        if &encoded[..4] != DATAGRAM_MAGIC {
+            return Err(DatagramError::InvalidMagic);
+        }
+        if encoded[4] != DATAGRAM_VERSION {
+            return Err(DatagramError::UnsupportedVersion);
+        }
+
+        let kind = IpPacketKind::try_from(encoded[5])?;
+        let declared_len = u16::from_be_bytes([encoded[6], encoded[7]]) as usize;
+        let packet = &encoded[DATAGRAM_HEADER_LEN..];
+        if declared_len == 0 || declared_len != packet.len() {
+            return Err(DatagramError::InvalidLength);
+        }
+        if packet[0] >> 4 != kind as u8 {
+            return Err(DatagramError::IpVersionMismatch);
+        }
+
+        Ok(Self {
+            kind,
+            packet: packet.to_vec(),
+        })
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -122,7 +223,10 @@ mod tests {
             credential: String::new(),
             request_id: "r1".into(),
         };
-        assert_eq!(validate_message(&message), Err(ProtocolError::InvalidCredentialLength));
+        assert_eq!(
+            validate_message(&message),
+            Err(ProtocolError::InvalidCredentialLength)
+        );
     }
 
     #[test]
@@ -131,11 +235,14 @@ mod tests {
             credential: "x".repeat(MAX_CREDENTIAL_LEN + 1),
             request_id: "r1".into(),
         };
-        assert_eq!(validate_message(&message), Err(ProtocolError::InvalidCredentialLength));
+        assert_eq!(
+            validate_message(&message),
+            Err(ProtocolError::InvalidCredentialLength)
+        );
     }
 
     #[test]
-    fn envelope_round_trip_preserves_version() {
+    fn control_envelope_round_trip_preserves_version() {
         let envelope = ControlEnvelope {
             version: PROTOCOL_VERSION,
             message: ControlMessage::Ping {
@@ -145,5 +252,58 @@ mod tests {
         let encoded = serde_json::to_vec(&envelope).unwrap();
         let decoded: ControlEnvelope = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn ipv4_datagram_round_trip() {
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: vec![0x45; 20],
+        };
+        let encoded = datagram.encode().unwrap();
+        assert_eq!(DataDatagram::decode(&encoded).unwrap(), datagram);
+    }
+
+    #[test]
+    fn ipv6_datagram_round_trip() {
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv6,
+            packet: vec![0x60; 40],
+        };
+        let encoded = datagram.encode().unwrap();
+        assert_eq!(DataDatagram::decode(&encoded).unwrap(), datagram);
+    }
+
+    #[test]
+    fn rejects_datagram_with_mismatched_ip_version() {
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: vec![0x60; 40],
+        };
+        assert_eq!(datagram.encode(), Err(DatagramError::IpVersionMismatch));
+    }
+
+    #[test]
+    fn rejects_datagram_with_invalid_declared_length() {
+        let mut encoded = DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: vec![0x45; 20],
+        }
+        .encode()
+        .unwrap();
+        encoded[7] = 19;
+        assert_eq!(
+            DataDatagram::decode(&encoded),
+            Err(DatagramError::InvalidLength)
+        );
+    }
+
+    #[test]
+    fn rejects_oversized_datagram() {
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: vec![0x45; MAX_DATAGRAM_SIZE],
+        };
+        assert_eq!(datagram.encode(), Err(DatagramError::TooLarge));
     }
 }
