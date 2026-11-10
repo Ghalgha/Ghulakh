@@ -12,6 +12,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{ensure, Context, Result};
@@ -26,6 +27,8 @@ use tokio::{
 
 const TUN_INGRESS_CAPACITY: usize = 512;
 const UDP_BUFFER_SIZE: usize = 65_507;
+const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 
 struct SessionCrypto {
     opener: FrameOpener,
@@ -36,6 +39,7 @@ struct GatewaySession {
     client_ipv4: Ipv4Addr,
     relay_peer: SocketAddr,
     crypto: Mutex<SessionCrypto>,
+    last_activity: Mutex<Instant>,
 }
 
 #[derive(Default)]
@@ -169,6 +173,7 @@ impl TurnGateway {
             client_ipv4,
             relay_peer,
             crypto: Mutex::new(SessionCrypto { opener, sealer }),
+            last_activity: Mutex::new(Instant::now()),
         });
         sessions.insert(session_id, session);
         clients.insert(client_ipv4, session_id);
@@ -176,13 +181,52 @@ impl TurnGateway {
     }
 
     pub async fn unregister_session(&self, session_id: [u8; 8]) -> bool {
-        let mut sessions = self.sessions.write().await;
-        let mut clients = self.clients.write().await;
-        if let Some(session) = sessions.remove(&session_id) {
-            clients.remove(&session.client_ipv4);
+        let removed = {
+            let mut sessions = self.sessions.write().await;
+            let mut clients = self.clients.write().await;
+            if let Some(session) = sessions.remove(&session_id) {
+                clients.remove(&session.client_ipv4);
+                Some(session.client_ipv4)
+            } else {
+                None
+            }
+        };
+        if let Some(address) = removed {
+            self.release_virtual_ipv4(address).await;
             true
         } else {
             false
+        }
+    }
+
+    /// Remove sessions that have had no authenticated traffic for the idle
+    /// timeout and return their virtual addresses to the handshake allocator.
+    pub async fn expire_idle_sessions(&self, now: Instant, idle_timeout: Duration) -> Vec<Ipv4Addr> {
+        let expired = {
+            let mut sessions = self.sessions.write().await;
+            let mut clients = self.clients.write().await;
+            let expired: Vec<([u8; 8], Ipv4Addr)> = sessions.iter()
+                .filter_map(|(session_id, session)| {
+                    let last = session.last_activity.lock().ok().map(|value| *value)?;
+                    (now.saturating_duration_since(last) >= idle_timeout)
+                        .then_some((*session_id, session.client_ipv4))
+                })
+                .collect();
+            for (session_id, address) in &expired {
+                sessions.remove(session_id);
+                clients.remove(address);
+            }
+            expired.into_iter().map(|(_, address)| address).collect::<Vec<_>>()
+        };
+        for address in &expired {
+            self.release_virtual_ipv4(*address).await;
+        }
+        expired
+    }
+
+    async fn release_virtual_ipv4(&self, address: Ipv4Addr) {
+        if let Some(service) = self.handshake.lock().await.as_mut() {
+            service.release_virtual_ipv4(address);
         }
     }
 
@@ -190,10 +234,17 @@ impl TurnGateway {
     /// tuples, invalid protected frames and spoofed inner IP sources are dropped.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
+        let mut maintenance = tokio::time::interval(SESSION_MAINTENANCE_INTERVAL);
         loop {
-            let (length, source) = self.socket.recv_from(&mut buffer).await
-                .context("receive TURN relay datagram")?;
-            self.process_datagram(&buffer[..length], source).await;
+            tokio::select! {
+                received = self.socket.recv_from(&mut buffer) => {
+                    let (length, source) = received.context("receive TURN relay datagram")?;
+                    self.process_datagram(&buffer[..length], source).await;
+                }
+                _ = maintenance.tick() => {
+                    self.expire_idle_sessions(Instant::now(), SESSION_IDLE_TIMEOUT).await;
+                }
+            }
         }
     }
 
@@ -246,6 +297,9 @@ impl TurnGateway {
                 return;
             }
         };
+        if let Ok(mut last_activity) = session.last_activity.lock() {
+            *last_activity = Instant::now();
+        }
         if packet.packet.len() < 20
             || Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])
                 != session.client_ipv4
@@ -283,6 +337,9 @@ impl TurnGateway {
         let sent = self.socket.send_to(&encoded, session.relay_peer).await
             .context("send raw downlink payload to observed TURN relay peer")?;
         ensure!(sent == encoded.len(), "partial TURN gateway UDP datagram send");
+        if let Ok(mut last_activity) = session.last_activity.lock() {
+            *last_activity = Instant::now();
+        }
         self.counters.downlink_sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
