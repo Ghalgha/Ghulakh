@@ -9,6 +9,7 @@ pub mod turn_allocation;
 pub mod turn_channel_data;
 pub mod secure_frame;
 pub mod session_handshake;
+pub mod handshake_datagram;
 pub mod turn_peer;
 
 use serde::{Deserialize, Serialize};
