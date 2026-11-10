@@ -16,7 +16,7 @@
 - Allocation state machine с lease, expiry, refresh deadline и обработкой неудачного refresh.
 - Peer registry для permissions и channel bindings с expiry и cooldown; он обновляется только после подтверждённого вызывающим кодом успеха.
 - UDP adapter для STUN/TURN datagrams и ChannelData; умеет принимать заранее созданный и защищённый Android socket.
-- TURN auth context для USERNAME/REALM/NONCE и MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 с явно переданным integrity key; отдельные параметры password derivation и HMAC, сохранение и точное эхо PASSWORD-ALGORITHMS из challenge, выбор первого поддерживаемого алгоритма в порядке серверного списка и проверка согласованности выбранного алгоритма. Ключ не выводится из VK credentials автоматически.
+- TURN auth context для USERNAME/REALM/NONCE и MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 с явно переданным integrity key; отдельные параметры password derivation и HMAC, сохранение и точное эхо PASSWORD-ALGORITHMS из challenge, выбор PASSWORD-ALGORITHM по RFC 8656: SHA-256 при совместном предложении MD5/SHA-256 и поддержке обоих клиентом; иначе — первый поддерживаемый алгоритм в порядке серверного списка и проверка согласованности выбранного алгоритма. Ключ не выводится из VK credentials автоматически.
 - Codec защищённых кадров поверх TURN ChannelData с AEAD и защитой от replay.
 - Экспериментальный QUIC-клиент/сервер, серверный TUN и Android VpnService/JNI-интеграция.
 
