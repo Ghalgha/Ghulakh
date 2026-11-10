@@ -7,6 +7,12 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_BODY: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ControlEnvelope {
+    pub version: u16,
+    pub message: ControlMessage,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", content = "body", rename_all = "snake_case")]
 pub enum ControlMessage {
     ClientHello { credential: String, request_id: String },
@@ -56,5 +62,16 @@ mod tests {
     #[test]
     fn rejects_empty_request_id() {
         assert_eq!(validate_envelope(1, 1, "  "), Err(ProtocolError::EmptyRequestId));
+    }
+
+    #[test]
+    fn envelope_round_trip_preserves_version() {
+        let envelope = ControlEnvelope {
+            version: PROTOCOL_VERSION,
+            message: ControlMessage::Ping { request_id: "test-1".into() },
+        };
+        let encoded = serde_json::to_vec(&envelope).unwrap();
+        let decoded: ControlEnvelope = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, envelope);
     }
 }
