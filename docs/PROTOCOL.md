@@ -143,3 +143,6 @@ The protocol crate now parses RFC 8489 `PASSWORD-ALGORITHMS` and `PASSWORD-ALGOR
 ### TURN allocation lifecycle
 
 The protocol crate exposes an event-driven allocation state machine with Idle, AwaitingAllocate, Active, and AwaitingRefresh states. It accepts only matching transaction IDs and typed Allocate/Refresh results, tracks the granted relayed address and expiry, schedules refresh at 80% of the granted lifetime, restores a still-valid lease after a failed refresh, and retires expired or explicitly deleted allocations. It performs no network I/O and assumes the caller has already matched the response source/method/transaction and verified MESSAGE-INTEGRITY.
+
+
+TURN 401 challenge parsing also preserves a valid raw `PASSWORD-ALGORITHMS` offer and exposes it as an attribute for the authenticated retry. This is required by RFC 8489 downgrade protection: the client must echo the server's offer in the next authenticated request. The opaque NONCE is retained unchanged; its service-specific security bits are not interpreted by this layer.
