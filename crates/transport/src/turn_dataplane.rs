@@ -128,7 +128,7 @@ mod tests {
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
             .await.unwrap();
-        let (actor, mut receivers) = TurnSocketActor::spawn(socket);
+        let (actor, receivers) = TurnSocketActor::spawn(socket);
         let (uplink_tx, uplink_rx) = mpsc::channel(4);
         let (downlink_tx, mut downlink_rx) = mpsc::channel(4);
 
