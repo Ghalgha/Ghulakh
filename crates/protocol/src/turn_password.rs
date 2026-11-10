@@ -3,6 +3,8 @@
 //! This module does not derive credential keys. The selected algorithm must be
 //! explicitly confirmed by the TURN service profile before an auth provider uses it.
 
+use std::collections::HashSet;
+
 use crate::stun::{StunAttribute, ATTR_PASSWORD_ALGORITHM, ATTR_PASSWORD_ALGORITHMS};
 
 pub const PASSWORD_ALGORITHM_MD5: u16 = 0x0001;
@@ -50,6 +52,7 @@ fn parse_entries(input: &[u8]) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorit
         return Err(PasswordAlgorithmError::InvalidEncoding);
     }
     let mut entries = Vec::new();
+    let mut seen = HashSet::new();
     let mut offset = 0usize;
     while offset < input.len() {
         if input.len() - offset < 4 {
@@ -71,7 +74,7 @@ fn parse_entries(input: &[u8]) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorit
         if padded_end > input.len() || value_end > input.len() {
             return Err(PasswordAlgorithmError::InvalidEncoding);
         }
-        if entries.iter().any(|entry: &PasswordAlgorithm| entry.id == id) {
+        if !seen.insert(id) {
             return Err(PasswordAlgorithmError::DuplicateAlgorithm);
         }
         entries.push(PasswordAlgorithm {
@@ -111,11 +114,8 @@ pub fn select_password_algorithm(
     Err(PasswordAlgorithmError::NoCommonAlgorithm)
 }
 
-/// Encode a selected algorithm attribute. Only zero-length parameters are currently
-/// emitted; algorithm-specific parameters remain opaque and are never synthesized.
-pub fn password_algorithm_attribute(
-    selected: PasswordAlgorithmId,
-) -> StunAttribute {
+/// Encode a selected algorithm attribute with zero-length parameters.
+pub fn password_algorithm_attribute(selected: PasswordAlgorithmId) -> StunAttribute {
     let mut value = Vec::with_capacity(4);
     value.extend_from_slice(&selected.wire_id().to_be_bytes());
     value.extend_from_slice(&0u16.to_be_bytes());
@@ -126,23 +126,21 @@ pub fn password_algorithm_attribute(
 pub fn password_algorithms_attribute(
     algorithms: &[PasswordAlgorithm],
 ) -> Result<StunAttribute, PasswordAlgorithmError> {
-    if algorithms.is_empty() || algorithms.len() > MAX_ALGORITHMS {
-        return Err(if algorithms.len() > MAX_ALGORITHMS {
-            PasswordAlgorithmError::TooManyAlgorithms
-        } else {
-            PasswordAlgorithmError::InvalidEncoding
-        });
+    if algorithms.is_empty() {
+        return Err(PasswordAlgorithmError::InvalidEncoding);
+    }
+    if algorithms.len() > MAX_ALGORITHMS {
+        return Err(PasswordAlgorithmError::TooManyAlgorithms);
     }
     let mut value = Vec::new();
+    let mut seen = HashSet::new();
     for algorithm in algorithms {
         if algorithm.parameters.len() > MAX_PARAMETERS_LEN
             || algorithm.parameters.len() > u16::MAX as usize
         {
             return Err(PasswordAlgorithmError::ParametersTooLarge);
         }
-        if value.len() > 0 && algorithms[..algorithms.iter().position(|a| std::ptr::eq(a, algorithm)).unwrap_or(0)]
-            .iter().any(|previous| previous.id == algorithm.id)
-        {
+        if !seen.insert(algorithm.id) {
             return Err(PasswordAlgorithmError::DuplicateAlgorithm);
         }
         value.extend_from_slice(&algorithm.id.to_be_bytes());
