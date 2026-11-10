@@ -166,7 +166,10 @@ mod tests {
         let parsed = parse_password_algorithms(&value).unwrap();
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[2].parameters, [0xaa, 0xbb]);
-        assert_eq!(select_password_algorithm(&parsed), Ok(PasswordAlgorithmId::Sha256));
+        assert_eq!(
+            select_password_algorithm(&parsed, &[PasswordAlgorithmId::Sha256]),
+            Ok(PasswordAlgorithmId::Sha256)
+        );
     }
 
     #[test]
