@@ -123,10 +123,9 @@ impl TurnGateway {
             TurnHandshakeOutcome::Cached { response } => (response, None),
             TurnHandshakeOutcome::Response { response, established } => (response, established),
         };
-        let sent = self.socket.send_to(&response, relay_peer).await
-            .context("send raw handshake response through TURN relay")?;
-        ensure!(sent == response.len(), "partial TURN handshake response send");
-
+        // The service has already cached ServerAck. Register the authenticated
+        // session before sending it so the first client packet cannot race the
+        // registration. If UDP send fails, the client retry receives this cache.
         if let Some(established) = established {
             let client_ipv4 = established.config.virtual_ipv4;
             let session_id = established.frame_keys.session_id();
@@ -137,8 +136,12 @@ impl TurnGateway {
                 established.relay_peer,
                 opener,
                 sealer,
-            ).await.context("register authenticated TURN session after ServerAck send")?;
+            ).await.context("register authenticated TURN session after ServerAck cache")?;
         }
+
+        let sent = self.socket.send_to(&response, relay_peer).await
+            .context("send raw handshake response through TURN relay")?;
+        ensure!(sent == response.len(), "partial TURN handshake response send");
         Ok(())
     }
 
