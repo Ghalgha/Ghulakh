@@ -17,3 +17,8 @@ sha2 = "0.10"
 subtle = "2"
 ghulakh-protocol = { path = "../crates/protocol" }
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+ghulakh-transport = { path = "../crates/transport" }
+rcgen = "0.13"
+tempfile = "3"
