@@ -7,7 +7,7 @@
 use std::{
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
     },
 };
@@ -231,6 +231,7 @@ pub struct TurnClientPathGroup {
     healthy: Vec<Arc<AtomicBool>>,
     downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
     forwarders: Vec<JoinHandle<()>>,
+    uplink_queue_drops: AtomicU64,
 }
 
 impl TurnClientPathGroup {
@@ -288,6 +289,7 @@ impl TurnClientPathGroup {
             healthy,
             downlink: tokio::sync::Mutex::new(downlink),
             forwarders,
+            uplink_queue_drops: AtomicU64::new(0),
         })
     }
 
@@ -297,6 +299,11 @@ impl TurnClientPathGroup {
 
     pub fn active_paths(&self) -> usize {
         self.healthy.iter().filter(|path| path.load(Ordering::Acquire)).count()
+    }
+
+    /// Number of uplink IP packets dropped because their flow-affine path queue was full.
+    pub fn uplink_queue_drops(&self) -> u64 {
+        self.uplink_queue_drops.load(Ordering::Relaxed)
     }
 
     pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
@@ -310,9 +317,18 @@ impl TurnClientPathGroup {
             if !self.healthy[index].load(Ordering::Acquire) {
                 continue;
             }
-            match self.paths[index].send_packet(packet.clone()).await {
+            match enqueue_uplink_packet(
+                &self.paths[index].uplink,
+                packet.clone(),
+                &self.uplink_queue_drops,
+            ) {
                 Ok(()) => return Ok(()),
-                Err(_) => self.healthy[index].store(false, Ordering::Release),
+                // Do not move a congested flow to another path: packets already
+                // queued there would be overtaken. Drop newest and keep reading TUN.
+                Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.healthy[index].store(false, Ordering::Release);
+                }
             }
         }
         anyhow::bail!("all TURN paths rejected the packet or became unavailable")
@@ -341,6 +357,21 @@ impl Drop for TurnClientPathGroup {
         for path in &self.paths {
             path.close();
         }
+    }
+}
+
+fn enqueue_uplink_packet(
+    sender: &mpsc::Sender<DataDatagram>,
+    packet: DataDatagram,
+    dropped: &AtomicU64,
+) -> std::result::Result<(), mpsc::error::TrySendError<DataDatagram>> {
+    match sender.try_send(packet) {
+        Ok(()) => Ok(()),
+        Err(error @ mpsc::error::TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -383,6 +414,22 @@ mod path_group_tests {
         let fallback = select_path_index(&packet(12000), &degraded).unwrap();
         assert_ne!(fallback, first);
         assert_eq!(select_path_index(&packet(12000), &[false; 4]), None);
+    }
+
+    #[tokio::test]
+    async fn saturated_flow_queue_drops_newest_without_blocking_or_reassigning() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let dropped = AtomicU64::new(0);
+        let first = DataDatagram { kind: IpPacketKind::Ipv4, packet: packet(12000) };
+        let second = DataDatagram { kind: IpPacketKind::Ipv4, packet: packet(12001) };
+
+        enqueue_uplink_packet(&sender, first.clone(), &dropped).unwrap();
+        assert!(matches!(
+            enqueue_uplink_packet(&sender, second, &dropped),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(receiver.recv().await.unwrap(), first);
     }
 
     #[test]
