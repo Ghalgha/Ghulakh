@@ -335,6 +335,7 @@ mod tests {
 
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
+        let _ = relay_addr;
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
@@ -381,6 +382,7 @@ mod tests {
     async fn routes_authenticated_uplink_to_tun_and_downlink_to_relay_tuple() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
+        let _ = relay_addr;
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         gateway.register_session(
@@ -422,6 +424,7 @@ mod tests {
     async fn rejects_spoofed_inner_source_and_replayed_frame() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
+        let _ = relay_addr;
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         gateway.register_session(
