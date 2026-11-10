@@ -47,7 +47,9 @@ Android-приложение может запросить системное р
 - `GHULAKH_CREDENTIAL_HASHES` — файл с одним SHA-256 digest в hex на строку;
 - `GHULAKH_TLS_CERT` — путь к PEM certificate chain;
 - `GHULAKH_TLS_KEY` — путь к PEM private key;
-- `GHULAKH_QUIC_BIND` — UDP bind address, по умолчанию `0.0.0.0:4433`.
+- `GHULAKH_QUIC_BIND` — UDP bind address, по умолчанию `0.0.0.0:4433`;
+- `GHULAKH_TUN_ENABLED` — `true` для включения серверного TUN, по умолчанию `false`;
+- `GHULAKH_TUN_NAME` — имя TUN-интерфейса, по умолчанию `ghulakh0`.
 
 Подробности выпуска credentials, настройки TUN и системного forwarding — в [SERVER_OPERATIONS.md](SERVER_OPERATIONS.md).
 
