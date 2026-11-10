@@ -126,6 +126,15 @@ mod tests {
     }
 
     #[test]
+    fn rejects_oversized_credential() {
+        let message = ControlMessage::ClientHello {
+            credential: "x".repeat(MAX_CREDENTIAL_LEN + 1),
+            request_id: "r1".into(),
+        };
+        assert_eq!(validate_message(&message), Err(ProtocolError::InvalidCredentialLength));
+    }
+
+    #[test]
     fn envelope_round_trip_preserves_version() {
         let envelope = ControlEnvelope {
             version: PROTOCOL_VERSION,
