@@ -86,10 +86,21 @@ impl TurnHandshakeClient {
         &mut self,
         datagram: &[u8],
     ) -> Result<SessionFrameKeys, TurnHandshakeError> {
+        let (keys, payload) = self.receive_server_ack_with_payload(datagram)?;
+        if !payload.is_empty() {
+            return Err(TurnHandshakeError::Noise(SessionHandshakeError::InvalidAcknowledgement));
+        }
+        Ok(keys)
+    }
+
+    pub fn receive_server_ack_with_payload(
+        &mut self,
+        datagram: &[u8],
+    ) -> Result<(SessionFrameKeys, Vec<u8>), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         self.validate(&envelope, HandshakePhase::ServerAck)?;
         let pending = self.pending_auth.take().ok_or(TurnHandshakeError::InvalidState)?;
-        Ok(pending.accept_server_ack(&envelope.payload)?)
+        Ok(pending.accept_server_ack_with_payload(&envelope.payload)?)
     }
 
     fn validate(
@@ -154,6 +165,15 @@ impl TurnHandshakeServer {
         datagram: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
     ) -> Result<(Vec<u8>, SessionFrameKeys), TurnHandshakeError> {
+        self.receive_client_finish_with_payload(datagram, verify_credential, &[])
+    }
+
+    pub fn receive_client_finish_with_payload(
+        &mut self,
+        datagram: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        acknowledgement_payload: &[u8],
+    ) -> Result<(Vec<u8>, SessionFrameKeys), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         if envelope.phase != HandshakePhase::ClientFinish {
             return Err(TurnHandshakeError::UnexpectedPhase);
@@ -163,7 +183,7 @@ impl TurnHandshakeServer {
         }
         let noise = self.noise.take().ok_or(TurnHandshakeError::InvalidState)?;
         let (acknowledgement, keys) =
-            noise.receive_client_finish(&envelope.payload, verify_credential)?;
+            noise.receive_client_finish_with_payload(&envelope.payload, verify_credential, acknowledgement_payload)?;
         let response = HandshakeEnvelope {
             phase: HandshakePhase::ServerAck,
             handshake_id: envelope.handshake_id,
