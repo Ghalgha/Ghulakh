@@ -416,8 +416,13 @@ mod tests {
         };
         use tokio::{net::UdpSocket as TokioUdpSocket, sync::oneshot};
 
+        // Model TURN's client-facing server socket separately from the
+        // allocation's peer-facing relayed socket. The gateway must observe
+        // the relayed tuple, not the TURN control endpoint.
         let relay = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
+        let peer_socket = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_socket.local_addr().unwrap();
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
 
@@ -445,99 +450,108 @@ mod tests {
         let pinned_key = keypair.public_key();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
         let relay_task = {
-            let relay = Arc::new(relay);
-            let relay_socket = Arc::clone(&relay);
+            let relay_socket = Arc::new(relay);
+            let peer_socket = Arc::new(peer_socket);
+            let client_facing = Arc::clone(&relay_socket);
+            let peer_facing = Arc::clone(&peer_socket);
             tokio::spawn(async move {
                 let mut permissions: HashSet<IpAddr> = HashSet::new();
                 let mut channels: HashMap<u16, SocketAddr> = HashMap::new();
-                let mut buffer = [0u8; 4096];
+                let mut client_buffer = [0u8; 4096];
+                let mut peer_buffer = [0u8; 4096];
                 loop {
                     tokio::select! {
                         _ = &mut shutdown_rx => break,
-                        received = relay_socket.recv_from(&mut buffer) => {
+                        received = client_facing.recv_from(&mut client_buffer) => {
                             let (length, source) = received.unwrap();
-                            if source == client_addr {
-                                if buffer[0] & 0xc0 == 0x40 {
-                                    let frame = decode_channel_data(&buffer[..length]).unwrap();
-                                    let peer = *channels.get(&frame.channel_number).unwrap();
-                                    assert!(permissions.contains(&peer.ip()));
-                                    relay_socket.send_to(frame.data, peer).await.unwrap();
-                                } else {
-                                    let request = StunMessage::decode(&buffer[..length]).unwrap();
-                                    assert_eq!(request.class, StunClass::Request);
-                                    if request.attribute(ATTR_USERNAME).is_none() {
-                                        assert_eq!(request.method, METHOD_ALLOCATE);
-                                        let challenge = StunMessage {
-                                            method: request.method,
-                                            class: StunClass::ErrorResponse,
-                                            transaction_id: request.transaction_id,
-                                            attributes: vec![
-                                                StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
-                                                StunAttribute { kind: ATTR_REALM, value: b"turn.mock".to_vec() },
-                                                StunAttribute { kind: ATTR_NONCE, value: b"mock-nonce-1".to_vec() },
-                                            ],
-                                        }.encode().unwrap();
-                                        relay_socket.send_to(&challenge, source).await.unwrap();
-                                        continue;
-                                    }
-                                    let mut attributes = Vec::new();
-                                    match request.method {
-                                        METHOD_ALLOCATE => {
-                                            assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
-                                            attributes.push(StunAttribute {
-                                                kind: ATTR_XOR_RELAYED_ADDRESS,
-                                                value: encode_xor_address(relay_addr, &request.transaction_id),
-                                            });
-                                            attributes.push(StunAttribute {
-                                                kind: ATTR_LIFETIME,
-                                                value: 600u32.to_be_bytes().to_vec(),
-                                            });
-                                        }
-                                        METHOD_CREATE_PERMISSION => {
-                                            let peer = request.attributes.iter()
-                                                .find(|attribute| attribute.kind == ATTR_XOR_PEER_ADDRESS)
-                                                .map(|attribute| decode_xor_address(&attribute.value, &request.transaction_id).unwrap())
-                                                .unwrap();
-                                            permissions.insert(peer.ip());
-                                        }
-                                        METHOD_CHANNEL_BIND => {
-                                            let channel = request.attribute(ATTR_CHANNEL_NUMBER).unwrap();
-                                            let number = u16::from_be_bytes([channel[0], channel[1]]);
-                                            let peer = decode_xor_address(
-                                                request.attribute(ATTR_XOR_PEER_ADDRESS).unwrap(),
-                                                &request.transaction_id,
-                                            ).unwrap();
-                                            assert!(permissions.contains(&peer.ip()));
-                                            channels.insert(number, peer);
-                                        }
-                                        METHOD_REFRESH => {
-                                            attributes.push(StunAttribute {
-                                                kind: ATTR_LIFETIME,
-                                                value: 600u32.to_be_bytes().to_vec(),
-                                            });
-                                        }
-                                        _ => panic!("unexpected TURN control method"),
-                                    }
-                                    let response = StunMessage {
+                            assert_eq!(source, client_addr);
+                            if client_buffer[0] & 0xc0 == 0x40 {
+                                let frame = decode_channel_data(&client_buffer[..length]).unwrap();
+                                let peer = *channels.get(&frame.channel_number).unwrap();
+                                assert!(permissions.contains(&peer.ip()));
+                                // TURN strips ChannelData framing before sending
+                                // the payload from the allocation's relayed socket.
+                                peer_facing.send_to(frame.data, peer).await.unwrap();
+                            } else {
+                                let request = StunMessage::decode(&client_buffer[..length]).unwrap();
+                                assert_eq!(request.class, StunClass::Request);
+                                if request.attribute(ATTR_USERNAME).is_none() {
+                                    assert_eq!(request.method, METHOD_ALLOCATE);
+                                    let challenge = StunMessage {
                                         method: request.method,
-                                        class: StunClass::SuccessResponse,
+                                        class: StunClass::ErrorResponse,
                                         transaction_id: request.transaction_id,
-                                        attributes,
-                                    };
-                                    let mut digest = Md5::new();
-                                    digest.update(b"temporary-user:turn.mock:temporary-password");
-                                    let integrity_key = digest.finalize();
-                                    let response = append_message_integrity(&response, &integrity_key).unwrap();
-                                    relay_socket.send_to(&response, source).await.unwrap();
+                                        attributes: vec![
+                                            StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                                            StunAttribute { kind: ATTR_REALM, value: b"turn.mock".to_vec() },
+                                            StunAttribute { kind: ATTR_NONCE, value: b"mock-nonce-1".to_vec() },
+                                        ],
+                                    }.encode().unwrap();
+                                    client_facing.send_to(&challenge, source).await.unwrap();
+                                    continue;
                                 }
-                            } else if source == gateway_addr {
-                                let channel = channels.iter()
-                                    .find(|(_, peer)| **peer == gateway_addr)
-                                    .map(|(number, _)| *number)
-                                    .unwrap();
-                                let response = encode_channel_data(channel, &buffer[..length]).unwrap();
-                                relay_socket.send_to(&response, client_addr).await.unwrap();
+                                let mut attributes = Vec::new();
+                                match request.method {
+                                    METHOD_ALLOCATE => {
+                                        assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                        attributes.push(StunAttribute {
+                                            kind: ATTR_XOR_RELAYED_ADDRESS,
+                                            value: encode_xor_address(peer_addr, &request.transaction_id),
+                                        });
+                                        attributes.push(StunAttribute {
+                                            kind: ATTR_LIFETIME,
+                                            value: 600u32.to_be_bytes().to_vec(),
+                                        });
+                                    }
+                                    METHOD_CREATE_PERMISSION => {
+                                        let peer = request.attributes.iter()
+                                            .find(|attribute| attribute.kind == ATTR_XOR_PEER_ADDRESS)
+                                            .map(|attribute| decode_xor_address(&attribute.value, &request.transaction_id).unwrap())
+                                            .unwrap();
+                                        permissions.insert(peer.ip());
+                                    }
+                                    METHOD_CHANNEL_BIND => {
+                                        let channel = request.attribute(ATTR_CHANNEL_NUMBER).unwrap();
+                                        let number = u16::from_be_bytes([channel[0], channel[1]]);
+                                        let peer = decode_xor_address(
+                                            request.attribute(ATTR_XOR_PEER_ADDRESS).unwrap(),
+                                            &request.transaction_id,
+                                        ).unwrap();
+                                        assert!(permissions.contains(&peer.ip()));
+                                        channels.insert(number, peer);
+                                    }
+                                    METHOD_REFRESH => {
+                                        attributes.push(StunAttribute {
+                                            kind: ATTR_LIFETIME,
+                                            value: 600u32.to_be_bytes().to_vec(),
+                                        });
+                                    }
+                                    _ => panic!("unexpected TURN control method"),
+                                }
+                                let response = StunMessage {
+                                    method: request.method,
+                                    class: StunClass::SuccessResponse,
+                                    transaction_id: request.transaction_id,
+                                    attributes,
+                                };
+                                let mut digest = Md5::new();
+                                digest.update(b"temporary-user:turn.mock:temporary-password");
+                                let integrity_key = digest.finalize();
+                                let response = append_message_integrity(&response, &integrity_key).unwrap();
+                                client_facing.send_to(&response, source).await.unwrap();
                             }
+                        }
+                        received = peer_facing.recv_from(&mut peer_buffer) => {
+                            let (length, source) = received.unwrap();
+                            assert_eq!(source, gateway_addr);
+                            // The allocation relay socket receives raw peer data
+                            // and re-encapsulates it as ChannelData to the client.
+                            let channel = channels.iter()
+                                .find(|(_, peer)| **peer == gateway_addr)
+                                .map(|(number, _)| *number)
+                                .unwrap();
+                            let response = encode_channel_data(channel, &peer_buffer[..length]).unwrap();
+                            client_facing.send_to(&response, client_addr).await.unwrap();
                         }
                     }
                 }
