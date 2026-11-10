@@ -16,7 +16,7 @@ class MainActivity : Activity() {
     private lateinit var hostInput: EditText
     private lateinit var portInput: EditText
     private lateinit var credentialInput: EditText
-    private lateinit var turnCredentialsInput: EditText
+    private lateinit var vkAccessTokenInput: EditText
     private lateinit var pinnedServerKeyInput: EditText
     private lateinit var status: TextView
 
@@ -49,17 +49,14 @@ class MainActivity : Activity() {
             android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
         credentialInput.isSaveEnabled = false
 
-        turnCredentialsInput = addField(
+        vkAccessTokenInput = addField(
             content,
-            "JSON временных TURN credentials из VK Calls",
-            "Объект turn_server с username, credential и urls",
+            "VK access token",
+            "Вставьте пользовательский токен VK",
         ).apply {
             inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            setSingleLine(false)
-            minLines = 4
-            maxLines = 8
-            gravity = android.view.Gravity.TOP
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSaveEnabled = false
         }
         pinnedServerKeyInput = addField(
             content,
@@ -132,7 +129,7 @@ class MainActivity : Activity() {
             hostInput.setText(profile.host)
             portInput.setText(profile.port.toString())
             credentialInput.setText(profile.credential)
-            turnCredentialsInput.setText(profile.turnCredentialsJson)
+            vkAccessTokenInput.setText(profile.vkAccessToken)
             pinnedServerKeyInput.setText(profile.pinnedServerPublicKeyHex)
             status.text = "Настройки загружены. VPN-туннель не запущен."
         } catch (error: Exception) {
@@ -143,7 +140,6 @@ class MainActivity : Activity() {
     private fun saveProfile() {
         try {
             val port = portInput.text.toString().toInt()
-            val turnJson = turnCredentialsInput.text.toString().trim()
             val key = pinnedServerKeyInput.text.toString().trim()
             store.save(ConnectionProfile(
                 host = hostInput.text.toString().trim(),
@@ -151,7 +147,7 @@ class MainActivity : Activity() {
                 serverName = "",
                 credential = credentialInput.text.toString(),
                 rootCertificateDer = byteArrayOf(),
-                turnCredentialsJson = turnJson,
+                vkAccessToken = vkAccessTokenInput.text.toString(),
                 pinnedServerPublicKeyHex = key,
             ))
             status.text = "Профиль TURN и секреты зашифрованы ключом Android Keystore."
@@ -167,16 +163,11 @@ class MainActivity : Activity() {
         }
         try {
             val profile = store.load() ?: throw IllegalStateException("Сначала сохраните настройки")
-            require(profile.turnCredentialsJson.isNotBlank()) { "Не заданы TURN credentials VK Calls" }
-            val root = org.json.JSONObject(profile.turnCredentialsJson)
-            val turnServer = root.optJSONObject("turn_server") ?: root
-            require(turnServer.optString("username").isNotBlank()) { "В JSON отсутствует TURN username" }
-            require(turnServer.optString("credential").isNotBlank()) { "В JSON отсутствует TURN credential" }
-            require((turnServer.optJSONArray("urls")?.length() ?: 0) > 0) { "В JSON отсутствуют TURN URLs" }
+            require(profile.vkAccessToken.isNotBlank()) { "Не задан VK access token" }
             require(profile.pinnedServerPublicKeyHex.matches(Regex("[0-9a-fA-F]{64}"))) {
                 "Закреплённый Noise public key должен содержать 64 hex-символа"
             }
-            status.text = "Профиль проверен локально. Проверка relay и Noise-handshake выполняется при запуске VPN."
+            status.text = "Профиль проверен локально. VK Calls и TURN credentials будут запрошены при запуске VPN."
         } catch (error: Exception) {
             status.text = "Профиль TURN некорректен: ${error.message}"
         }
@@ -190,7 +181,7 @@ class MainActivity : Activity() {
         try {
             store.clear()
             credentialInput.text.clear()
-            turnCredentialsInput.text.clear()
+            vkAccessTokenInput.text.clear()
             pinnedServerKeyInput.text.clear()
             hostInput.text.clear()
             portInput.text.clear()
