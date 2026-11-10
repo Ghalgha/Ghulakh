@@ -111,6 +111,19 @@ impl QuicClient {
                 bail!("server returned an unexpected authentication response");
             }
         };
+        anyhow::ensure!(
+            session_id.len() == 32 && session_id.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "server returned an invalid session identifier"
+        );
+        let assigned_address: Ipv4Addr = client_ipv4
+            .parse()
+            .context("server returned an invalid client IPv4 address")?;
+        let octets = assigned_address.octets();
+        let host = (u32::from(octets[2]) << 8) | u32::from(octets[3]);
+        anyhow::ensure!(
+            octets[0] == 10 && octets[1] == 77 && (2..=65_534).contains(&host),
+            "server assigned an IPv4 address outside the Ghulakh client pool"
+        );
 
         Ok(Self {
             _endpoint: endpoint,
