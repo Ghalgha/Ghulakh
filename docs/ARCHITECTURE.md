@@ -11,6 +11,8 @@
 - Kotlin UI и управление состоянием.
 - Android `VpnService` для создания локального TUN-интерфейса.
 - Kotlin JNI facade для общего Rust transport core; сетевые вызовы выполняются вне UI-потока.
+- Конфигурационный профиль хранит credential и DER trust anchor в AES-GCM-шифротексте, ключ — в Android Keystore.
+- UI умеет импортировать X.509 trust anchor и проверять соединение; создание VPN-туннеля ещё не подключено.
 - Изолированный транспортный адаптер.
 - Секреты должны храниться в Android Keystore; JNI не должен логировать credentials. Фактическая интеграция Keystore ещё не завершена.
 
