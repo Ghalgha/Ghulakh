@@ -4,7 +4,7 @@
 //! USERNAME/REALM/NONCE and MESSAGE-INTEGRITY attributes after constructing
 //! a request, and MUST verify response integrity before parsing success state.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use crate::stun::{
     decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
@@ -180,6 +180,7 @@ pub fn parse_success_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     fn id() -> [u8; 12] { [0xA5; 12] }
 
