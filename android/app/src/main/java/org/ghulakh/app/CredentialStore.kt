@@ -54,7 +54,7 @@ class CredentialStore(context: Context) {
         val certificateData = preferences.getString("certificate_data", null) ?: return null
 
         val credential = decrypt(credentialIv, credentialData)
-            let { String(it, StandardCharsets.UTF_8) }
+            .let { String(it, StandardCharsets.UTF_8) }
         val certificate = decrypt(certificateIv, certificateData)
         return ConnectionProfile(host, port, serverName, credential, certificate)
     }
