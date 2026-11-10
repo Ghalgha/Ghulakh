@@ -246,6 +246,21 @@ mod tests {
     }
 
     #[test]
+    fn failed_allocate_can_be_retried_with_a_new_transaction() {
+        let mut manager = AllocationManager::new();
+        manager.begin_allocate([1; 12]).unwrap();
+        manager.abort_allocate([1; 12]).unwrap();
+        assert_eq!(manager.state(), &AllocationState::Idle);
+        manager.begin_allocate([2; 12]).unwrap();
+        let lease = manager.accept_allocate(
+            [2; 12],
+            allocate_result(120),
+            Instant::now(),
+        ).unwrap();
+        assert_eq!(lease.lifetime_seconds, 120);
+    }
+
+    #[test]
     fn rejects_wrong_transaction_and_wrong_result() {
         let now = Instant::now();
         let mut manager = AllocationManager::new();
