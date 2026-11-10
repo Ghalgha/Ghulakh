@@ -100,16 +100,17 @@ pub fn parse_password_algorithm(input: &[u8]) -> Result<PasswordAlgorithm, Passw
     Ok(entries.remove(0))
 }
 
-/// Select SHA-256 when offered; otherwise select MD5 if offered.
-/// The caller must still validate that this profile is supported by its service.
+/// Select the first server-offered algorithm that the client explicitly supports.
+/// RFC 8489 negotiation is server-list ordered; do not impose a local preference
+/// that silently changes the server's ordering.
 pub fn select_password_algorithm(
     offered: &[PasswordAlgorithm],
+    supported: &[PasswordAlgorithmId],
 ) -> Result<PasswordAlgorithmId, PasswordAlgorithmError> {
-    if offered.iter().any(|entry| entry.id == PASSWORD_ALGORITHM_SHA256) {
-        return Ok(PasswordAlgorithmId::Sha256);
-    }
-    if offered.iter().any(|entry| entry.id == PASSWORD_ALGORITHM_MD5) {
-        return Ok(PasswordAlgorithmId::Md5);
+    for entry in offered {
+        if let Some(selected) = supported.iter().find(|candidate| candidate.wire_id() == entry.id) {
+            return Ok(*selected);
+        }
     }
     Err(PasswordAlgorithmError::NoCommonAlgorithm)
 }
@@ -169,17 +170,31 @@ mod tests {
     }
 
     #[test]
-    fn prefers_sha256_and_falls_back_to_md5() {
+    fn selects_first_server_offered_algorithm_supported_by_client() {
+        let offered = [
+            PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
+            PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] },
+        ];
         assert_eq!(
-            select_password_algorithm(&[PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] }]),
+            select_password_algorithm(
+                &offered,
+                &[PasswordAlgorithmId::Md5, PasswordAlgorithmId::Sha256],
+            ),
             Ok(PasswordAlgorithmId::Md5)
         );
         assert_eq!(
-            select_password_algorithm(&[
-                PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
-                PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] },
-            ]),
+            select_password_algorithm(
+                &offered,
+                &[PasswordAlgorithmId::Sha256],
+            ),
             Ok(PasswordAlgorithmId::Sha256)
+        );
+        assert_eq!(
+            select_password_algorithm(
+                &offered,
+                &[],
+            ),
+            Err(PasswordAlgorithmError::NoCommonAlgorithm)
         );
     }
 
