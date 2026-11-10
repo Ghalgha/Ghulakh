@@ -168,3 +168,8 @@ The allocation-scoped peer registry tracks permissions by peer IP and channel bi
 ### TURN UDP socket adapter
 
 The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages to one configured TURN endpoint, preserves the source address of received datagrams, and can adopt a pre-bound standard UDP socket. Android integration is expected to create and protect that socket with `VpnService.protect(fd)` before handing it to the adapter. The adapter does not yet perform TURN authentication, transaction scheduling, allocation management, or relay session establishment.
+
+
+### TURN tunnel data codec composition
+
+The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This is a codec composition only: it does not own UDP receive dispatch, TURN state transitions, or the authenticated key exchange.
