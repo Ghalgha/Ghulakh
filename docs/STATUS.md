@@ -9,6 +9,7 @@
 ## Что уже есть
 
 - Rust workspace и общий протокольный crate.
+- Начальный STUN message codec в общем протокольном crate: framing, method/class, TLV attributes, XOR address IPv4/IPv6 и unit tests.
 - Экспериментальный QUIC-клиент и QUIC-сервер с TLS 1.3.
 - Экспериментальная передача IP-датаграмм через QUIC DATAGRAM.
 - Серверный IPv4 TUN, адресный пул, source-IP validation и базовая egress ACL.
@@ -20,6 +21,7 @@
 
 - VK Calls credential provider.
 - TURN client/allocation manager в Ghulakh.
+- STUN MESSAGE-INTEGRITY/FINGERPRINT validation и TURN long-term authentication; текущий STUN codec не выполняет криптографическую проверку.
 - TURN UDP/TCP/TLS data path между Android-клиентом и серверным gateway.
 - Вертикальный end-to-end срез одного allocation и обратного relay-пути.
 - Защищённый data framing для целевого TURN-пути.
@@ -43,6 +45,17 @@ README всех шести указанных пользователем исх�
 - серверный UDP gateway, принимающий данные, прошедшие через TURN relay.
 
 Это не подтверждает, что все режимы доступны на текущей инфраструктуре VK Calls. Получение credentials, wire format и обратная адресация требуют полного анализа клиентского и серверного кода. Код исходных проектов в Ghulakh не переносился.
+
+## Реализовано в начальном STUN codec
+
+- Декодирование и кодирование STUN header и transaction ID.
+- Декодирование/кодирование method и class.
+- Строгое ограничение message length, проверка magic cookie и TLV boundaries/padding.
+- Сохранение неизвестных атрибутов.
+- XOR address для IPv4 и IPv6.
+- Unit tests round-trip для всех STUN classes, malformed length/cookie и XOR address.
+
+Кодек не является TURN-клиентом: MESSAGE-INTEGRITY, FINGERPRINT, authentication, transaction retries и allocation state machine ещё не реализованы. Сетевые сообщения нельзя считать аутентифицированными до реализации integrity verification.
 
 ## Следующие этапы
 
