@@ -108,10 +108,12 @@ impl TurnAuthContext {
                     return Err(TurnAuthError::InvalidPasswordProfile);
                 }
             }
-            (None, Some(_)) | (Some(_), None) => {
+            (Some(_), None) if algorithm == TurnIntegrityAlgorithm::Sha256 => {}
+            (Some(_), None) | (None, Some(_)) => {
                 return Err(TurnAuthError::InvalidPasswordProfile);
             }
-            (None, None) => {}
+            (None, None) if algorithm == TurnIntegrityAlgorithm::Sha1 => {}
+            (None, None) => return Err(TurnAuthError::InvalidPasswordProfile),
         }
         Ok(Self {
             username: Zeroizing::new(username),
