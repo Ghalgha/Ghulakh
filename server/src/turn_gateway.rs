@@ -323,6 +323,58 @@ mod tests {
 
 
     #[tokio::test]
+    async fn completes_noise_handshake_and_registers_session_before_uplink() {
+        use ghulakh_protocol::{
+            session_handshake::{NoiseServerKeyPair, TurnSessionConfig},
+            turn_handshake::TurnHandshakeClient,
+        };
+        use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
+
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
+        let verifier: Arc<CredentialVerifier> = Arc::new(|candidate| candidate == b"test-device");
+        let service = TurnHandshakeService::new(Arc::clone(&keypair), verifier).unwrap();
+        gateway.install_handshake_service(service).await.unwrap();
+
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let credential = b"test-device";
+        let (mut client, client_init) =
+            TurnHandshakeClient::new(keypair.public_key(), credential, [0x71; 16]).unwrap();
+        relay.send_to(&client_init, gateway_addr).await.unwrap();
+
+        let mut buffer = [0u8; 2048];
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        assert_eq!(source, gateway_addr);
+        let client_finish = client.receive_server_response(&buffer[..length]).unwrap();
+        relay.send_to(&client_finish, gateway_addr).await.unwrap();
+
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        assert_eq!(source, gateway_addr);
+        let (keys, config_payload) = client.receive_server_ack_with_payload(&buffer[..length]).unwrap();
+        let config = TurnSessionConfig::decode(&config_payload).unwrap();
+        assert_eq!(config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
+        assert_eq!(config.mtu, 1100);
+
+        let (mut client_tx, _) = keys.into_client_codecs();
+        let uplink = packet(config.virtual_ipv4, Ipv4Addr::new(1, 1, 1, 1));
+        let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
+        relay.send_to(&protected, gateway_addr).await.unwrap();
+        let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        assert_eq!(received, uplink);
+        assert_eq!(gateway.stats().accepted, 1);
+        gateway_task.abort();
+    }
+
+    #[tokio::test]
     async fn routes_authenticated_uplink_to_tun_and_downlink_to_relay_tuple() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
