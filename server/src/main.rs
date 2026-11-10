@@ -567,6 +567,13 @@ mod tests {
     }
 
     #[test]
+    fn client_address_pool_allocates_unique_ipv4_addresses() {
+        let pool = IpAllocator::new();
+        assert_eq!(pool.allocate().unwrap(), Ipv4Addr::new(10, 77, 0, 2));
+        assert_eq!(pool.allocate().unwrap(), Ipv4Addr::new(10, 77, 0, 3));
+    }
+
+    #[test]
     fn datagrams_are_rejected_before_authentication() {
         assert_eq!(
             inspect_datagram(
