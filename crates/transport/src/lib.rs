@@ -13,6 +13,7 @@ use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc, time::Duration};
 
 pub mod jni_bridge;
 pub mod turn_udp;
+pub mod turn_driver;
 pub mod turn_auth;
 pub mod turn_data;
 pub mod turn_credentials;
