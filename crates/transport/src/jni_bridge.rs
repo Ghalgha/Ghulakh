@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use ghulakh_protocol::{DataDatagram, IpPacketKind};
 use jni::{
     objects::{JByteArray, JObject, JString},
-    sys::{jboolean, jbyteArray, jint, jlong},
+    sys::{jboolean, jbyteArray, jint, jlong, jstring},
     JNIEnv,
 };
 use rand::{rngs::OsRng, RngCore};
@@ -106,6 +106,11 @@ fn receive_packet_impl(handle: jlong) -> Result<Vec<u8>> {
         let packet = session.client.receive_packet().await?;
         Ok::<Vec<u8>, anyhow::Error>(packet.packet)
     })
+}
+
+fn client_ipv4_impl(handle: jlong) -> Result<String> {
+    let session = session(handle)?;
+    Ok(session.client.client_ipv4().to_owned())
 }
 
 fn ping_impl(handle: jlong) -> Result<()> {
@@ -215,5 +220,26 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeClose(
 ) {
     if let Err(error) = close_impl(handle) {
         throw_error(&mut env, "java/lang/IllegalStateException", error);
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeClientIpv4(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jstring {
+    match client_ipv4_impl(handle) {
+        Ok(address) => match env.new_string(address) {
+            Ok(value) => value.into_raw(),
+            Err(error) => {
+                throw_error(&mut env, "java/lang/IllegalStateException", error);
+                std::ptr::null_mut()
+            }
+        },
+        Err(error) => {
+            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            std::ptr::null_mut()
+        }
     }
 }
