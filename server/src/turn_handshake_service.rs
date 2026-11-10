@@ -312,7 +312,9 @@ impl TurnHandshakeService {
         let Some(group) = self.path_groups.get_mut(&context.group_id) else {
             return false;
         };
-        group.active_paths.remove(&context.path_id);
+        if !group.active_paths.remove(&context.path_id) {
+            return false;
+        }
         if group.active_paths.is_empty() {
             let address = group.virtual_ipv4;
             self.path_groups.remove(&context.group_id);
