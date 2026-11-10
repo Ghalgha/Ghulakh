@@ -378,6 +378,71 @@ mod tests {
     }
 
     #[test]
+    fn path_group_reserves_one_address_until_its_last_path_is_released() {
+        let (mut service, _) = service(b"device-secret");
+        let first = TurnPathContext {
+            group_id: [0x71; 16],
+            path_id: 0,
+            path_count: 2,
+        };
+        let second = TurnPathContext {
+            path_id: 1,
+            ..first
+        };
+        let address_a = service.reserve_path(first).unwrap();
+        let address_b = service.reserve_path(second).unwrap();
+        assert_eq!(address_a, address_b);
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert!(service.reserve_path(first).is_err());
+
+        assert!(service.release_path(first));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert!(service.release_path(second));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+    }
+
+    #[test]
+    fn authenticated_paths_in_one_group_receive_the_same_virtual_address() {
+        let credential = b"device-secret";
+        let (mut service, keypair) = service(credential);
+        let group_id = [0x72; 16];
+        let now = Instant::now();
+        let mut assigned = Vec::new();
+
+        for path_id in 0..2 {
+            let context = TurnPathContext {
+                group_id,
+                path_id,
+                path_count: 2,
+            };
+            let (mut client, init) = TurnHandshakeClient::new_with_path_context(
+                keypair.public_key(),
+                credential,
+                context,
+                [0x40 + path_id as u8; 16],
+            ).unwrap();
+            let peer: SocketAddr = format!("192.0.2.{}:{}", 20 + path_id, 49152 + path_id)
+                .parse().unwrap();
+            let server_response = match service.process(&init, peer, now).unwrap() {
+                TurnHandshakeOutcome::Response { response, established: None } => response,
+                _ => panic!("expected server response"),
+            };
+            let finish = client.receive_server_response(&server_response).unwrap();
+            let (server_ack, established) = match service.process(&finish, peer, now).unwrap() {
+                TurnHandshakeOutcome::Response { response, established: Some(session) } => (response, session),
+                _ => panic!("expected established path"),
+            };
+            assert_eq!(established.path_context, Some(context));
+            let (keys, config_payload) = client.receive_server_ack_with_payload(&server_ack).unwrap();
+            assert_eq!(keys.session_id(), established.frame_keys.session_id());
+            assigned.push(TurnSessionConfig::decode(&config_payload).unwrap().virtual_ipv4);
+        }
+
+        assert_eq!(assigned[0], assigned[1]);
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+    }
+
+    #[test]
     fn full_handshake_caches_before_returning_and_replays_without_noise_transition() {
         let credential = b"device-secret";
         let (mut service, keypair) = service(credential);
