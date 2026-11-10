@@ -144,10 +144,13 @@ impl TurnHandshakeService {
                 })
             }
             HandshakePhase::ClientFinish => {
+                if self.pending.get(&key).is_some_and(|pending| pending.expires_at <= now) {
+                    self.pending.remove(&key);
+                    bail!("client handshake expired");
+                }
                 let finish_result = {
                     let pending = self.pending.get_mut(&key)
                         .context("no active handshake for ClientFinish")?;
-                    ensure!(pending.expires_at > now, "client handshake expired");
                     pending.server.receive_client_finish(
                         datagram,
                         |credential| (self.verify_credential)(credential),
