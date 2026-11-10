@@ -1,7 +1,7 @@
 //! JNI boundary for the Android application. No credentials are logged.
 
 use crate::{ClientOptions, QuicClient};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use ghulakh_protocol::{DataDatagram, IpPacketKind};
 use jni::{
     objects::{JByteArray, JObject, JString},
@@ -94,10 +94,8 @@ fn send_packet_impl(env: &mut JNIEnv, handle: jlong, packet: JByteArray) -> Resu
     let first_byte = *packet.first().context("IP packet is empty")?;
     let kind = IpPacketKind::try_from(first_byte >> 4)?;
     let session = session(handle)?;
-    session.runtime.block_on(session.client.send_packet(&DataDatagram {
-        kind,
-        packet,
-    }))
+    let datagram = DataDatagram { kind, packet };
+    session.runtime.block_on(session.client.send_packet(&datagram))
 }
 
 fn receive_packet_impl(handle: jlong) -> Result<Vec<u8>> {
