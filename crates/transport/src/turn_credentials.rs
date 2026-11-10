@@ -100,6 +100,13 @@ impl TurnCredentials {
             serde_json::from_str(input).map_err(|_| TurnCredentialError::InvalidJson)?;
         let turn = root
             .get("turn_server")
+            .or_else(|| root.get("response").and_then(|response| response.get("turn_server")))
+            .or_else(|| {
+                (root.get("username").is_some()
+                    && root.get("credential").is_some()
+                    && root.get("urls").is_some())
+                    .then_some(&root)
+            })
             .ok_or(TurnCredentialError::MissingTurnServer)?;
         let username = turn
             .get("username")
@@ -341,6 +348,18 @@ mod tests {
         assert!(!debug.contains("temporary-user"));
         assert!(!debug.contains("temporary-password"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn accepts_direct_turn_server_object_from_webview_interception() {
+        let direct = r#"{
+            "username":"temporary-user",
+            "credential":"temporary-password",
+            "urls":["turn:relay.example:3478?transport=udp"]
+        }"#;
+        let credentials = TurnCredentials::from_vk_response_json(direct).unwrap();
+        assert_eq!(credentials.username(), "temporary-user");
+        assert_eq!(credentials.endpoints().len(), 1);
     }
 
     #[test]
