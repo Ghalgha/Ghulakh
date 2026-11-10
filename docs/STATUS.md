@@ -143,3 +143,7 @@ README всех шести указанных пользователем исх�
 - Added a Tokio UDP socket adapter for the TURN client transport.
 - Supports raw STUN/TURN control datagrams, ChannelData sends, source-preserving UDP receive, and adoption of an already-bound socket suitable for Android VPN protection.
 - Android JNI/VpnService socket protection and integration with TURN transaction/allocation state remain outstanding.
+
+
+- Added a transport-level composition layer: IP datagram → AEAD frame → TURN ChannelData, with the inverse authenticated receive path.
+- The codec is tested independently; it is not yet connected to the live TURN UDP socket, Android TUN worker, or server-side relay gateway.
