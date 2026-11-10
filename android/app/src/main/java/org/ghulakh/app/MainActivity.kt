@@ -13,6 +13,7 @@ class MainActivity : Activity() {
             setPadding(32, 48, 32, 32)
         }
         root.addView(TextView(this).apply { text = "ГӀулакх"; textSize = 28f })
+        root.addView(TextView(this).apply { text = "Ghulakh"; textSize = 16f })
         root.addView(TextView(this).apply { text = "Исследовательская сборка · 0.1.0"; textSize = 14f })
         root.addView(TextView(this).apply {
             text = "Транспорт ещё не подключён. Эта сборка не маршрутизирует трафик."
