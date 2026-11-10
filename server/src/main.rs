@@ -13,7 +13,7 @@ use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    env, fs, fs::File, io::BufReader, net::{Ipv4Addr, SocketAddr},
+    env, fs, fs::{File, OpenOptions}, io::{BufReader, Write}, net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -512,8 +512,41 @@ async fn handle_connection(
     Ok(())
 }
 
-#[tokio::main]
+fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(if private { 0o600 } else { 0o644 });
+    }
+    let mut file = options.open(path)
+        .with_context(|| format!("create Noise key file {path} without overwriting an existing file"))?;
+    file.write_all(bytes).with_context(|| format!("write Noise key file {path}"))?;
+    file.sync_all().with_context(|| format!("sync Noise key file {path}"))?;
+    Ok(())
+}
+
 async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--generate-noise-keypair") {
+        ensure_keygen_args(&args)?;
+        let keypair = ghulakh_protocol::session_handshake::NoiseServerKeyPair::generate()
+            .context("generate persistent Noise server keypair")?;
+        let private_path = &args[2];
+        let public_path = &args[3];
+        anyhow::ensure!(private_path != public_path, "private and public key paths must differ");
+        let private_hex = format!("{}\n", hex::encode(keypair.private_key_bytes()));
+        let public_hex = format!("{}\n", hex::encode(keypair.public_key()));
+        write_noise_key_file(private_path, private_hex.as_bytes(), true)?;
+        if let Err(error) = write_noise_key_file(public_path, public_hex.as_bytes(), false) {
+            let _ = fs::remove_file(private_path);
+            return Err(error);
+        }
+        println!("noise_server_public_key_hex={}", hex::encode(keypair.public_key()));
+        return Ok(());
+    }
+
     let credential_path = env::var("GHULAKH_CREDENTIAL_HASHES")
         .context("set GHULAKH_CREDENTIAL_HASHES to a file of SHA-256 credential digests")?;
     let credential_hashes = Arc::new(load_credential_hashes(&credential_path)?);
