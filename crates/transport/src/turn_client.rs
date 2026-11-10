@@ -216,3 +216,183 @@ impl Drop for TurnClientRuntime {
         self.maintenance_task.abort();
     }
 }
+
+
+/// One logical VPN tunnel backed by several independent authenticated TURN paths.
+/// Flow affinity keeps each IP flow on one path while preserving aggregate
+/// throughput across concurrent flows and avoiding packet reordering.
+pub struct TurnClientPathGroup {
+    config: ghulakh_protocol::session_handshake::TurnSessionConfig,
+    paths: Vec<Arc<TurnClientRuntime>>,
+    healthy: Vec<Arc<AtomicBool>>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
+    forwarders: Vec<JoinHandle<()>>,
+}
+
+impl TurnClientPathGroup {
+    pub fn new(mut paths: Vec<TurnClientRuntime>) -> Result<Self> {
+        anyhow::ensure!(
+            (2..=usize::from(ghulakh_protocol::turn_path_context::MAX_TURN_PATHS))
+                .contains(&paths.len()),
+            "TURN path group must contain 2 to 10 paths"
+        );
+        let config = paths[0].config();
+        let first_context = paths[0].path_context()
+            .context("TURN path group contains a path without authenticated path context")?;
+        let mut seen = std::collections::HashSet::new();
+        for path in &paths {
+            anyhow::ensure!(path.config() == config, "TURN paths disagree on tunnel IPv4 or MTU");
+            let context = path.path_context()
+                .context("TURN path group contains a path without authenticated path context")?;
+            context.validate().context("validate TURN path group member")?;
+            anyhow::ensure!(
+                context.group_id == first_context.group_id
+                    && context.path_count == first_context.path_count,
+                "TURN path group members have inconsistent group metadata"
+            );
+            anyhow::ensure!(seen.insert(context.path_id), "duplicate TURN path identifier");
+        }
+        anyhow::ensure!(
+            paths.len() <= usize::from(first_context.path_count),
+            "connected TURN path count exceeds the authenticated group size"
+        );
+        paths.sort_by_key(|path| path.path_context().map(|context| context.path_id).unwrap_or(u16::MAX));
+
+        let paths: Vec<Arc<TurnClientRuntime>> = paths.into_iter().map(Arc::new).collect();
+        let healthy: Vec<Arc<AtomicBool>> = paths.iter()
+            .map(|_| Arc::new(AtomicBool::new(true)))
+            .collect();
+        let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY * 2);
+        let mut forwarders = Vec::with_capacity(paths.len());
+
+        for (path, path_health) in paths.iter().cloned().zip(healthy.iter().cloned()) {
+            let sender = downlink_tx.clone();
+            forwarders.push(tokio::spawn(async move {
+                loop {
+                    match path.receive_packet().await {
+                        Ok(packet) => {
+                            if sender.send(packet).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                path_health.store(false, Ordering::Release);
+            }));
+        }
+        drop(downlink_tx);
+
+        Ok(Self {
+            config,
+            paths,
+            healthy,
+            downlink: tokio::sync::Mutex::new(downlink),
+            forwarders,
+        })
+    }
+
+    pub fn config(&self) -> ghulakh_protocol::session_handshake::TurnSessionConfig {
+        self.config
+    }
+
+    pub fn active_paths(&self) -> usize {
+        self.healthy.iter().filter(|path| path.load(Ordering::Acquire)).count()
+    }
+
+    pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
+        let health: Vec<bool> = self.healthy.iter()
+            .map(|path| path.load(Ordering::Acquire))
+            .collect();
+        let start = select_path_index(&packet.packet, &health)
+            .context("TURN path group has no healthy paths")?;
+        for offset in 0..self.paths.len() {
+            let index = (start + offset) % self.paths.len();
+            if !self.healthy[index].load(Ordering::Acquire) {
+                continue;
+            }
+            match self.paths[index].send_packet(packet.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(_) => self.healthy[index].store(false, Ordering::Release),
+            }
+        }
+        anyhow::bail!("all TURN paths rejected the packet or became unavailable")
+    }
+
+    pub async fn receive_packet(&self) -> Result<DataDatagram> {
+        self.downlink.lock().await.recv().await
+            .context("all TURN path downlink queues are closed")
+    }
+
+    pub fn close(&self) {
+        for task in &self.forwarders {
+            task.abort();
+        }
+        for path in &self.paths {
+            path.close();
+        }
+    }
+}
+
+impl Drop for TurnClientPathGroup {
+    fn drop(&mut self) {
+        for task in &self.forwarders {
+            task.abort();
+        }
+        for path in &self.paths {
+            path.close();
+        }
+    }
+}
+
+fn select_path_index(packet: &[u8], healthy: &[bool]) -> Option<usize> {
+    if healthy.is_empty() {
+        return None;
+    }
+    let start = (ghulakh_protocol::ip_flow::flow_hash(packet) as usize) % healthy.len();
+    (0..healthy.len())
+        .map(|offset| (start + offset) % healthy.len())
+        .find(|index| healthy[*index])
+}
+
+#[cfg(test)]
+mod path_group_tests {
+    use super::*;
+
+    fn packet(source_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 24];
+        packet[0] = 0x45;
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn flow_selection_is_stable_and_uses_other_healthy_paths_on_failure() {
+        let healthy = [true, true, true, true];
+        let first = select_path_index(&packet(12000), &healthy).unwrap();
+        let second = select_path_index(&packet(12000), &healthy).unwrap();
+        assert_eq!(first, second);
+
+        let mut degraded = healthy;
+        degraded[first] = false;
+        let fallback = select_path_index(&packet(12000), &degraded).unwrap();
+        assert_ne!(fallback, first);
+        assert_eq!(select_path_index(&packet(12000), &[false; 4]), None);
+    }
+
+    #[test]
+    fn different_flows_can_select_different_paths() {
+        let healthy = [true, true, true, true];
+        let selections: std::collections::HashSet<usize> =
+            (10000..10064)
+                .map(|port| select_path_index(&packet(port), &healthy).unwrap())
+                .collect();
+        assert!(selections.len() > 1);
+    }
+}
