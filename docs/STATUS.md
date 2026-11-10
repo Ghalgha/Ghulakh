@@ -26,8 +26,15 @@
 - шифрование credential и DER-сертификата AES-GCM ключом Android Keystore;
 - Android VpnService с IPv4 TUN, full-tunnel IPv4-маршрутом, fail-closed IPv6-маршрутом и двунаправленным обменом пакетами через JNI;
 - защита исходящего QUIC UDP-сокета через VpnService.protect до установки TUN-маршрутов;
-- CI workflow для Rust checks, аудита зависимостей, Android native cross-build и Android debug build (результат выполнения ещё не подтверждён);
 - документация архитектуры, протокола, модели угроз и эксплуатации сервера.
+
+## Проверки
+
+- GitHub Actions run `42840236910` завершился успешно для обеих задач: Rust checks и Android debug build.
+- В Rust job успешно выполнены dependency audit, rustfmt, `cargo test --workspace` и Clippy с `-D warnings`.
+- Android job успешно собрал нативную библиотеку для трёх ABI и выполнил `gradle assembleDebug`.
+- Следующее изменение CI добавляет проверку существования APK и публикацию APK как артефакта. Этот новый шаг ещё ожидает отдельного CI-запуска.
+- Проверки выполнялись в CI; физическая установка APK и end-to-end тест через реальный сервер не выполнялись.
 
 ## Не реализовано
 
