@@ -556,6 +556,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multipath_gateway_forwards_authenticated_uplink_and_flow_affine_downlink() {
+        let (gateway, mut tun_rx) =
+            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let group_id = [0x75; 16];
+        let session_a = [0x91; 8];
+        let session_b = [0x92; 8];
+        let client_key_a = [0x11; 32];
+        let client_key_b = [0x12; 32];
+        let server_key_a = [0x21; 32];
+        let server_key_b = [0x22; 32];
+        let client_prefix_a = [0x31; 4];
+        let client_prefix_b = [0x32; 4];
+        let server_prefix_a = [0x41; 4];
+        let server_prefix_b = [0x42; 4];
+
+        for (session_id, relay, path_id, client_key, client_prefix, server_key, server_prefix) in [
+            (session_a, &relay_a, 0u16, client_key_a, client_prefix_a, server_key_a, server_prefix_a),
+            (session_b, &relay_b, 1u16, client_key_b, client_prefix_b, server_key_b, server_prefix_b),
+        ] {
+            gateway.register_session_with_path(
+                session_id,
+                CLIENT_IP,
+                relay.local_addr().unwrap(),
+                FrameOpener::new(
+                    client_key,
+                    client_prefix,
+                    session_id,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    server_key,
+                    server_prefix,
+                    session_id,
+                    FrameDirection::ServerToClient,
+                ),
+                Some(TurnPathContext { group_id, path_id, path_count: 2 }),
+            ).await.unwrap();
+        }
+
+        // Each independent path authenticates an uplink with its own key and
+        // session ID. The server accepts both into the same client TUN.
+        let uplink_a = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
+        let uplink_b = packet(CLIENT_IP, Ipv4Addr::new(8, 8, 8, 8));
+        for (session_id, relay, key, prefix, uplink) in [
+            (session_a, &relay_a, client_key_a, client_prefix_a, uplink_a.clone()),
+            (session_b, &relay_b, client_key_b, client_prefix_b, uplink_b.clone()),
+        ] {
+            let mut sealer = FrameSealer::new(
+                key,
+                prefix,
+                session_id,
+                FrameDirection::ClientToServer,
+            );
+            let frame = sealer.seal(&uplink.encode().unwrap()).unwrap();
+            gateway.process_datagram(&frame, relay.local_addr().unwrap()).await;
+        }
+        assert_eq!(
+            timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(),
+            uplink_a
+        );
+        assert_eq!(
+            timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(),
+            uplink_b
+        );
+
+        let mut opener_a = FrameOpener::new(
+            server_key_a,
+            server_prefix_a,
+            session_a,
+            FrameDirection::ServerToClient,
+        );
+        let mut opener_b = FrameOpener::new(
+            server_key_b,
+            server_prefix_b,
+            session_b,
+            FrameDirection::ServerToClient,
+        );
+
+        // Find two distinct UDP flows that the deterministic flow hash maps
+        // to different paths. Each flow must remain on its selected path.
+        let mut flows: [Option<(usize, DataDatagram)>; 2] = [None, None];
+        for source_port in 1..=u16::MAX {
+            let mut bytes = vec![0u8; 28];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
+            bytes[12..16].copy_from_slice(&[203, 0, 113, 9]);
+            bytes[16..20].copy_from_slice(&CLIENT_IP.octets());
+            bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+            let flow = DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes };
+            let path = (ghulakh_protocol::ip_flow::flow_hash(&flow.packet) as usize) % 2;
+            if flows[path].is_none() {
+                flows[path] = Some((path, flow));
+            }
+            if flows.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let flows = flows.map(Option::unwrap);
+
+        for (expected_path, flow) in flows {
+            gateway.send_downlink(&flow).await.unwrap();
+            let mut buffer = [0u8; 1500];
+            let (length, _) = if expected_path == 0 {
+                timeout(Duration::from_secs(1), relay_a.recv_from(&mut buffer))
+                    .await.unwrap().unwrap()
+            } else {
+                timeout(Duration::from_secs(1), relay_b.recv_from(&mut buffer))
+                    .await.unwrap().unwrap()
+            };
+            let plaintext = if expected_path == 0 {
+                opener_a.open(&buffer[..length]).unwrap()
+            } else {
+                opener_b.open(&buffer[..length]).unwrap()
+            };
+            assert_eq!(DataDatagram::decode(&plaintext).unwrap(), flow);
+            let other = if expected_path == 0 { &relay_b } else { &relay_a };
+            assert!(timeout(Duration::from_millis(25), other.recv_from(&mut buffer)).await.is_err());
+        }
+
+        assert_eq!(gateway.stats().accepted, 2);
+        assert_eq!(gateway.stats().downlink_sent, 2);
+    }
+
+    #[tokio::test]
     async fn full_mock_turn_client_to_server_to_client_tunnel() {
         use std::{
             collections::{HashMap, HashSet},
