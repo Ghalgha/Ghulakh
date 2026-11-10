@@ -147,3 +147,10 @@ README всех шести указанных пользователем исх�
 
 - Added a transport-level composition layer: IP datagram → AEAD frame → TURN ChannelData, with the inverse authenticated receive path.
 - The codec is tested independently; it is not yet connected to the live TURN UDP socket, Android TUN worker, or server-side relay gateway.
+
+
+### VK Calls credential acquisition research
+
+- Documented the observed anonymous join-link, authenticated account, and WebView response-interception paths for obtaining `turn_server`.
+- Identified the credential fields as `username`, `credential`, and `urls[]`; separated these relay credentials from Ghulakh's tunnel-session encryption keys.
+- Credential acquisition is not yet implemented. The app still needs a product decision on joining an existing call versus creating a dedicated call, plus confirmation of returned URI schemes, credential lifetime and authentication profile.
