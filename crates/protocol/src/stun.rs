@@ -179,12 +179,19 @@ pub fn verify_message_integrity(input: &[u8], key: &[u8]) -> Result<(), StunErro
     }
     let attr_index = positions[0];
     let trailing = &message.attributes[attr_index + 1..];
-    if !(trailing.is_empty() || (trailing.len() == 1 && trailing[0].kind == ATTR_FINGERPRINT)) {
-        return Err(StunError::InvalidIntegrityLayout);
-    }
+    let trailing_len = match trailing {
+        [] => 0,
+        [fingerprint] if fingerprint.kind == ATTR_FINGERPRINT => 8,
+        [sha256] if sha256.kind == ATTR_MESSAGE_INTEGRITY_SHA256 && sha256.value.len() == 32 => 36,
+        [sha256, fingerprint]
+            if sha256.kind == ATTR_MESSAGE_INTEGRITY_SHA256
+                && sha256.value.len() == 32
+                && fingerprint.kind == ATTR_FINGERPRINT => 44,
+        _ => return Err(StunError::InvalidIntegrityLayout),
+    };
     let offset = HEADER_LEN + message.attributes[..attr_index].iter()
         .map(|a| 4 + ((a.value.len() + 3) & !3)).sum::<usize>();
-    let expected_len = offset + 24 + if trailing.is_empty() { 0 } else { 8 };
+    let expected_len = offset + 24 + trailing_len;
     if input.len() != expected_len { return Err(StunError::InvalidIntegrityLayout); }
     // RFC 5389 requires the header length used for HMAC to end at MESSAGE-INTEGRITY,
     // even when a FINGERPRINT attribute follows it in the wire message.
@@ -205,9 +212,7 @@ pub fn append_message_integrity_sha256(message: &StunMessage, key: &[u8]) -> Res
     use sha2::Sha256;
 
     if key.is_empty() || message.attributes.iter().any(|a| {
-        a.kind == ATTR_MESSAGE_INTEGRITY
-            || a.kind == ATTR_MESSAGE_INTEGRITY_SHA256
-            || a.kind == ATTR_FINGERPRINT
+        a.kind == ATTR_MESSAGE_INTEGRITY_SHA256 || a.kind == ATTR_FINGERPRINT
     }) {
         return Err(StunError::InvalidSha256IntegrityLayout);
     }
@@ -357,7 +362,9 @@ mod tests {
     }
     #[test] fn message_integrity_sha256_round_trip_and_tamper_detection() {
         let m = sample(StunClass::Request);
-        let encoded = append_message_integrity_sha256(&m, b"test-key").unwrap();
+        let sha1_then_sha256 = append_message_integrity(&m, b"test-key").unwrap();
+        let encoded = append_message_integrity_sha256(&StunMessage::decode(&sha1_then_sha256).unwrap(), b"test-key").unwrap();
+        verify_message_integrity(&encoded, b"test-key").unwrap();
         verify_message_integrity_sha256(&encoded, b"test-key").unwrap();
         let with_fingerprint = append_fingerprint(&encoded).unwrap();
         verify_message_integrity_sha256(&with_fingerprint, b"test-key").unwrap();
