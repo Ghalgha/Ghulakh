@@ -2,7 +2,7 @@
 //!
 //! Sessions must be registered only after an independent authenticated control
 //! exchange has verified the client identity, virtual address, TURN relayed
-//! address, channel and directional frame keys. The gateway never trusts source
+//! address and directional frame keys. The gateway never trusts source
 //! or destination addresses carried only inside an unauthenticated payload.
 
 use std::{
@@ -119,7 +119,7 @@ impl TurnGateway {
         &self,
         payload: &[u8],
         relay_peer: SocketAddr,
-        ) -> Result<()> {
+    ) -> Result<()> {
         use super::turn_handshake_service::TurnHandshakeOutcome;
 
         let outcome = {
@@ -152,13 +152,13 @@ impl TurnGateway {
     }
 
     /// Register a session only after its identity, virtual IP, TURN relay tuple,
-    /// channel binding and directional frame keys have been authenticated.
+    /// relay tuple and directional frame keys have been authenticated.
     pub async fn register_session(
         &self,
         session_id: [u8; 8],
         client_ipv4: Ipv4Addr,
         relay_peer: SocketAddr,
-            opener: FrameOpener,
+        opener: FrameOpener,
         sealer: FrameSealer,
     ) -> Result<()> {
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
@@ -193,7 +193,7 @@ impl TurnGateway {
     }
 
     /// Receive relay datagrams continuously. Unknown sessions, wrong relay
-    /// tuples, invalid channel frames and spoofed inner IP sources are dropped.
+    /// tuples, invalid protected frames and spoofed inner IP sources are dropped.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
         loop {
@@ -420,7 +420,7 @@ mod tests {
         let relay_addr = relay.local_addr().unwrap();
         let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
-            SESSION, CLIENT_IP, relay_addr, CHANNEL,
+            SESSION, CLIENT_IP, relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
         ).await.unwrap();
