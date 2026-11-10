@@ -17,6 +17,7 @@ use ghulakh_protocol::{
     },
     session_handshake::{SessionFrameKeys, TurnSessionConfig},
     turn_handshake::TurnHandshakeClient,
+    turn_path_context::TurnPathContext,
 };
 use rand::{rngs::OsRng, RngCore};
 use tokio::{sync::mpsc, time::MissedTickBehavior};
@@ -40,11 +41,45 @@ pub struct TurnClientSession {
 /// ServerAck. It does not register a VPN session or install a TUN dataplane.
 pub async fn run_turn_client_handshake(
     socket: TurnSocketHandle,
+    inbound: mpsc::Receiver<TurnInbound>,
+    relay_endpoint: SocketAddr,
+    channel_number: u16,
+    pinned_server_key: &[u8],
+    credential: &[u8],
+) -> Result<TurnClientSession> {
+    run_turn_client_handshake_inner(
+        socket, inbound, relay_endpoint, channel_number, pinned_server_key, credential, None,
+    ).await
+}
+
+pub async fn run_turn_client_handshake_with_path_context(
+    socket: TurnSocketHandle,
+    inbound: mpsc::Receiver<TurnInbound>,
+    relay_endpoint: SocketAddr,
+    channel_number: u16,
+    pinned_server_key: &[u8],
+    credential: &[u8],
+    path_context: TurnPathContext,
+) -> Result<TurnClientSession> {
+    run_turn_client_handshake_inner(
+        socket,
+        inbound,
+        relay_endpoint,
+        channel_number,
+        pinned_server_key,
+        credential,
+        Some(path_context),
+    ).await
+}
+
+async fn run_turn_client_handshake_inner(
+    socket: TurnSocketHandle,
     mut inbound: mpsc::Receiver<TurnInbound>,
     relay_endpoint: SocketAddr,
     channel_number: u16,
     pinned_server_key: &[u8],
     credential: &[u8],
+    path_context: Option<TurnPathContext>,
 ) -> Result<TurnClientSession> {
     anyhow::ensure!(
         (0x4000..=0x7fff).contains(&channel_number),
@@ -54,9 +89,12 @@ pub async fn run_turn_client_handshake(
     OsRng.fill_bytes(&mut handshake_id);
     anyhow::ensure!(handshake_id.iter().any(|byte| *byte != 0), "invalid random handshake ID");
 
-    let (mut noise, first_message) =
-        TurnHandshakeClient::new(pinned_server_key, credential, handshake_id)
-            .context("initialize client Noise handshake")?;
+    let (mut noise, first_message) = match path_context {
+        Some(context) => TurnHandshakeClient::new_with_path_context(
+            pinned_server_key, credential, context, handshake_id,
+        ),
+        None => TurnHandshakeClient::new(pinned_server_key, credential, handshake_id),
+    }.context("initialize client Noise handshake")?;
 
     let mut delivery = HandshakeDatagramDriver::new(
         1,
