@@ -5,17 +5,19 @@ use crate::{ClientOptions, QuicClient};
 use anyhow::{Context, Result};
 use ghulakh_protocol::{DataDatagram, IpPacketKind};
 use jni::{
-    objects::{JByteArray, JObject, JString},
+    objects::{JByteArray, JObject, JString, JValue},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
     JNIEnv,
 };
 use rand::{rngs::OsRng, RngCore};
 use std::{
     collections::HashMap,
-    net::SocketAddr,
+    net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex, OnceLock},
 };
 use tokio::runtime::{Builder, Runtime};
+#[cfg(target_os = "android")]
+use std::os::fd::AsRawFd;
 
 struct NativeSession {
     // Keep the runtime alive until after the QUIC client is dropped.
@@ -39,8 +41,38 @@ fn session(handle: jlong) -> Result<Arc<NativeSession>> {
         .context("unknown native session handle")
 }
 
+
+#[cfg(target_os = "android")]
+fn make_protected_socket(env: &mut JNIEnv, service: &JObject) -> Result<Option<UdpSocket>> {
+    if service.is_null() {
+        return Ok(None);
+    }
+    let socket = UdpSocket::bind("0.0.0.0:0").context("bind protected UDP socket")?;
+    socket.set_nonblocking(true).context("set UDP socket nonblocking")?;
+    let protected = env
+        .call_method(
+            service,
+            "protect",
+            "(I)Z",
+            &[JValue::Int(socket.as_raw_fd())],
+        )?
+        .z()?;
+    anyhow::ensure!(protected, "Android VpnService refused to protect QUIC socket");
+    Ok(Some(socket))
+}
+
+#[cfg(not(target_os = "android"))]
+fn make_protected_socket(_env: &mut JNIEnv, service: &JObject) -> Result<Option<UdpSocket>> {
+    anyhow::ensure!(
+        service.is_null(),
+        "VpnService socket protection is only available on Android"
+    );
+    Ok(None)
+}
+
 fn connect_impl(
     env: &mut JNIEnv,
+    vpn_service: JObject,
     host: JString,
     port: jint,
     server_name: JString,
@@ -58,21 +90,26 @@ fn connect_impl(
     let port = u16::try_from(port).context("server port is invalid")?;
     anyhow::ensure!(port != 0, "server port must not be zero");
 
+    let udp_socket = make_protected_socket(env, &vpn_service)?;
     let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("create native Tokio runtime")?;
     let server_addr: SocketAddr = runtime.block_on(async {
-        tokio::net::lookup_host((host.as_str(), port))
-            .await?
-            .next()
-            .context("server host did not resolve")
+        let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
+        let address = if udp_socket.is_some() {
+            addresses.find(SocketAddr::is_ipv4)
+        } else {
+            addresses.next()
+        };
+        address.context("server host did not resolve to a supported address")
     })?;
     let client = runtime.block_on(QuicClient::connect(ClientOptions {
         server_addr,
         server_name,
         root_certificate_der,
         credential,
+        udp_socket,
     }))?;
 
     let native_session = Arc::new(NativeSession { client, runtime });
@@ -138,6 +175,7 @@ fn throw_error(env: &mut JNIEnv, class: &str, error: impl std::fmt::Display) {
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeConnect(
     mut env: JNIEnv,
     _this: JObject,
+    vpn_service: JObject,
     host: JString,
     port: jint,
     server_name: JString,
@@ -146,6 +184,7 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeConnect(
 ) -> jlong {
     match connect_impl(
         &mut env,
+        vpn_service,
         host,
         port,
         server_name,
