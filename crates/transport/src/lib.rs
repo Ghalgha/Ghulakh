@@ -10,7 +10,6 @@ use quinn::{crypto::rustls::QuicClientConfig, Connection, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::{pki_types::CertificateDer, RootCertStore};
 use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc, time::Duration};
-use tokio::io::AsyncWriteExt;
 
 pub mod jni_bridge;
 
