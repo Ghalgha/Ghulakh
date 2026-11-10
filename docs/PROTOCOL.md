@@ -127,3 +127,7 @@ TURN challenge parser (401/438) реализован отдельно от crede
 ### TURN transaction manager
 
 Менеджер транзакций является детерминированным механизмом состояния без собственного сокета и таймера. Вызывающий код отправляет исходный STUN Request, периодически вызывает `poll()` и исполняет возвращённые retransmit-события. Входящий ответ передаётся в `accept_response()`; совпадение transaction ID, method и source endpoint необходимо, но недостаточно: вызывающий код обязан проверить MESSAGE-INTEGRITY согласно согласованному профилю до изменения состояния TURN. Для UDP используются параметры по умолчанию RFC 8489: RTO 500 мс, всего 7 отправок и финальное ожидание 8 секунд после последней отправки (общий примерный тайм-аут 39,5 секунды).
+
+### TURN request builders and response parsing
+
+`ghulakh_protocol::turn_request` provides constructors for Allocate (mandatory UDP REQUESTED-TRANSPORT), Refresh (including lifetime zero for deletion), CreatePermission (one or more peer addresses of a single address family), and ChannelBind (channel range 0x4000–0x7fff). It also parses successful Allocate/Refresh responses and checks required XOR-RELAYED-ADDRESS/LIFETIME attributes. The module deliberately does not add credentials or MESSAGE-INTEGRITY: the caller must use the negotiated auth provider and verify response integrity before parsing or applying state changes.
