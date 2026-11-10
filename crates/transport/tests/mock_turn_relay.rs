@@ -111,7 +111,7 @@ async fn control_plane_and_bidirectional_channel_data_work_end_to_end() {
     let mut allocation = Allocation::new(client_addr, RELAYED.parse().unwrap());
     let relay_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 2048];
-        for _ in 0..4 {
+        for _ in 0..6 {
             let (length, source) = timeout(Duration::from_secs(3), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
             if source == client_addr {
                 if buffer[0] & 0xc0 == 0x40 {
@@ -165,14 +165,13 @@ async fn control_plane_and_bidirectional_channel_data_work_end_to_end() {
     assert_eq!(downlink.channel_number, CHANNEL);
     assert_eq!(downlink.data, b"authenticated-downlink-frame");
 
-    let mut final_id = [4u8; 12];
+    let final_id = [4u8; 12];
     let refresh = refresh_request(final_id, 0);
     client.send_to(&refresh.encode().unwrap(), relay_addr).await.unwrap();
     let (length, _) = timeout(Duration::from_secs(2), client.recv_from(&mut buffer)).await.unwrap().unwrap();
     let response = StunMessage::decode(&buffer[..length]).unwrap();
     assert!(matches!(parse_success_response(&response, METHOD_REFRESH).unwrap(),
         TurnSuccess::Refresh { lifetime_seconds: 0 }));
-    final_id[0] = 5;
     let state = relay_task.await.unwrap();
     assert!(state.expires);
     assert_eq!(state.relayed, RELAYED.parse().unwrap());
