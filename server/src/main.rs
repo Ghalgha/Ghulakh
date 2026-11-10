@@ -21,6 +21,12 @@ use tokio::io::AsyncWriteExt;
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
 
+#[derive(Default)]
+struct DatagramMetrics {
+    accepted: std::sync::atomic::AtomicU64,
+    rejected: std::sync::atomic::AtomicU64,
+}
+
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
     let mut cert_reader = BufReader::new(
         File::open(cert_path)
@@ -211,6 +217,7 @@ fn inspect_datagram(bytes: &[u8], authenticated: bool) -> DatagramDisposition {
 async fn handle_connection(
     connection: quinn::Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
+    metrics: Arc<DatagramMetrics>,
 ) -> Result<()> {
     let session_id = Arc::new(new_session_id());
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -252,9 +259,11 @@ async fn handle_connection(
                         // The validated packet boundary is ready for the future TUN adapter.
                         // Until a server TUN is configured, packets are deliberately not routed.
                         valid_datagrams = valid_datagrams.saturating_add(1);
+                        metrics.accepted.fetch_add(1, Ordering::Relaxed);
                     }
                     DatagramDisposition::Unauthenticated | DatagramDisposition::Invalid => {
                         rejected_datagrams = rejected_datagrams.saturating_add(1);
+                        metrics.rejected.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }
@@ -303,7 +312,8 @@ async fn main() -> Result<()> {
             let _permit = permit;
             match connecting.await {
                 Ok(connection) => {
-                    if let Err(error) = handle_connection(connection, hashes).await {
+                    let metrics = Arc::new(DatagramMetrics::default());
+                    if let Err(error) = handle_connection(connection, hashes, metrics).await {
                         eprintln!("connection closed: {error:#}");
                     }
                 }
@@ -362,5 +372,82 @@ mod tests {
         let digest: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
         assert!(credential_matches(credential, &[digest]));
         assert!(!credential_matches("different-credential", &[digest]));
+    }
+
+    #[tokio::test]
+    async fn native_client_authenticates_and_sends_quic_datagram() {
+        use ghulakh_protocol::{DataDatagram, IpPacketKind};
+        use ghulakh_transport::{ClientOptions, QuicClient};
+
+        let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let certificate_path = directory.path().join("server-cert.pem");
+        let key_path = directory.path().join("server-key.pem");
+        let credential_path = directory.path().join("credential-hashes.txt");
+        std::fs::write(&certificate_path, certificate.cert.pem()).unwrap();
+        std::fs::write(&key_path, certificate.key_pair.serialize_pem()).unwrap();
+
+        let credential = "integration-test-device-secret".to_string();
+        let digest = hex::encode(Sha256::digest(credential.as_bytes()));
+        std::fs::write(&credential_path, digest).unwrap();
+
+        let server_config = load_server_config(
+            certificate_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+        )
+        .unwrap();
+        let endpoint = Endpoint::server(server_config, "127.0.0.1:0".parse().unwrap()).unwrap();
+        let server_addr = endpoint.local_addr().unwrap();
+        let server_endpoint = endpoint.clone();
+        let hashes = Arc::new(load_credential_hashes(credential_path.to_str().unwrap()).unwrap());
+        let metrics = Arc::new(DatagramMetrics::default());
+        let server_metrics = Arc::clone(&metrics);
+
+        let server_task = tokio::spawn(async move {
+            while let Some(connecting) = server_endpoint.accept().await {
+                let hashes = Arc::clone(&hashes);
+                let metrics = Arc::clone(&server_metrics);
+                tokio::spawn(async move {
+                    if let Ok(connection) = connecting.await {
+                        let _ = handle_connection(connection, hashes, metrics).await;
+                    }
+                });
+            }
+        });
+
+        let client = QuicClient::connect(ClientOptions {
+            server_addr,
+            server_name: "localhost".into(),
+            root_certificate_der: certificate.cert.der().to_vec(),
+            credential,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(client.session_id().len(), 32);
+        client.ping().await.unwrap();
+
+        let mut ipv4 = vec![0u8; 20];
+        ipv4[0] = 0x45;
+        ipv4[2..4].copy_from_slice(&20u16.to_be_bytes());
+        client
+            .send_packet(&DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: ipv4,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while metrics.accepted.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("server did not receive the authenticated QUIC datagram");
+
+        client.close();
+        endpoint.close(0u32.into(), b"test complete");
+        server_task.abort();
     }
 }
