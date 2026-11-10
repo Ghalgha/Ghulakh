@@ -35,7 +35,7 @@
 - ограничения размеров управляющих сообщений, request ID, credentials и IP-датаграмм;
 - лимиты числа QUIC-соединений и потоков, тайм-ауты и ограниченные TUN-очереди;
 - проверка назначенного клиенту IPv4 source address до передачи пакета в TUN;
-- базовая egress ACL блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT и зарезервированные диапазоны;
+- egress ACL блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, диапазоны IETF protocol assignments, документации и benchmarking;
 - TUN выключен по умолчанию; Android отказывается устанавливать маршруты, если сервер не сообщил о готовности TUN и явном подтверждении администратора для IP forwarding/NAT/firewall;
 - IPv6 направляется в VPN на Android, но сервер его не пересылает: это fail-closed поведение, а не поддержка IPv6.
 
