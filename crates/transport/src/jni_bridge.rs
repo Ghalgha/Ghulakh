@@ -157,6 +157,11 @@ fn tunnel_enabled_impl(handle: jlong) -> Result<bool> {
     Ok(session.client.tunnel_enabled())
 }
 
+fn forwarding_enabled_impl(handle: jlong) -> Result<bool> {
+    let session = session(handle)?;
+    Ok(session.client.forwarding_enabled())
+}
+
 fn ping_impl(handle: jlong) -> Result<()> {
     let session = session(handle)?;
     session.runtime.block_on(session.client.ping())
@@ -297,6 +302,22 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTunnelEnabled(
     handle: jlong,
 ) -> jboolean {
     match tunnel_enabled_impl(handle) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(error) => {
+            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            0
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeForwardingEnabled(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jboolean {
+    match forwarding_enabled_impl(handle) {
         Ok(true) => 1,
         Ok(false) => 0,
         Err(error) => {
