@@ -158,3 +158,8 @@ The UDP ChannelData codec validates the current RFC 8656 channel range `0x4000â€
 The protocol crate includes an AEAD frame codec using ChaCha20-Poly1305. A frame authenticates its magic/version marker, session identifier, direction, sequence number, and payload length as associated data. Nonces are formed from a caller-supplied 32-bit per-direction prefix and a 64-bit monotonic sequence. The receiver enforces a 128-packet replay window and commits sequence state only after successful authentication.
 
 The codec requires independent directional keys and nonce prefixes from a future authenticated session key agreement. It does not derive keys from TURN credentials, does not implement the key agreement, and is not yet connected to the Android TUN, TURN socket, or server gateway.
+
+
+### TURN peer permission and channel state
+
+The allocation-scoped peer registry tracks permissions by peer IP and channel bindings by peer transport address/channel number. It models the RFC 8656 permission lifetime of 300 seconds, channel-binding lifetime of 600 seconds, uniqueness in both directions, and the 300-second cooldown before reusing an expired channel number or peer address. A successful ChannelBind is recorded as also installing/refreshing the corresponding IP permission. The registry is updated only after the caller has authenticated and accepted a successful response.
