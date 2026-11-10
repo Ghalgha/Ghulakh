@@ -18,10 +18,7 @@ use std::{
     time::Duration,
 };
 use subtle::ConstantTimeEq;
-use tokio::{
-    io::AsyncWriteExt,
-    sync::{mpsc, RwLock},
-};
+use tokio::sync::{mpsc, RwLock};
 use tun_rs::DeviceBuilder;
 
 const ALPN: &[u8] = b"ghulakh/1";
@@ -182,6 +179,8 @@ fn load_credential_hashes(path: &str) -> Result<Vec<[u8; 32]>> {
     Ok(hashes)
 }
 
+// Keep scanning every digest to avoid leaking the matching entry position through timing.
+#[allow(clippy::unnecessary_fold)]
 fn credential_matches(candidate: &str, expected_hashes: &[[u8; 32]]) -> bool {
     let candidate_hash: [u8; 32] = Sha256::digest(candidate.as_bytes()).into();
     expected_hashes.iter().fold(false, |matched, expected| {
@@ -205,6 +204,9 @@ fn request_id(message: &ControlMessage) -> &str {
     }
 }
 
+// Parameters are the per-session control state; grouping them would obscure ownership
+// across the spawned stream task.
+#[allow(clippy::too_many_arguments)]
 async fn handle_control_stream(
     connection: Connection,
     mut send: quinn::SendStream,
@@ -371,6 +373,8 @@ fn inspect_datagram(
     }
 }
 
+// The connection task owns these independent runtime resources for its full lifetime.
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     connection: Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
