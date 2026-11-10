@@ -252,7 +252,13 @@ class MainActivity : Activity() {
     }
 
     private fun startVpn() {
-        if (store.load() == null) {
+        val profileAvailable = try {
+            store.load() != null
+        } catch (error: Exception) {
+            status.text = "Не удалось открыть профиль: ${error.message}"
+            return
+        }
+        if (!profileAvailable) {
             status.text = "Сначала сохраните профиль соединения."
             return
         }
