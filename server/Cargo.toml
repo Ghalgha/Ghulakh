@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["full"] }
 tun-rs = { version = "2.8.18", default-features = false, features = ["async_tokio"] }
 
 [dev-dependencies]
+md-5 = "0.10"
 ghulakh-transport = { path = "../crates/transport" }
 rcgen = "0.13"
 tempfile = "3"
