@@ -230,9 +230,13 @@ mod tests {
             channel_bind_request(id(), 0x3fff, "192.0.2.1:3478".parse().unwrap()),
             Err(TurnRequestError::InvalidChannelNumber)
         );
-        let message = channel_bind_request(id(), 0x4001, "192.0.2.1:3478".parse().unwrap()).unwrap();
+        assert_eq!(
+            channel_bind_request(id(), 0x5000, "192.0.2.1:3478".parse().unwrap()),
+            Err(TurnRequestError::InvalidChannelNumber)
+        );
+        let message = channel_bind_request(id(), 0x4fff, "192.0.2.1:3478".parse().unwrap()).unwrap();
         assert_eq!(message.method, METHOD_CHANNEL_BIND);
-        assert_eq!(message.attribute(ATTR_CHANNEL_NUMBER), Some(&[0x40, 0x01, 0, 0][..]));
+        assert_eq!(message.attribute(ATTR_CHANNEL_NUMBER), Some(&[0x4f, 0xff, 0, 0][..]));
     }
 
     #[test]
