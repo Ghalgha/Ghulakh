@@ -94,6 +94,18 @@ impl ReplayWindow {
     }
 }
 
+/// Read the public session identifier from a structurally valid protected frame.
+/// This is only a bounded lookup hint; it does not authenticate the frame.
+pub fn protected_frame_session_id(frame: &[u8]) -> Result<[u8; 8], FrameError> {
+    if frame.len() < FRAME_HEADER_LEN + FRAME_TAG_LEN {
+        return Err(FrameError::InvalidLength);
+    }
+    if &frame[..4] != FRAME_MAGIC {
+        return Err(FrameError::InvalidHeader);
+    }
+    Ok(frame[4..12].try_into().map_err(|_| FrameError::InvalidHeader)?)
+}
+
 /// Encrypts outbound frames. A sequence number is consumed for every seal call.
 pub struct FrameSealer {
     cipher: ChaCha20Poly1305,
