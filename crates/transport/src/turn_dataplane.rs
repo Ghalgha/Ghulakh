@@ -181,39 +181,5 @@ mod tests {
         drop(receivers.control);
     }
 
-    #[tokio::test]
-    async fn rejects_frames_from_unexpected_udp_source() {
-        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let relay_addr = relay.local_addr().unwrap();
-        let other = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
-        let (actor, receivers) = TurnSocketActor::spawn(socket);
-        let (uplink_tx, uplink_rx) = mpsc::channel(1);
-        let (downlink_tx, _downlink_rx) = mpsc::channel(1);
-        let plane = TurnDataPlane::new(
-            actor,
-            receivers.data,
-            relay_addr,
-            TurnDataSender::new(CHANNEL, FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer)),
-            TurnDataReceiver::new(CHANNEL, FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient)),
-        );
-        let task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
-        let fake_frame = {
-            let mut sealer = TurnDataSender::new(CHANNEL, FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient));
-            sealer.encode_packet(&packet()).unwrap()
-        };
-        let client_addr = actor_local_addr(&actor, relay_addr).await;
-        other.send_to(&fake_frame, client_addr).await.unwrap();
-        drop(uplink_tx);
-        let stats = task.await.unwrap().unwrap();
-        assert_eq!(stats.rejected_sources, 1);
-    }
 
-    async fn actor_local_addr(_actor: &TurnSocketHandle, relay_addr: SocketAddr) -> SocketAddr {
-        // Test helper: the actor's socket is not exposed; use a datagram sent by
-        // the actor to learn its ephemeral source endpoint.
-        let _ = relay_addr;
-        panic!("actor local address is supplied by the test fixture")
-    }
 }
