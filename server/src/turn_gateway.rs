@@ -812,8 +812,8 @@ mod tests {
             FrameDirection::ClientToServer,
         );
 
-        // Sequence 1 is intentionally lost. Deliver sequence 2 before 0 to
-        // model network reordering without weakening replay protection.
+        // Sequence 0 is intentionally lost. Deliver sequence 2 before 1 to
+        // model network loss and reordering without weakening replay protection.
         let lost = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
         let reordered = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
         let first = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
