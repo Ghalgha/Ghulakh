@@ -42,6 +42,7 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(16));
+    transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
     server_config.transport_config(Arc::new(transport));
     Ok(server_config)
 }
