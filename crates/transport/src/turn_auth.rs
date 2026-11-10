@@ -11,7 +11,7 @@ use ghulakh_protocol::stun::{
     ATTR_MESSAGE_INTEGRITY_SHA256,
 };
 use ghulakh_protocol::turn_password::{
-    password_algorithm_attribute, PasswordAlgorithmId,
+    parse_password_algorithms, password_algorithm_attribute, PasswordAlgorithmId,
 };
 use zeroize::Zeroizing;
 
@@ -31,6 +31,8 @@ pub enum TurnAuthError {
     InvalidResponse,
     #[error("TURN MESSAGE-INTEGRITY verification failed")]
     IntegrityFailure,
+    #[error("TURN password-algorithm profile is inconsistent or unsupported")]
+    InvalidPasswordProfile,
     #[error("TURN STUN codec failed: {0}")]
     Codec(#[from] ghulakh_protocol::stun::StunError),
 }
@@ -43,6 +45,8 @@ pub struct TurnAuthContext {
     nonce: Zeroizing<String>,
     integrity_key: Zeroizing<Vec<u8>>,
     algorithm: TurnIntegrityAlgorithm,
+    password_algorithm: Option<PasswordAlgorithmId>,
+    password_algorithms: Option<Vec<u8>>,
 }
 
 impl TurnAuthContext {
@@ -64,12 +68,59 @@ impl TurnAuthContext {
         if integrity_key.is_empty() || integrity_key.len() > 1024 {
             return Err(TurnAuthError::InvalidField);
         }
+        Self::new_with_password_profile(
+            username, realm, nonce, integrity_key, algorithm, None, None,
+        )
+    }
+
+    /// Construct an explicitly negotiated RFC 8489 long-term credential profile.
+    ///
+    /// The exact raw PASSWORD-ALGORITHMS value from the matching challenge is
+    /// echoed unchanged to prevent algorithm-list downgrade. The selected
+    /// password algorithm is separate from the MESSAGE-INTEGRITY HMAC algorithm.
+    pub fn new_with_password_profile(
+        username: String,
+        realm: String,
+        nonce: String,
+        integrity_key: Vec<u8>,
+        algorithm: TurnIntegrityAlgorithm,
+        password_algorithm: Option<PasswordAlgorithmId>,
+        password_algorithms: Option<Vec<u8>>,
+    ) -> Result<Self, TurnAuthError> {
+        for value in [&username, &realm, &nonce] {
+            if value.is_empty()
+                || value.len() > 763
+                || value.chars().any(char::is_control)
+            {
+                return Err(TurnAuthError::InvalidField);
+            }
+        }
+        if integrity_key.is_empty() || integrity_key.len() > 1024 {
+            return Err(TurnAuthError::InvalidField);
+        }
+        match (&password_algorithm, &password_algorithms) {
+            (Some(selected), Some(offered)) => {
+                let parsed = parse_password_algorithms(offered)
+                    .map_err(|_| TurnAuthError::InvalidPasswordProfile)?;
+                if !parsed.iter().any(|entry| entry.id == selected.wire_id())
+                    || algorithm != TurnIntegrityAlgorithm::Sha256
+                {
+                    return Err(TurnAuthError::InvalidPasswordProfile);
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => {
+                return Err(TurnAuthError::InvalidPasswordProfile);
+            }
+            (None, None) => {}
+        }
         Ok(Self {
             username: Zeroizing::new(username),
             realm: Zeroizing::new(realm),
             nonce: Zeroizing::new(nonce),
             integrity_key: Zeroizing::new(integrity_key),
             algorithm,
+            password_algorithm,
+            password_algorithms,
         })
     }
 
@@ -91,12 +142,20 @@ impl TurnAuthContext {
             StunAttribute { kind: ATTR_REALM, value: self.realm.as_bytes().to_vec() },
             StunAttribute { kind: ATTR_NONCE, value: self.nonce.as_bytes().to_vec() },
         ]);
+        if let Some(selected) = self.password_algorithm {
+            authenticated.attributes.push(password_algorithm_attribute(selected));
+        }
+        if let Some(offered) = &self.password_algorithms {
+            authenticated.attributes.push(StunAttribute {
+                kind: ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHMS,
+                value: offered.clone(),
+            });
+        }
         match self.algorithm {
             TurnIntegrityAlgorithm::Sha1 => {
                 append_message_integrity(&authenticated, &self.integrity_key).map_err(Into::into)
             }
             TurnIntegrityAlgorithm::Sha256 => {
-                authenticated.attributes.push(password_algorithm_attribute(PasswordAlgorithmId::Sha256));
                 append_message_integrity_sha256(&authenticated, &self.integrity_key).map_err(Into::into)
             }
         }
@@ -141,13 +200,24 @@ mod tests {
     }
 
     fn context(algorithm: TurnIntegrityAlgorithm) -> TurnAuthContext {
-        TurnAuthContext::new(
-            "temporary-user".into(),
-            "turn.example".into(),
-            "nonce-value".into(),
-            vec![0x5a; 32],
-            algorithm,
-        ).unwrap()
+        match algorithm {
+            TurnIntegrityAlgorithm::Sha1 => TurnAuthContext::new(
+                "temporary-user".into(),
+                "turn.example".into(),
+                "nonce-value".into(),
+                vec![0x5a; 32],
+                algorithm,
+            ).unwrap(),
+            TurnIntegrityAlgorithm::Sha256 => TurnAuthContext::new_with_password_profile(
+                "temporary-user".into(),
+                "turn.example".into(),
+                "nonce-value".into(),
+                vec![0x5a; 32],
+                algorithm,
+                Some(PasswordAlgorithmId::Sha256),
+                Some(vec![0, 1, 0, 0, 0, 2, 0, 0]),
+            ).unwrap(),
+        }
     }
 
     #[test]
@@ -170,7 +240,14 @@ mod tests {
         let auth = context(TurnIntegrityAlgorithm::Sha256);
         let wire = auth.sign_request(&request()).unwrap();
         let signed = StunMessage::decode(&wire).unwrap();
-        assert!(signed.attribute(ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHM).is_some());
+        assert_eq!(
+            signed.attribute(ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHM).unwrap(),
+            &[0, 2, 0, 0]
+        );
+        assert_eq!(
+            signed.attribute(ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHMS).unwrap(),
+            &[0, 1, 0, 0, 0, 2, 0, 0]
+        );
         let response = StunMessage {
             method: signed.method,
             class: StunClass::SuccessResponse,
@@ -179,6 +256,28 @@ mod tests {
         };
         let response_wire = append_message_integrity_sha256(&response, &[0x5a; 32]).unwrap();
         assert_eq!(auth.verify_response(&response_wire).unwrap(), response);
+    }
+
+
+    #[test]
+    fn rejects_password_algorithm_downgrade_or_mismatched_offer() {
+        let offer = vec![0, 1, 0, 0, 0, 2, 0, 0];
+        assert!(matches!(
+            TurnAuthContext::new_with_password_profile(
+                "user".into(), "realm".into(), "nonce".into(), vec![1; 32],
+                TurnIntegrityAlgorithm::Sha1,
+                Some(PasswordAlgorithmId::Sha256), Some(offer.clone()),
+            ),
+            Err(TurnAuthError::InvalidPasswordProfile)
+        ));
+        assert!(matches!(
+            TurnAuthContext::new_with_password_profile(
+                "user".into(), "realm".into(), "nonce".into(), vec![1; 32],
+                TurnIntegrityAlgorithm::Sha256,
+                Some(PasswordAlgorithmId::Md5), Some(vec![0, 2, 0, 0]),
+            ),
+            Err(TurnAuthError::InvalidPasswordProfile)
+        ));
     }
 
     #[test]
