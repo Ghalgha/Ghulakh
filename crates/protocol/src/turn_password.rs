@@ -100,14 +100,32 @@ pub fn parse_password_algorithm(input: &[u8]) -> Result<PasswordAlgorithm, Passw
     Ok(entries.remove(0))
 }
 
-/// Select the first server-offered algorithm that the client explicitly supports.
-/// RFC 8489 negotiation is server-list ordered; do not impose a local preference
-/// that silently changes the server's ordering.
+/// Select a mutually supported RFC 8489 password algorithm.
+/// RFC 8656 requires SHA-256 when the server offers both MD5 and SHA-256
+/// and the client supports both. Otherwise, retain server preference order.
+/// Known algorithms with parameters are not selected: their parameter
+/// semantics must be implemented explicitly before they can be negotiated.
 pub fn select_password_algorithm(
     offered: &[PasswordAlgorithm],
     supported: &[PasswordAlgorithmId],
 ) -> Result<PasswordAlgorithmId, PasswordAlgorithmError> {
+    let offered_md5 = offered.iter().any(|entry| {
+        entry.id == PASSWORD_ALGORITHM_MD5 && entry.parameters.is_empty()
+    });
+    let offered_sha256 = offered.iter().any(|entry| {
+        entry.id == PASSWORD_ALGORITHM_SHA256 && entry.parameters.is_empty()
+    });
+    let supports_md5 = supported.contains(&PasswordAlgorithmId::Md5);
+    let supports_sha256 = supported.contains(&PasswordAlgorithmId::Sha256);
+
+    if offered_md5 && offered_sha256 && supports_md5 && supports_sha256 {
+        return Ok(PasswordAlgorithmId::Sha256);
+    }
+
     for entry in offered {
+        if !entry.parameters.is_empty() {
+            continue;
+        }
         if let Some(selected) = supported.iter().find(|candidate| candidate.wire_id() == entry.id) {
             return Ok(*selected);
         }
@@ -173,7 +191,7 @@ mod tests {
     }
 
     #[test]
-    fn selects_first_server_offered_algorithm_supported_by_client() {
+    fn follows_rfc8656_sha256_mandate_and_server_order_otherwise() {
         let offered = [
             PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
             PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] },
@@ -183,7 +201,7 @@ mod tests {
                 &offered,
                 &[PasswordAlgorithmId::Md5, PasswordAlgorithmId::Sha256],
             ),
-            Ok(PasswordAlgorithmId::Md5)
+            Ok(PasswordAlgorithmId::Sha256)
         );
         assert_eq!(
             select_password_algorithm(
@@ -194,10 +212,37 @@ mod tests {
         );
         assert_eq!(
             select_password_algorithm(
-                &offered,
-                &[],
+                &offered[..1],
+                &[PasswordAlgorithmId::Md5, PasswordAlgorithmId::Sha256],
             ),
+            Ok(PasswordAlgorithmId::Md5)
+        );
+        let reversed = [offered[1].clone(), offered[0].clone()];
+        assert_eq!(
+            select_password_algorithm(
+                &reversed,
+                &[PasswordAlgorithmId::Md5, PasswordAlgorithmId::Sha256],
+            ),
+            Ok(PasswordAlgorithmId::Sha256)
+        );
+        assert_eq!(
+            select_password_algorithm(&offered, &[]),
             Err(PasswordAlgorithmError::NoCommonAlgorithm)
+        );
+    }
+
+    #[test]
+    fn does_not_select_known_algorithm_with_unimplemented_parameters() {
+        let offered = [
+            PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![1] },
+            PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
+        ];
+        assert_eq!(
+            select_password_algorithm(
+                &offered,
+                &[PasswordAlgorithmId::Sha256, PasswordAlgorithmId::Md5],
+            ),
+            Ok(PasswordAlgorithmId::Md5)
         );
     }
 
