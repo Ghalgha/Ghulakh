@@ -24,6 +24,8 @@ pub struct ClientOptions {
     pub server_name: String,
     pub root_certificate_der: Vec<u8>,
     pub credential: String,
+    /// Optional pre-bound UDP socket, already excluded from the Android VPN route.
+    pub udp_socket: Option<std::net::UdpSocket>,
 }
 
 /// An authenticated QUIC session with a bounded IP datagram interface.
@@ -65,8 +67,17 @@ impl QuicClient {
         transport.datagram_send_buffer_size(DATAGRAM_BUFFER);
         client_config.transport_config(Arc::new(transport));
 
-        let endpoint = Endpoint::client("[::]:0".parse()?)
-            .context("bind QUIC client endpoint")?;
+        let endpoint = match options.udp_socket {
+            Some(socket) => Endpoint::new(
+                quinn::EndpointConfig::default(),
+                None,
+                socket,
+                Arc::new(quinn::TokioRuntime),
+            )
+            .context("create QUIC endpoint from protected UDP socket")?,
+            None => Endpoint::client("[::]:0".parse()?)
+                .context("bind QUIC client endpoint")?,
+        };
         let connection = tokio::time::timeout(
             Duration::from_secs(15),
             endpoint
@@ -115,6 +126,10 @@ impl QuicClient {
 
     pub fn client_ipv4(&self) -> &str {
         &self.client_ipv4
+    }
+
+    pub fn tunnel_enabled(&self) -> bool {
+        self.tunnel_enabled
     }
 
     pub fn tunnel_enabled(&self) -> bool {
