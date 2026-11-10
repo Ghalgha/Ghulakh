@@ -9,6 +9,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
 use zeroize::{Zeroize, Zeroizing};
+use std::net::Ipv4Addr;
 
 use crate::secure_frame::{FrameDirection, FrameOpener, FrameSealer};
 
@@ -19,6 +20,43 @@ const HKDF_INFO: &[u8] = b"ghulakh/turn/session-frames/v1";
 const AUTH_ACCEPTED: &[u8] = b"GHLK-AUTH-ACCEPTED-v1";
 const MAX_HANDSHAKE_MESSAGE: usize = 1024;
 const MAX_CREDENTIAL_SIZE: usize = crate::MAX_CREDENTIAL_LEN;
+
+/// Tunnel parameters authenticated inside the encrypted Noise server ack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnSessionConfig {
+    pub virtual_ipv4: Ipv4Addr,
+    pub mtu: u16,
+}
+
+impl TurnSessionConfig {
+    pub const ENCODED_LEN: usize = 6;
+
+    pub fn encode(self) -> Result<[u8; Self::ENCODED_LEN], SessionHandshakeError> {
+        if self.virtual_ipv4.is_unspecified()
+            || self.virtual_ipv4.is_multicast()
+            || self.mtu < 576
+            || self.mtu > 1500
+        {
+            return Err(SessionHandshakeError::InvalidSessionConfig);
+        }
+        let mut encoded = [0u8; Self::ENCODED_LEN];
+        encoded[..4].copy_from_slice(&self.virtual_ipv4.octets());
+        encoded[4..].copy_from_slice(&self.mtu.to_be_bytes());
+        Ok(encoded)
+    }
+
+    pub fn decode(encoded: &[u8]) -> Result<Self, SessionHandshakeError> {
+        if encoded.len() != Self::ENCODED_LEN {
+            return Err(SessionHandshakeError::InvalidSessionConfig);
+        }
+        let config = Self {
+            virtual_ipv4: Ipv4Addr::new(encoded[0], encoded[1], encoded[2], encoded[3]),
+            mtu: u16::from_be_bytes([encoded[4], encoded[5]]),
+        };
+        config.encode()?;
+        Ok(config)
+    }
+}
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum SessionHandshakeError {
@@ -38,6 +76,8 @@ pub enum SessionHandshakeError {
     KeyDerivation,
     #[error("server authentication acknowledgement is invalid")]
     InvalidAcknowledgement,
+    #[error("server session configuration is invalid")]
+    InvalidSessionConfig,
 }
 
 fn noise_params() -> Result<NoiseParams, SessionHandshakeError> {
@@ -112,7 +152,18 @@ pub struct NoiseClientFinish {
 
 impl NoiseClientFinish {
     pub fn accept_server_ack(self, acknowledgement: &[u8]) -> Result<SessionFrameKeys, SessionHandshakeError> {
-        self.pending.accept_server_ack(acknowledgement)
+        let (keys, payload) = self.pending.accept_server_ack_with_payload(acknowledgement)?;
+        if !payload.is_empty() {
+            return Err(SessionHandshakeError::InvalidAcknowledgement);
+        }
+        Ok(keys)
+    }
+
+    pub fn accept_server_ack_with_payload(
+        self,
+        acknowledgement: &[u8],
+    ) -> Result<(SessionFrameKeys, Vec<u8>), SessionHandshakeError> {
+        self.pending.accept_server_ack_with_payload(acknowledgement)
     }
 }
 
@@ -124,9 +175,20 @@ pub struct NoiseClientPendingAuth {
 impl NoiseClientPendingAuth {
     /// Verify the encrypted server acknowledgement before enabling the tunnel.
     pub fn accept_server_ack(
-        mut self,
+        self,
         acknowledgement: &[u8],
     ) -> Result<SessionFrameKeys, SessionHandshakeError> {
+        let (keys, payload) = self.accept_server_ack_with_payload(acknowledgement)?;
+        if !payload.is_empty() {
+            return Err(SessionHandshakeError::InvalidAcknowledgement);
+        }
+        Ok(keys)
+    }
+
+    pub fn accept_server_ack_with_payload(
+        mut self,
+        acknowledgement: &[u8],
+    ) -> Result<(SessionFrameKeys, Vec<u8>), SessionHandshakeError> {
         if acknowledgement.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
@@ -134,10 +196,10 @@ impl NoiseClientPendingAuth {
         let length = self.transport
             .read_message(acknowledgement, &mut plaintext)
             .map_err(noise_error)?;
-        if &plaintext[..length] != AUTH_ACCEPTED {
+        if length < AUTH_ACCEPTED.len() || &plaintext[..AUTH_ACCEPTED.len()] != AUTH_ACCEPTED {
             return Err(SessionHandshakeError::InvalidAcknowledgement);
         }
-        Ok(self.keys)
+        Ok((self.keys, plaintext[AUTH_ACCEPTED.len()..length].to_vec()))
     }
 }
 
@@ -245,11 +307,22 @@ impl NoiseServerHandshake {
     }
 
     pub fn receive_client_finish(
-        mut self,
+        self,
         message: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
     ) -> Result<(Vec<u8>, SessionFrameKeys), SessionHandshakeError> {
-        if message.len() > MAX_HANDSHAKE_MESSAGE {
+        self.receive_client_finish_with_payload(message, verify_credential, &[])
+    }
+
+    pub fn receive_client_finish_with_payload(
+        mut self,
+        message: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        acknowledgement_payload: &[u8],
+    ) -> Result<(Vec<u8>, SessionFrameKeys), SessionHandshakeError> {
+        if message.len() > MAX_HANDSHAKE_MESSAGE
+            || AUTH_ACCEPTED.len() + acknowledgement_payload.len() > MAX_HANDSHAKE_MESSAGE
+        {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
         let mut state = self.state.take().ok_or(SessionHandshakeError::InvalidState)?;
@@ -266,7 +339,10 @@ impl NoiseServerHandshake {
         let keys = SessionFrameKeys::derive(state.get_handshake_hash())?;
         let mut transport = state.into_transport_mode().map_err(noise_error)?;
         let mut acknowledgement = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = transport.write_message(AUTH_ACCEPTED, &mut acknowledgement)
+        let mut acknowledgement_plaintext = Vec::with_capacity(AUTH_ACCEPTED.len() + acknowledgement_payload.len());
+        acknowledgement_plaintext.extend_from_slice(AUTH_ACCEPTED);
+        acknowledgement_plaintext.extend_from_slice(acknowledgement_payload);
+        let length = transport.write_message(&acknowledgement_plaintext, &mut acknowledgement)
             .map_err(noise_error)?;
         Ok((acknowledgement[..length].to_vec(), keys))
     }
