@@ -7,6 +7,26 @@ package org.ghulakh.app
  * rootCertificateDer must contain the trusted CA/server certificate in DER form.
  */
 class NativeTransport {
+    external fun nativeTurnConnect(
+        vpnService: android.net.VpnService,
+        gatewayHost: String,
+        gatewayPort: Int,
+        turnCredentialsJson: String,
+        pinnedServerKey: ByteArray,
+        credential: String,
+    ): Long
+
+    external fun nativeTurnClientIpv4(session: Long): String
+
+    external fun nativeTurnMtu(session: Long): Int
+
+    external fun nativeTurnSendPacket(session: Long, packet: ByteArray): Boolean
+
+    /** Blocks until an authenticated IPv4 packet arrives or the TURN session fails. */
+    external fun nativeTurnReceivePacket(session: Long): ByteArray?
+
+    external fun nativeTurnClose(session: Long)
+
     external fun nativeConnect(
         vpnService: android.net.VpnService?,
         host: String,
