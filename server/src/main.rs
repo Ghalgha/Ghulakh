@@ -65,7 +65,7 @@ fn ipv4_endpoints(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
     ))
 }
 
-fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> {
+fn start_tun(\n    name: &str,\n    sessions: SessionMap,\n    turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,\n) -> Result<mpsc::Sender<Vec<u8>>> {
     let device = Arc::new(
         DeviceBuilder::new()
             .name(name)
@@ -100,13 +100,19 @@ fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> 
             let Some((_, destination)) = ipv4_endpoints(&buffer[..length]) else {
                 continue;
             };
-            let connection = sessions.read().await.get(&destination).cloned();
-            let Some(connection) = connection else {
-                continue;
-            };
             let datagram = DataDatagram {
                 kind: IpPacketKind::Ipv4,
                 packet: buffer[..length].to_vec(),
+            };
+            if let Some(gateway) = &turn_gateway {
+                if let Err(error) = gateway.send_downlink(&datagram).await {
+                    eprintln!("TURN downlink rejected: {error:#}");
+                }
+                continue;
+            }
+            let connection = sessions.read().await.get(&destination).cloned();
+            let Some(connection) = connection else {
+                continue;
             };
             let Ok(encoded) = datagram.encode() else {
                 continue;
@@ -526,9 +532,64 @@ async fn main() -> Result<()> {
         && env::var("GHULAKH_FORWARDING_ENABLED")
             .unwrap_or_else(|_| "false".to_string())
             .eq_ignore_ascii_case("true");
+
+    let turn_gateway_setup = if let Ok(gateway_bind) = env::var("GHULAKH_TURN_GATEWAY_BIND") {
+        anyhow::ensure!(
+            tun_enabled && forwarding_enabled,
+            "TURN gateway requires GHULAKH_TUN_ENABLED=true and GHULAKH_FORWARDING_ENABLED=true"
+        );
+        let bind: SocketAddr = gateway_bind.parse().context("invalid GHULAKH_TURN_GATEWAY_BIND")?;
+        let private_path = env::var("GHULAKH_NOISE_PRIVATE_KEY")
+            .context("set GHULAKH_NOISE_PRIVATE_KEY to a hex-encoded private key file")?;
+        let public_path = env::var("GHULAKH_NOISE_PUBLIC_KEY")
+            .context("set GHULAKH_NOISE_PUBLIC_KEY to a hex-encoded public key file")?;
+        let private_key = hex::decode(fs::read_to_string(&private_path)?.trim())
+            .context("decode persistent Noise private key")?;
+        let public_key = hex::decode(fs::read_to_string(&public_path)?.trim())
+            .context("decode persistent Noise public key")?;
+        let keypair = Arc::new(
+            ghulakh_protocol::session_handshake::NoiseServerKeyPair::from_bytes(
+                private_key,
+                public_key,
+            ).context("validate persistent Noise server keypair")?
+        );
+        let hashes = Arc::clone(&credential_hashes);
+        let verifier: Arc<turn_handshake_service::CredentialVerifier> = Arc::new(move |candidate| {
+            std::str::from_utf8(candidate)
+                .ok()
+                .is_some_and(|credential| credential_matches(credential, &hashes))
+        });
+        let service = turn_handshake_service::TurnHandshakeService::new(keypair, verifier)
+            .context("initialize server TURN handshake service")?;
+        let (gateway, receiver) = turn_gateway::TurnGateway::bind(bind).await
+            .context("bind server TURN gateway")?;
+        gateway.install_handshake_service(service).await?;
+        let gateway_task = Arc::clone(&gateway);
+        let _turn_gateway_task = tokio::spawn(async move {
+            if let Err(error) = gateway_task.run().await {
+                eprintln!("TURN gateway stopped: {error:#}");
+            }
+        });
+        eprintln!("TURN gateway listening on {}", gateway.local_addr()?);
+        Some((gateway, receiver))
+    } else {
+        None
+    };
+
     let tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
-        let sender = start_tun(&name, Arc::clone(&sessions))?;
+        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _)| Arc::clone(gateway));
+        let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
+        if let Some((_, mut ingress)) = turn_gateway_setup {
+            let tun_ingress_sender = sender.clone();
+            let _turn_ingress_task = tokio::spawn(async move {
+                while let Some(packet) = ingress.recv().await {
+                    if tun_ingress_sender.send(packet.packet).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
         eprintln!(
             "TUN interface {} is active at {}/16 with MTU {}",
             name, TUN_SERVER_IPV4, TUN_MTU
