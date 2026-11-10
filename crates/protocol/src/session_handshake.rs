@@ -80,7 +80,18 @@ pub struct NoiseClientHandshake {
     credential: Zeroizing<Vec<u8>>,
 }
 
-pub struct NoiseClientFinish {\n    /// Third Noise handshake message. Send this to the server unchanged.\n    pub message: Vec<u8>,\n    pending: NoiseClientPendingAuth,\n}\n\nimpl NoiseClientFinish {\n    pub fn accept_server_ack(self, acknowledgement: &[u8]) -> Result<SessionFrameKeys, SessionHandshakeError> {\n        self.pending.accept_server_ack(acknowledgement)\n    }\n}\n
+pub struct NoiseClientFinish {
+    /// Third Noise handshake message. Send this to the server unchanged.
+    pub message: Vec<u8>,
+    pending: NoiseClientPendingAuth,
+}
+
+impl NoiseClientFinish {
+    pub fn accept_server_ack(self, acknowledgement: &[u8]) -> Result<SessionFrameKeys, SessionHandshakeError> {
+        self.pending.accept_server_ack(acknowledgement)
+    }
+}
+
 pub struct NoiseClientPendingAuth {
     transport: TransportState,
     keys: SessionFrameKeys,
