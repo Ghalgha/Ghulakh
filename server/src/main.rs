@@ -153,6 +153,7 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
     transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
     transport.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUDGET));
     transport.datagram_send_buffer_size(DATAGRAM_RECEIVE_BUDGET);
+    transport.keep_alive_interval(Some(Duration::from_secs(15)));
     server_config.transport_config(Arc::new(transport));
     Ok(server_config)
 }
