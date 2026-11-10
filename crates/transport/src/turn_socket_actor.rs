@@ -38,6 +38,8 @@ pub enum TurnInbound {
     Control { message: StunMessage, wire: Vec<u8>, source: SocketAddr },
     /// A complete ChannelData or Data-indication datagram from the relay.
     Data { datagram: Vec<u8>, source: SocketAddr },
+    /// A validated handshake payload extracted from TURN ChannelData.
+    Handshake { datagram: Vec<u8>, source: SocketAddr },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
