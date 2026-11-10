@@ -397,7 +397,9 @@ mod tests {
             collections::{HashMap, HashSet},
             net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
         };
+        use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
         use ghulakh_protocol::{
+            session_handshake::NoiseServerKeyPair,
             stun::{
                 decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
                 ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
