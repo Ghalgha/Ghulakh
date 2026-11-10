@@ -4,8 +4,9 @@
 //! VpnService.protect(). This module never creates a fallback network transport.
 
 use anyhow::{ensure, Context, Result};
-use ghulakh_protocol::{
-    encode_channel_data, StunMessage, CHANNEL_DATA_HEADER_LEN, MAX_UDP_CHANNEL_DATA_PAYLOAD,
+use ghulakh_protocol::stun::StunMessage;
+use ghulakh_protocol::turn_channel_data::{
+    encode_channel_data, CHANNEL_DATA_HEADER_LEN, MAX_UDP_CHANNEL_DATA_PAYLOAD,
 };
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use tokio::net::UdpSocket;
