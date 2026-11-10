@@ -132,8 +132,9 @@ impl NoiseClientHandshake {
         let params = noise_params()?;
         let key_builder = Builder::new(noise_params()?);
         let client_static = key_builder.generate_keypair().map_err(noise_error)?;
+        let client_private = Zeroizing::new(client_static.private);
         let mut state = Builder::new(params)
-            .local_private_key(&client_static.private)
+            .local_private_key(&client_private)
             .map_err(noise_error)?
             .prologue(PROTOCOL_PROLOGUE)
             .map_err(noise_error)?
