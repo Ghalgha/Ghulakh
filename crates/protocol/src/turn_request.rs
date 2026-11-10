@@ -98,7 +98,7 @@ pub fn create_permission_request(
     }
     let attributes = peers
         .iter()
-        .map(|peer| attr(ATTR_XOR_PEER_ADDRESS, encode_xor_address(*peer, &transaction_id)))
+        .map(|peer| attr(ATTR_XOR_PEER_ADDRESS, encode_xor_address(SocketAddr::new(peer.ip(), 0), &transaction_id)))
         .collect();
     Ok(request(METHOD_CREATE_PERMISSION, transaction_id, attributes))
 }
@@ -208,7 +208,9 @@ mod tests {
         assert_eq!(message.method, METHOD_CREATE_PERMISSION);
         assert_eq!(message.attributes.iter().filter(|a| a.kind == ATTR_XOR_PEER_ADDRESS).count(), 2);
         for (attribute, peer) in message.attributes.iter().zip(peers) {
-            assert_eq!(decode_xor_address(&attribute.value, &id()).unwrap(), peer);
+            let decoded = decode_xor_address(&attribute.value, &id()).unwrap();
+            assert_eq!(decoded.ip(), peer.ip());
+            assert_eq!(decoded.port(), 0);
         }
     }
 
