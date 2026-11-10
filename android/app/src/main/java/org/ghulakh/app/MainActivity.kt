@@ -244,6 +244,10 @@ class MainActivity : Activity() {
     }
 
     private fun clearProfile() {
+        if (GhulakhVpnService.isActive) {
+            status.text = "Остановите VPN перед удалением профиля."
+            return
+        }
         try {
             store.clear()
             credentialInput.text.clear()
