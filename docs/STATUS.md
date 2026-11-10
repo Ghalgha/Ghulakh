@@ -132,3 +132,9 @@ README всех шести указанных пользователем исх�
 - Added per-direction nonce construction from a 32-bit prefix and monotonic 64-bit sequence.
 - Added a 128-packet replay window; unauthenticated frames do not advance replay state.
 - Key agreement/key provisioning and integration with TURN UDP sockets, Android TUN and server gateway remain outstanding.
+
+
+- Added an allocation-scoped TURN peer registry for IP permissions and ChannelBind mappings.
+- Enforces 300-second permission lifetime, 600-second channel-binding lifetime, unique channel↔peer mapping, and 300-second reuse cooldown after binding expiry.
+- ChannelBind success also refreshes the peer IP permission in local state.
+- Registry does not issue TURN requests; callers must authenticate the response before recording success.
