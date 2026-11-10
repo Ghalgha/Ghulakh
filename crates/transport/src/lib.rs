@@ -9,7 +9,7 @@ use ghulakh_protocol::{
 use quinn::{crypto::rustls::QuicClientConfig, Connection, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::{pki_types::CertificateDer, RootCertStore};
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_BUFFER: usize = MAX_DATAGRAM_SIZE * 32;
@@ -62,11 +62,15 @@ impl QuicClient {
 
         let endpoint = Endpoint::client("0.0.0.0:0".parse()?)
             .context("bind QUIC client endpoint")?;
-        let connection = endpoint
-            .connect_with(client_config, options.server_addr, &options.server_name)
-            .context("start QUIC connection")?
-            .await
-            .context("establish QUIC connection")?;
+        let connection = tokio::time::timeout(
+            Duration::from_secs(15),
+            endpoint
+                .connect_with(client_config, options.server_addr, &options.server_name)
+                .context("start QUIC connection")?,
+        )
+        .await
+        .context("QUIC connection timed out")?
+        .context("establish QUIC connection")?;
 
         let request_id = new_request_id();
         let response = exchange_control(
@@ -150,16 +154,9 @@ impl QuicClient {
         }
     }
 
-    pub async fn close(self) -> Result<()> {
-        let request_id = new_request_id();
-        let _ = exchange_control(
-            &self.connection,
-            ControlMessage::Close { request_id },
-        )
-        .await;
+    pub fn close(self) {
         self.connection.close(0u32.into(), b"client closed session");
         self._endpoint.close(0u32.into(), b"client closed endpoint");
-        Ok(())
     }
 }
 
@@ -180,10 +177,13 @@ async fn exchange_control(connection: &Connection, message: ControlMessage) -> R
         .context("write QUIC control request")?;
     send.finish().context("finish QUIC control request")?;
 
-    let response_bytes = recv
-        .read_to_end(MAX_CONTROL_BODY)
-        .await
-        .context("read QUIC control response")?;
+    let response_bytes = tokio::time::timeout(
+        Duration::from_secs(15),
+        recv.read_to_end(MAX_CONTROL_BODY),
+    )
+    .await
+    .context("control response timed out")?
+    .context("read QUIC control response")?;
     let response: ControlEnvelope =
         serde_json::from_slice(&response_bytes).context("decode QUIC control response")?;
     validate_envelope(
