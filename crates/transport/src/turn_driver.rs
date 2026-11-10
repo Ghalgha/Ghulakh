@@ -91,16 +91,30 @@ impl TurnClientDriver {
         anyhow::ensure!(self.allocations.lease().is_none(), "TURN allocation already active");
         let id = TransactionManager::random_transaction_id()
             .map_err(|e| anyhow::anyhow!("generate TURN transaction ID: {e}"))?;
-        let request = allocate_request(id);
-        let response = self.transact(request, auth).await?;
-        let success = parse_success_response(&response, response.method)
-            .context("parse TURN Allocate success")?;
-        let now = Instant::now();
         self.allocations.begin_allocate(id)
             .map_err(|e| anyhow::anyhow!("begin allocation state: {e}"))?;
-        let lease = self.allocations.accept_allocate(id, success, now)
-            .map_err(|e| anyhow::anyhow!("accept allocation: {e}"))?
-            .clone();
+        let request = allocate_request(id);
+        let response = match self.transact(request, auth).await {
+            Ok(response) => response,
+            Err(error) => {
+                let _ = self.allocations.abort_allocate(id);
+                return Err(error);
+            }
+        };
+        let success = match parse_success_response(&response, response.method) {
+            Ok(success) => success,
+            Err(error) => {
+                let _ = self.allocations.abort_allocate(id);
+                return Err(error).context("parse TURN Allocate success");
+            }
+        };
+        let lease = match self.allocations.accept_allocate(id, success, Instant::now()) {
+            Ok(lease) => lease.clone(),
+            Err(error) => {
+                let _ = self.allocations.abort_allocate(id);
+                return Err(anyhow::anyhow!("accept allocation: {error}"));
+            }
+        };
         self.peers = Some(TurnPeerRegistry::new(lease.relayed_address.ip()));
         Ok(lease)
     }
@@ -226,7 +240,13 @@ impl TurnClientDriver {
         loop {
             tokio::select! {
                 received = self.socket.receive_datagram(&mut buffer) => {
-                    let (length, source) = received.context("receive TURN response")?;
+                    let (length, source) = match received {
+                        Ok(datagram) => datagram,
+                        Err(error) => {
+                            self.transactions.cancel(&id);
+                            return Err(error).context("receive TURN response");
+                        }
+                    };
                     if source != destination {
                         continue;
                     }
