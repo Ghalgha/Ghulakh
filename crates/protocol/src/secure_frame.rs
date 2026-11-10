@@ -103,7 +103,7 @@ pub fn protected_frame_session_id(frame: &[u8]) -> Result<[u8; 8], FrameError> {
     if &frame[..4] != FRAME_MAGIC {
         return Err(FrameError::InvalidHeader);
     }
-    Ok(frame[4..12].try_into().map_err(|_| FrameError::InvalidHeader)?)
+    frame[4..12].try_into().map_err(|_| FrameError::InvalidHeader)
 }
 
 /// Encrypts outbound frames. A sequence number is consumed for every seal call.
