@@ -151,3 +151,10 @@ TURN 401 challenge parsing also preserves a valid raw `PASSWORD-ALGORITHMS` offe
 ### TURN ChannelData framing
 
 The UDP ChannelData codec validates the current RFC 8656 channel range `0x4000–0x4FFF`, exact declared payload length, and the UDP payload bound. It accepts both unpadded datagrams and the optional 0–3 bytes of padding permitted for UDP. The codec does not decide whether a channel is bound or whether its peer permission is active; those checks belong to the allocation/session layer.
+
+
+### Protected data frames
+
+The protocol crate includes an AEAD frame codec using ChaCha20-Poly1305. A frame authenticates its magic/version marker, session identifier, direction, sequence number, and payload length as associated data. Nonces are formed from a caller-supplied 32-bit per-direction prefix and a 64-bit monotonic sequence. The receiver enforces a 128-packet replay window and commits sequence state only after successful authentication.
+
+The codec requires independent directional keys and nonce prefixes from a future authenticated session key agreement. It does not derive keys from TURN credentials, does not implement the key agreement, and is not yet connected to the Android TUN, TURN socket, or server gateway.
