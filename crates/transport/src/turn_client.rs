@@ -272,14 +272,9 @@ impl TurnClientPathGroup {
         for (path, path_health) in paths.iter().cloned().zip(healthy.iter().cloned()) {
             let sender = downlink_tx.clone();
             forwarders.push(tokio::spawn(async move {
-                loop {
-                    match path.receive_packet().await {
-                        Ok(packet) => {
-                            if sender.send(packet).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
+                while let Ok(packet) = path.receive_packet().await {
+                    if sender.send(packet).await.is_err() {
+                        break;
                     }
                 }
                 path_health.store(false, Ordering::Release);
