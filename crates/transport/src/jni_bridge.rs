@@ -1,4 +1,5 @@
 //! JNI boundary for the Android application. No credentials are logged.
+#![allow(non_snake_case)]
 
 use crate::{ClientOptions, QuicClient};
 use anyhow::{Context, Result};
