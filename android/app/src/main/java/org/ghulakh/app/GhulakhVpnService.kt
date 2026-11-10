@@ -70,6 +70,9 @@ class GhulakhVpnService : VpnService() {
             if (!transport.nativeTunnelEnabled(handle)) {
                 throw IllegalStateException("На сервере выключен IPv4 TUN; маршрутизация запрещена")
             }
+            if (!transport.nativeForwardingEnabled(handle)) {
+                throw IllegalStateException("Серверный IP forwarding/NAT/firewall не подтверждён администратором")
+            }
 
             val clientAddress = transport.nativeClientIpv4(handle)
             val descriptor = Builder()
