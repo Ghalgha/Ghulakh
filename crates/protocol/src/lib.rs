@@ -28,6 +28,7 @@ pub enum ControlMessage {
     ServerHello {
         session_id: String,
         client_ipv4: String,
+        tunnel_enabled: bool,
         request_id: String,
     },
     Ping {
