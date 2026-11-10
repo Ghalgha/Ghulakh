@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn accepts_empty_payload() {
         let encoded = encode_channel_data(0x4fff, &[]).unwrap();
-        assert_eq!(decode_channel_data(&encoded).unwrap().data, &[]);
+        assert!(decode_channel_data(&encoded).unwrap().data.is_empty());
     }
 
     #[test]
