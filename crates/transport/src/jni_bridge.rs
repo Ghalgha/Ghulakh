@@ -87,7 +87,7 @@ fn connect_impl(
             break candidate;
         }
     };
-    registry.insert(handle, native_session);
+    let _previous = registry.insert(handle, native_session);
     Ok(handle)
 }
 
