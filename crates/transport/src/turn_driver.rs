@@ -56,6 +56,7 @@ pub struct TurnClientDriver {
     socket: Option<TurnSocketHandle>,
     control_rx: mpsc::Receiver<TurnInbound>,
     data_rx: Option<mpsc::Receiver<TurnInbound>>,
+    handshake_rx: Option<mpsc::Receiver<TurnInbound>>,
     relay_endpoint: SocketAddr,
     transactions: TransactionManager,
     allocations: AllocationManager,
@@ -71,6 +72,7 @@ impl TurnClientDriver {
             socket: Some(actor),
             control_rx: receivers.control,
             data_rx: Some(receivers.data),
+            handshake_rx: Some(receivers.handshake),
             relay_endpoint,
             transactions: TransactionManager::new(),
             allocations: AllocationManager::new(),
@@ -100,6 +102,14 @@ impl TurnClientDriver {
         &mut self,
     ) -> Option<(TurnSocketHandle, mpsc::Receiver<TurnInbound>)> {
         Some((self.socket.as_ref()?.clone(), self.data_rx.take()?))
+    }
+
+    /// Transfer the isolated handshake event stream and actor sender. This
+    /// shares the same protected TURN socket without adding a second reader.
+    pub fn take_handshake_plane_parts(
+        &mut self,
+    ) -> Option<(TurnSocketHandle, mpsc::Receiver<TurnInbound>)> {
+        Some((self.socket.as_ref()?.clone(), self.handshake_rx.take()?))
     }
 
     pub fn allocation(&self) -> Option<&AllocationLease> {
@@ -253,6 +263,7 @@ impl TurnClientDriver {
         self.peers = None;
         self.allocations = AllocationManager::new();
         self.data_rx = None;
+        self.handshake_rx = None;
         self.socket = None;
     }
 
