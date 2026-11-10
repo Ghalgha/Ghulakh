@@ -15,7 +15,7 @@ use crate::stun::{
 
 const UDP_PROTOCOL_NUMBER: u8 = 17;
 const MIN_CHANNEL_NUMBER: u16 = 0x4000;
-const MAX_CHANNEL_NUMBER: u16 = 0x7fff;
+const MAX_CHANNEL_NUMBER: u16 = 0x4fff;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TurnRequestError {
