@@ -242,7 +242,12 @@ mod tests {
             attributes: vec![],
         };
         let response_wire = append_message_integrity(&response, &[0x5a; 32]).unwrap();
-        assert_eq!(auth.verify_response(&response_wire).unwrap(), response);
+        let verified = auth.verify_response(&response_wire).unwrap();
+        assert_eq!(verified.method, response.method);
+        assert_eq!(verified.class, response.class);
+        assert_eq!(verified.transaction_id, response.transaction_id);
+        assert_eq!(verified.attributes.len(), 1);
+        assert_eq!(verified.attributes[0].kind, ATTR_MESSAGE_INTEGRITY);
     }
 
     #[test]
@@ -265,7 +270,12 @@ mod tests {
             attributes: vec![],
         };
         let response_wire = append_message_integrity_sha256(&response, &[0x5a; 32]).unwrap();
-        assert_eq!(auth.verify_response(&response_wire).unwrap(), response);
+        let verified = auth.verify_response(&response_wire).unwrap();
+        assert_eq!(verified.method, response.method);
+        assert_eq!(verified.class, response.class);
+        assert_eq!(verified.transaction_id, response.transaction_id);
+        assert_eq!(verified.attributes.len(), 1);
+        assert_eq!(verified.attributes[0].kind, ATTR_MESSAGE_INTEGRITY_SHA256);
     }
 
 
