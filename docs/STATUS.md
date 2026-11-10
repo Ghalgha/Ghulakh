@@ -53,6 +53,10 @@
 
 Следовательно, текущая сборка не реализует основную функцию проекта и не должна позиционироваться как готовый TURN VPN.
 
+## Текущий тестовый срез
+
+Добавлен loopback UDP test в `crates/transport/src/turn_data.rs`: клиентский защищённый ChannelData проходит через relay forwarder к gateway, gateway проверяет ClientToServer AEAD frame и отвечает на наблюдаемый relay source tuple, relay возвращает ServerToClient frame клиенту. Проверяются оба направления и раздельные directional keys. Это тест data-plane forwarding; он не эмулирует TURN Allocate/Refresh/CreatePermission/ChannelBind и не доказывает совместимость с VK Calls.
+
 ## План ближайшего вертикального среза
 
 1. Зафиксировать TURN driver API и ownership: одна allocation session, один control driver, один receive loop, bounded ingress/egress.
