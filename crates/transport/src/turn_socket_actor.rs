@@ -134,20 +134,6 @@ impl TurnSocketActor {
                             Err(_) => break,
                         };
                         let packet = &buffer[..length];
-                        if packet.starts_with(b"GHHS") {
-                            if HandshakeEnvelope::decode(packet).is_err() {
-                                task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
-                                continue;
-                            }
-                            let event = TurnInbound::Handshake {
-                                datagram: packet.to_vec(),
-                                source,
-                            };
-                            if handshake_tx.try_send(event).is_err() {
-                                task_counters.dropped_handshake_datagrams.fetch_add(1, Ordering::Relaxed);
-                            }
-                            continue;
-                        }
                         if packet.first().is_some_and(|byte| byte & 0xC0 == 0x40) {
                             let channel = match decode_channel_data(packet) {
                                 Ok(channel) => channel,
