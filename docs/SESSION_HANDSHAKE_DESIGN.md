@@ -33,3 +33,18 @@ TURN allocation credentials authorize use of a relay. They do not authenticate a
 3. Bind successful handshake results to the verified TURN relayed address, channel number and allocated virtual IPv4.
 4. Register the resulting directional codecs in `TurnGateway` only after the client has received and authenticated the final acknowledgement.
 5. Connect the client result to `TurnDataPlane` and the server result to `TurnGateway`.
+
+## TURN datagram envelope primitives
+
+`crates/protocol/src/handshake_datagram.rs` now defines a fixed, bounded envelope for the four Noise handshake phases. It carries a 128-bit handshake identifier, phase, version and explicit payload length; reserved bits, zero identifiers, empty payloads, unknown phases, truncation, trailing bytes and oversized payloads are rejected.
+
+The module also provides a bounded response cache keyed by handshake identifier and phase. It fingerprints the exact request bytes and returns the exact cached response for a duplicate. Reusing the same key with different request bytes is rejected. Cache eviction is oldest-first and capacity is fixed at construction.
+
+These are protocol primitives only. The following remain required before any production use over TURN:
+- A network driver must implement bounded stop-and-wait retransmission with an explicit retry budget and backoff, and resend the exact previously encoded datagram.
+- The driver must consult the response cache before advancing a Noise state machine, and cache a response before attempting to send it.
+- The driver must expire handshake state and cache entries, limit concurrent handshakes, and enforce per-source admission/rate limits. The cache itself deliberately has no clock or implicit expiry.
+- The driver must validate the TURN allocation/source tuple and bind the handshake identifier to that allocation.
+- Tests must cover packet loss, duplication, reordering, timeout races, state exhaustion and reconnect behavior.
+
+The envelope does not authenticate the first Noise messages by itself. Authentication remains the responsibility of the Noise handshake; untrusted envelope fields must only be used for bounded demultiplexing.
