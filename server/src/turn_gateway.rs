@@ -134,13 +134,16 @@ impl TurnGateway {
             let client_ipv4 = established.config.virtual_ipv4;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
-            self.register_session(
+            if let Err(error) = self.register_session(
                 session_id,
                 client_ipv4,
                 established.relay_peer,
                 opener,
                 sealer,
-            ).await.context("register authenticated TURN session after ServerAck cache")?;
+            ).await {
+                self.release_virtual_ipv4(client_ipv4).await;
+                return Err(error).context("register authenticated TURN session after ServerAck cache");
+            }
         }
 
         let sent = self.socket.send_to(&response, relay_peer).await
@@ -517,6 +520,30 @@ mod tests {
         assert_eq!(gateway.stats().accepted, 1);
         assert_eq!(gateway.stats().rejected_packet, 2);
         gateway_task.abort();
+    }
+
+    #[tokio::test]
+    async fn expires_idle_session_and_removes_client_route() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        gateway.register_session(
+            SESSION,
+            CLIENT_IP,
+            relay_addr,
+            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+        ).await.unwrap();
+
+        let session = gateway.sessions.read().await.get(&SESSION).unwrap().clone();
+        *session.last_activity.lock().unwrap() = Instant::now() - Duration::from_secs(120);
+        let expired = gateway.expire_idle_sessions(
+            Instant::now(),
+            Duration::from_secs(60),
+        ).await;
+        assert_eq!(expired, vec![CLIENT_IP]);
+        assert!(gateway.sessions.read().await.is_empty());
+        assert!(gateway.clients.read().await.is_empty());
     }
 
     #[tokio::test]
