@@ -8,7 +8,9 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use ghulakh_protocol::DataDatagram;
-use tokio::sync::mpsc;
+use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
+
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 use crate::{
     turn_data::{TurnDataReceiver, TurnDataSender},
@@ -21,6 +23,7 @@ pub struct TurnDataPlaneStats {
     pub sent_frames: u64,
     pub rejected_frames: u64,
     pub rejected_sources: u64,
+    pub keepalives_sent: u64,
 }
 
 /// Runs the client-side IP packet pump for one authenticated TURN channel.
@@ -56,9 +59,20 @@ impl TurnDataPlane {
         downlink: mpsc::Sender<DataDatagram>,
     ) -> Result<TurnDataPlaneStats> {
         let mut stats = TurnDataPlaneStats::default();
+        let mut keepalive = interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
+        enum Event {
+            Inbound(Option<TurnInbound>),
+            Uplink(Option<DataDatagram>),
+            Keepalive,
+        }
         loop {
-            tokio::select! {
-                inbound = self.inbound.recv() => {
+            let event = tokio::select! {
+                inbound = self.inbound.recv() => Event::Inbound(inbound),
+                packet = uplink.recv() => Event::Uplink(packet),
+                _ = keepalive.tick() => Event::Keepalive,
+            };
+            match event {
+                Event::Inbound(inbound) => {
                     let Some(TurnInbound::Data { datagram, source }) = inbound else {
                         return Ok(stats);
                     };
@@ -78,7 +92,7 @@ impl TurnDataPlane {
                         }
                     }
                 }
-                packet = uplink.recv() => {
+                Event::Uplink(packet) => {
                     let Some(packet) = packet else {
                         return Ok(stats);
                     };
@@ -87,6 +101,13 @@ impl TurnDataPlane {
                     self.actor.send_datagram(datagram).await
                         .context("send protected TURN uplink frame")?;
                     stats.sent_frames = stats.sent_frames.saturating_add(1);
+                }
+                Event::Keepalive => {
+                    let datagram = self.sender.encode_keepalive()
+                        .context("encode authenticated TURN session keepalive")?;
+                    self.actor.send_datagram(datagram).await
+                        .context("send authenticated TURN session keepalive")?;
+                    stats.keepalives_sent = stats.keepalives_sent.saturating_add(1);
                 }
             }
         }
