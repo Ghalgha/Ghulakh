@@ -162,9 +162,9 @@ class MainActivity : Activity() {
         val uri = data?.data ?: return
         try {
             val certificate = contentResolver.openInputStream(uri).use { input ->
-                requireNotNull(input) { "Не удалось открыть файл сертификата" }
+                val stream = requireNotNull(input) { "Не удалось открыть файл сертификата" }
                 CertificateFactory.getInstance("X.509")
-                    .generateCertificate(input) as X509Certificate
+                    .generateCertificate(stream) as X509Certificate
             }
             certificateDer = certificate.encoded
             certificateStatus.text = "Сертификат выбран: ${certificate.subjectX500Principal.name}"
