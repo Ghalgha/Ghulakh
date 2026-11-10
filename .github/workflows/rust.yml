@@ -48,7 +48,7 @@ jobs:
         run: cargo install cargo-ndk --locked
       - name: Build Android native transport
         run: |
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -p 26 -o android/app/src/main/jniLibs build --release -p ghulakh-transport
       - uses: actions/setup-java@v4
         with:
