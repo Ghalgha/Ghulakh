@@ -216,7 +216,7 @@ mod tests {
 
         let control = timeout(Duration::from_secs(2), receivers.control.recv())
             .await.unwrap().unwrap();
-        assert!(matches!(control, TurnInbound::Control { message, source }
+        assert!(matches!(control, TurnInbound::Control { message, source, .. }
             if message.transaction_id == [8; 12] && source == relay_addr));
         let data = timeout(Duration::from_secs(2), receivers.data.recv())
             .await.unwrap().unwrap();
