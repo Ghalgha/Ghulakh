@@ -11,6 +11,7 @@ pub mod secure_frame;
 pub mod session_handshake;
 pub mod handshake_datagram;
 pub mod turn_handshake;
+pub mod turn_path_context;
 pub mod turn_peer;
 
 use serde::{Deserialize, Serialize};
