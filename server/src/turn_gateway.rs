@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
 };
@@ -22,11 +22,11 @@ use ghulakh_protocol::{
 };
 use tokio::{
     net::UdpSocket,
-    sync::{mpsc, RwLock},
+    sync::{mpsc, Mutex as AsyncMutex, RwLock},
 };
 
 const TUN_INGRESS_CAPACITY: usize = 512;
-const UDP_BUFFER_SIZE: usize = 65_507;
+const UDP_BUFFER_SIZE: usize = 65_507;\nconst CLIENT_IPV4_POOL_SIZE: u32 = 65_534;
 
 struct SessionCrypto {
     opener: FrameOpener,
@@ -91,6 +91,65 @@ impl TurnGateway {
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
         self.socket.local_addr().context("read TURN gateway address")
+    }
+
+    /// Install the bounded Noise handshake processor before starting the UDP
+    /// receive loop. The caller supplies persistent server keys and a verifier
+    /// for credentials carried inside the encrypted Noise message.
+    pub async fn install_handshake_service(
+        &self,
+        service: super::turn_handshake_service::TurnHandshakeService,
+    ) -> Result<()> {
+        let mut slot = self.handshake.lock().await;
+        ensure!(slot.is_none(), "TURN handshake service is already installed");
+        *slot = Some(service);
+        Ok(())
+    }
+
+    fn allocate_client_ipv4(&self) -> Result<Ipv4Addr> {
+        let host = self.next_client_host.fetch_add(1, Ordering::Relaxed);
+        ensure!(host < CLIENT_IPV4_POOL_SIZE, "TURN client IPv4 pool exhausted");
+        Ok(Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8))
+    }
+
+    async fn process_handshake(
+        &self,
+        payload: &[u8],
+        relay_peer: SocketAddr,
+        channel_number: u16,
+    ) -> Result<()> {
+        use super::turn_handshake_service::TurnHandshakeOutcome;
+
+        let outcome = {
+            let mut service = self.handshake.lock().await;
+            let service = service.as_mut().context("TURN handshake service is not installed")?;
+            service.process(payload, relay_peer, std::time::Instant::now())?
+        };
+
+        let (response, established) = match outcome {
+            TurnHandshakeOutcome::Cached { response } => (response, None),
+            TurnHandshakeOutcome::Response { response, established } => (response, established),
+        };
+        let encoded = encode_channel_data(channel_number, &response)
+            .context("encode TURN handshake response ChannelData")?;
+        let sent = self.socket.send_to(&encoded, relay_peer).await
+            .context("send TURN handshake response through relay")?;
+        ensure!(sent == encoded.len(), "partial TURN handshake response send");
+
+        if let Some(established) = established {
+            let client_ipv4 = self.allocate_client_ipv4()?;
+            let session_id = established.frame_keys.session_id();
+            let (opener, sealer) = established.frame_keys.into_server_codecs();
+            self.register_session(
+                session_id,
+                client_ipv4,
+                established.relay_peer,
+                channel_number,
+                opener,
+                sealer,
+            ).await.context("register authenticated TURN session after ServerAck send")?;
+        }
+        Ok(())
     }
 
     /// Register a session only after its identity, virtual IP, TURN relay tuple,
@@ -159,6 +218,12 @@ impl TurnGateway {
                 return;
             }
         };
+        if channel.data.starts_with(b"GHHS") {
+            if self.process_handshake(channel.data, source, channel.channel_number).await.is_err() {
+                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
         let session_id = match protected_frame_session_id(channel.data) {
             Ok(session_id) => session_id,
             Err(_) => {
