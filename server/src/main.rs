@@ -191,6 +191,23 @@ async fn handle_control_stream(
     Ok(())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum DatagramDisposition {
+    Unauthenticated,
+    Invalid,
+    Accepted(usize),
+}
+
+fn inspect_datagram(bytes: &[u8], authenticated: bool) -> DatagramDisposition {
+    if !authenticated {
+        return DatagramDisposition::Unauthenticated;
+    }
+    match DataDatagram::decode(bytes) {
+        Ok(packet) => DatagramDisposition::Accepted(packet.packet.len()),
+        Err(_) => DatagramDisposition::Invalid,
+    }
+}
+
 async fn handle_connection(
     connection: quinn::Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
@@ -230,19 +247,13 @@ async fn handle_connection(
                     Err(_) => break,
                 };
 
-                if !authenticated.load(Ordering::Acquire) {
-                    rejected_datagrams = rejected_datagrams.saturating_add(1);
-                    continue;
-                }
-
-                match DataDatagram::decode(bytes.as_ref()) {
-                    Ok(packet) => {
+                match inspect_datagram(bytes.as_ref(), authenticated.load(Ordering::Acquire)) {
+                    DatagramDisposition::Accepted(_packet_len) => {
                         // The validated packet boundary is ready for the future TUN adapter.
                         // Until a server TUN is configured, packets are deliberately not routed.
                         valid_datagrams = valid_datagrams.saturating_add(1);
-                        let _packet_len = packet.packet.len();
                     }
-                    Err(_) => {
+                    DatagramDisposition::Unauthenticated | DatagramDisposition::Invalid => {
                         rejected_datagrams = rejected_datagrams.saturating_add(1);
                     }
                 }
@@ -302,4 +313,54 @@ async fn main() -> Result<()> {
     }
 
     bail!("QUIC endpoint stopped accepting connections")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ghulakh_protocol::{DataDatagram, IpPacketKind};
+
+    fn valid_ipv4_datagram() -> Vec<u8> {
+        let mut packet = vec![0u8; 20];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet,
+        }
+        .encode()
+        .unwrap()
+    }
+
+    #[test]
+    fn datagrams_are_rejected_before_authentication() {
+        assert_eq!(
+            inspect_datagram(&valid_ipv4_datagram(), false),
+            DatagramDisposition::Unauthenticated
+        );
+    }
+
+    #[test]
+    fn authenticated_valid_datagram_is_accepted_for_tun_adapter() {
+        assert_eq!(
+            inspect_datagram(&valid_ipv4_datagram(), true),
+            DatagramDisposition::Accepted(20)
+        );
+    }
+
+    #[test]
+    fn malformed_datagram_is_rejected() {
+        assert_eq!(
+            inspect_datagram(b"not-a-packet", true),
+            DatagramDisposition::Invalid
+        );
+    }
+
+    #[test]
+    fn credential_hash_match_is_per_device() {
+        let credential = "test-only-random-credential";
+        let digest: [u8; 32] = Sha256::digest(credential.as_bytes()).into();
+        assert!(credential_matches(credential, &[digest]));
+        assert!(!credential_matches("different-credential", &[digest]));
+    }
 }
