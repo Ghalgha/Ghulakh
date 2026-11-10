@@ -157,8 +157,7 @@ fn connect_impl(
 }
 
 
-fn connect_turn_impl(
-    env: &mut JNIEnv,
+struct TurnConnectArgs {
     vpn_service: JObject,
     gateway_host: JString,
     gateway_port: jint,
@@ -166,7 +165,21 @@ fn connect_turn_impl(
     pinned_server_key: JByteArray,
     credential: JString,
     path_count: jint,
+}
+
+fn connect_turn_impl(
+    env: &mut JNIEnv,
+    args: TurnConnectArgs,
 ) -> Result<jlong> {
+    let TurnConnectArgs {
+        vpn_service,
+        gateway_host,
+        gateway_port,
+        turn_credentials_json,
+        pinned_server_key,
+        credential,
+        path_count,
+    } = args;
     let gateway_host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
     let turn_credentials_json = env
         .get_string(&turn_credentials_json)?
@@ -379,13 +392,15 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
 ) -> jlong {
     match connect_turn_impl(
         &mut env,
-        vpn_service,
-        gateway_host,
-        gateway_port,
-        turn_credentials_json,
-        pinned_server_key,
-        credential,
-        path_count,
+        TurnConnectArgs {
+            vpn_service,
+            gateway_host,
+            gateway_port,
+            turn_credentials_json,
+            pinned_server_key,
+            credential,
+            path_count,
+        },
     ) {
         Ok(handle) => handle,
         Err(error) => {
