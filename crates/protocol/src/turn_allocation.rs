@@ -70,6 +70,18 @@ impl AllocationManager {
         Ok(())
     }
 
+    /// Abort an Allocate attempt after its transaction fails.
+    pub fn abort_allocate(&mut self, transaction_id: [u8; 12]) -> Result<(), AllocationError> {
+        match self.state {
+            AllocationState::AwaitingAllocate { transaction_id: expected } if expected == transaction_id => {
+                self.state = AllocationState::Idle;
+                Ok(())
+            }
+            AllocationState::AwaitingAllocate { .. } => Err(AllocationError::TransactionMismatch),
+            _ => Err(AllocationError::InvalidState),
+        }
+    }
+
     pub fn accept_allocate(
         &mut self,
         transaction_id: [u8; 12],
