@@ -30,9 +30,10 @@ fn sessions() -> &'static Mutex<HashMap<jlong, Arc<NativeSession>>> {
 }
 
 fn session(handle: jlong) -> Result<Arc<NativeSession>> {
-    sessions()
+    let registry = sessions()
         .lock()
-        .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?
+        .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?;
+    registry
         .get(&handle)
         .cloned()
         .context("unknown native session handle")
@@ -113,11 +114,13 @@ fn ping_impl(handle: jlong) -> Result<()> {
 }
 
 fn close_impl(handle: jlong) -> Result<()> {
-    let session = sessions()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?
-        .remove(&handle)
-        .context("unknown native session handle")?;
+    let session = {
+        let mut registry = sessions()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?;
+        registry.remove(&handle)
+    }
+    .context("unknown native session handle")?;
     session.client.close();
     Ok(())
 }
