@@ -80,12 +80,7 @@ pub struct NoiseClientHandshake {
     credential: Zeroizing<Vec<u8>>,
 }
 
-pub struct NoiseClientFinish {
-    /// Third Noise handshake message. Send this to the server unchanged.
-    pub message: Vec<u8>,
-    pending: NoiseClientPendingAuth,
-}
-
+pub struct NoiseClientFinish {\n    /// Third Noise handshake message. Send this to the server unchanged.\n    pub message: Vec<u8>,\n    pending: NoiseClientPendingAuth,\n}\n\nimpl NoiseClientFinish {\n    pub fn accept_server_ack(self, acknowledgement: &[u8]) -> Result<SessionFrameKeys, SessionHandshakeError> {\n        self.pending.accept_server_ack(acknowledgement)\n    }\n}\n
 pub struct NoiseClientPendingAuth {
     transport: TransportState,
     keys: SessionFrameKeys,
@@ -341,7 +336,7 @@ mod tests {
             &finish.message,
             |candidate| candidate == token,
         ).unwrap();
-        let client_keys = finish.pending.accept_server_ack(&ack).unwrap();
+        let client_keys = finish.accept_server_ack(&ack).unwrap();
         assert_eq!(client_keys.session_id(), server_keys.session_id());
 
         let (mut client_tx, mut client_rx) = client_keys.into_client_codecs();
@@ -362,7 +357,7 @@ mod tests {
         let mut server = NoiseServerHandshake::new(&server_key).unwrap();
         let message2 = server.receive_client_hello(&message1).unwrap();
         assert_eq!(
-            client.receive_server_hello(&message2).unwrap_err(),
+            client.receive_server_hello(&message2).err().unwrap(),
             SessionHandshakeError::ServerIdentityMismatch
         );
     }
@@ -377,7 +372,7 @@ mod tests {
         let message2 = server.receive_client_hello(&message1).unwrap();
         let finish = client.receive_server_hello(&message2).unwrap();
         assert_eq!(
-            server.receive_client_finish(&finish.message, |_| false).unwrap_err(),
+            server.receive_client_finish(&finish.message, |_| false).err().unwrap(),
             SessionHandshakeError::CredentialRejected
         );
     }
