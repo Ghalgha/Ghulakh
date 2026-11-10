@@ -15,6 +15,10 @@ use ghulakh_protocol::turn_password::{
     parse_password_algorithms, password_algorithm_attribute, PasswordAlgorithmId,
 };
 use zeroize::Zeroizing;
+use md5::{Digest, Md5};
+use ghulakh_protocol::turn_auth::TurnChallenge;
+use crate::{turn_credentials::TurnCredentials, turn_supervisor::TurnAuthProvider};
+use std::{future::Future, pin::Pin};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnIntegrityAlgorithm {
@@ -51,6 +55,33 @@ pub struct TurnAuthContext {
 }
 
 impl TurnAuthContext {
+    /// Build the legacy VK Calls long-term credential context observed in the
+    /// source implementations: MD5(username:realm:password) as the HMAC-SHA1
+    /// integrity key. This profile is isolated and must still be verified
+    /// against live VK relay challenges before production enablement.
+    pub fn new_vk_calls_legacy(
+        username: String,
+        password: &str,
+        challenge: TurnChallenge,
+    ) -> Result<Self, TurnAuthError> {
+        if challenge.password_algorithms.is_some() {
+            return Err(TurnAuthError::InvalidPasswordProfile);
+        }
+        let mut digest = Md5::new();
+        digest.update(username.as_bytes());
+        digest.update(b":");
+        digest.update(challenge.realm.as_bytes());
+        digest.update(b":");
+        digest.update(password.as_bytes());
+        Self::new(
+            username,
+            challenge.realm,
+            challenge.nonce,
+            digest.finalize().to_vec(),
+            TurnIntegrityAlgorithm::Sha1,
+        )
+    }
+
     /// Construct the legacy SHA-1 integrity profile without password-algorithm
     /// negotiation. RFC 8489 SHA-256 profiles must use new_with_password_profile.
     pub fn new(
@@ -192,6 +223,50 @@ impl TurnAuthContext {
         };
         result.map_err(|_| TurnAuthError::IntegrityFailure)?;
         Ok(response)
+    }
+}
+
+
+/// TURN auth provider for the legacy credential profile observed in the
+/// source implementations. PASSWORD-ALGORITHMS offers are rejected rather
+/// than silently applying an unverified downgrade or derivation.
+pub struct VkCallsTurnAuthProvider {
+    username: Zeroizing<String>,
+    password: Zeroizing<String>,
+}
+
+impl VkCallsTurnAuthProvider {
+    pub fn new(username: String, password: String) -> Result<Self> {
+        anyhow::ensure!(!username.is_empty(), "VK Calls TURN username is empty");
+        anyhow::ensure!(!password.is_empty(), "VK Calls TURN password is empty");
+        anyhow::ensure!(username.len() <= 4096 && password.len() <= 4096, "VK Calls TURN credential is too large");
+        Ok(Self {
+            username: Zeroizing::new(username),
+            password: Zeroizing::new(password),
+        })
+    }
+
+    pub fn from_credentials(credentials: TurnCredentials) -> Result<Self> {
+        Self::new(
+            credentials.username().to_owned(),
+            credentials.password().to_owned(),
+        )
+    }
+}
+
+impl TurnAuthProvider for VkCallsTurnAuthProvider {
+    fn context_for_challenge<'a>(
+        &'a mut self,
+        challenge: TurnChallenge,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<TurnAuthContext>> + Send + 'a>> {
+        Box::pin(async move {
+            TurnAuthContext::new_vk_calls_legacy(
+                self.username.as_str().to_owned(),
+                self.password.as_str(),
+                challenge,
+            )
+            .map_err(anyhow::Error::new)
+        })
     }
 }
 
