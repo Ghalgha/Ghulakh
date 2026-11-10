@@ -42,7 +42,7 @@ TUN-подсистема пока экспериментальная. Испол
 - очередь пакетов от клиентов к TUN: 512;
 - адреса сессий не переиспользуются до перезапуска процесса;
 - IPv6 пока не маршрутизируется;
-- egress ACL по умолчанию блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified и CGNAT-адреса.
+- egress ACL по умолчанию блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, IETF protocol-assignment, documentation и benchmarking диапазоны.
 
 Включать TUN следует только после настройки IP forwarding и firewall. Пример ниже предназначен для отдельного хоста, где этот процесс может управлять всей цепочкой FORWARD. Не вставляйте политику DROP в существующий firewall без проверки его текущих правил.
 
