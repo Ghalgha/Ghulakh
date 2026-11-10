@@ -116,7 +116,7 @@ pub struct FrameSealer {
 }
 
 impl FrameSealer {
-    pub fn new(
+    pub fn session_id(&self) -> [u8; 8] {\n        self.session_id\n    }\n\n    pub fn new(
         key: [u8; 32],
         nonce_prefix: [u8; 4],
         session_id: [u8; 8],
@@ -167,8 +167,7 @@ pub struct FrameOpener {
     replay: ReplayWindow,
 }
 
-impl FrameOpener {
-    pub fn new(
+impl FrameOpener {\n    pub fn session_id(&self) -> [u8; 8] {\n        self.session_id\n    }\n\n    pub fn new(
         key: [u8; 32],
         nonce_prefix: [u8; 4],
         session_id: [u8; 8],
