@@ -5,7 +5,7 @@ use crate::{ClientOptions, QuicClient};
 use anyhow::{Context, Result};
 use ghulakh_protocol::{DataDatagram, IpPacketKind};
 use jni::{
-    objects::{JByteArray, JObject, JString, JValue},
+    objects::{JByteArray, JObject, JString},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
     JNIEnv,
 };
@@ -18,6 +18,8 @@ use std::{
 use tokio::runtime::{Builder, Runtime};
 #[cfg(target_os = "android")]
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "android")]
+use jni::objects::JValue;
 
 struct NativeSession {
     // Keep the runtime alive until after the QUIC client is dropped.
@@ -150,6 +152,11 @@ fn client_ipv4_impl(handle: jlong) -> Result<String> {
     Ok(session.client.client_ipv4().to_owned())
 }
 
+fn tunnel_enabled_impl(handle: jlong) -> Result<bool> {
+    let session = session(handle)?;
+    Ok(session.client.tunnel_enabled())
+}
+
 fn ping_impl(handle: jlong) -> Result<()> {
     let session = session(handle)?;
     session.runtime.block_on(session.client.ping())
@@ -279,6 +286,22 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeClientIpv4(
         Err(error) => {
             throw_error(&mut env, "java/lang/IllegalStateException", error);
             std::ptr::null_mut()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTunnelEnabled(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jboolean {
+    match tunnel_enabled_impl(handle) {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Err(error) => {
+            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            0
         }
     }
 }
