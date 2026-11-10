@@ -26,7 +26,8 @@ use tokio::{
 };
 
 const TUN_INGRESS_CAPACITY: usize = 512;
-const UDP_BUFFER_SIZE: usize = 65_507;\nconst CLIENT_IPV4_POOL_SIZE: u32 = 65_534;
+const UDP_BUFFER_SIZE: usize = 65_507;
+const CLIENT_IPV4_POOL_SIZE: u32 = 65_534;
 
 struct SessionCrypto {
     opener: FrameOpener,
@@ -68,6 +69,8 @@ pub struct TurnGateway {
     sessions: RwLock<HashMap<[u8; 8], Arc<GatewaySession>>>,
     clients: RwLock<HashMap<Ipv4Addr, [u8; 8]>>,
     tun_ingress: mpsc::Sender<DataDatagram>,
+    handshake: AsyncMutex<Option<super::turn_handshake_service::TurnHandshakeService>>,
+    next_client_host: AtomicU32,
     counters: Counters,
 }
 
@@ -83,6 +86,8 @@ impl TurnGateway {
                 sessions: RwLock::new(HashMap::new()),
                 clients: RwLock::new(HashMap::new()),
                 tun_ingress,
+                handshake: AsyncMutex::new(None),
+                next_client_host: AtomicU32::new(2),
                 counters: Counters::default(),
             }),
             tun_receiver,
