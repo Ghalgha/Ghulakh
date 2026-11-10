@@ -32,7 +32,7 @@ pub enum TurnAuthError {
     InvalidChallengeText,
 }
 
-fn unique_attribute<'a>(message: &'a StunMessage, kind: u16) -> Result<&'a [u8], TurnAuthError> {
+fn unique_attribute(message: &StunMessage, kind: u16) -> Result<&[u8], TurnAuthError> {
     let mut found = message.attributes.iter().filter(|attr| attr.kind == kind);
     let first = found.next().ok_or(TurnAuthError::MissingAttribute)?;
     if found.next().is_some() {
