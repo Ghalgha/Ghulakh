@@ -9,11 +9,11 @@ use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     env, fs, fs::File, io::BufReader, net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc,
     },
     time::Duration,
 };
@@ -38,38 +38,20 @@ struct DatagramMetrics {
 }
 
 struct IpAllocator {
-    available: Mutex<VecDeque<Ipv4Addr>>,
+    next_host: std::sync::atomic::AtomicU32,
 }
 
 impl IpAllocator {
     fn new() -> Self {
-        let available = (2..=254)
-            .map(|host| Ipv4Addr::new(10, 77, 0, host))
-            .collect();
         Self {
-            available: Mutex::new(available),
+            next_host: std::sync::atomic::AtomicU32::new(2),
         }
     }
 
     fn allocate(&self) -> Result<Ipv4Addr> {
-        self.available
-            .lock()
-            .map_err(|_| anyhow::anyhow!("client address pool is unavailable"))?
-            .pop_front()
-            .context("no client IPv4 addresses remain")
-    }
-
-    fn release(&self, address: Ipv4Addr) {
-        if !(2..=254).contains(&address.octets()[3])
-            || address.octets()[..3] != [10, 77, 0]
-        {
-            return;
-        }
-        if let Ok(mut available) = self.available.lock() {
-            if !available.contains(&address) {
-                available.push_back(address);
-            }
-        }
+        let host = self.next_host.fetch_add(1, Ordering::Relaxed);
+        anyhow::ensure!(host <= 65_534, "client IPv4 address pool exhausted");
+        Ok(Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8))
     }
 }
 
@@ -87,7 +69,7 @@ fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> 
     let device = Arc::new(
         DeviceBuilder::new()
             .name(name)
-            .ipv4(TUN_SERVER_IPV4, 24, None)
+            .ipv4(TUN_SERVER_IPV4, 16, None)
             .mtu(TUN_MTU)
             .build_async()
             .with_context(|| format!("create TUN interface {name}"))?,
@@ -330,7 +312,19 @@ enum DatagramDisposition {
     Invalid,
     UnsupportedAddressFamily,
     SourceMismatch,
+    DestinationBlocked,
     Accepted(Vec<u8>),
+}
+
+fn destination_allowed(address: Ipv4Addr) -> bool {
+    address != Ipv4Addr::BROADCAST
+        && !address.is_private()
+        && !address.is_loopback()
+        && !address.is_link_local()
+        && !address.is_multicast()
+        && !address.is_unspecified()
+        && !(address.octets()[0] == 100
+            && (64..=127).contains(&address.octets()[1]))
 }
 
 fn inspect_datagram(
@@ -343,11 +337,14 @@ fn inspect_datagram(
     }
     match DataDatagram::decode(bytes) {
         Ok(datagram) if datagram.kind == IpPacketKind::Ipv4 => {
-            let Some((source, _)) = ipv4_endpoints(&datagram.packet) else {
+            let Some((source, destination)) = ipv4_endpoints(&datagram.packet) else {
                 return DatagramDisposition::Invalid;
             };
             if Some(source) != expected_source {
                 return DatagramDisposition::SourceMismatch;
+            }
+            if !destination_allowed(destination) {
+                return DatagramDisposition::DestinationBlocked;
             }
             DatagramDisposition::Accepted(datagram.packet)
         }
@@ -427,7 +424,8 @@ async fn handle_connection(
                     DatagramDisposition::Unauthenticated
                     | DatagramDisposition::Invalid
                     | DatagramDisposition::UnsupportedAddressFamily
-                    | DatagramDisposition::SourceMismatch => {
+                    | DatagramDisposition::SourceMismatch
+                    | DatagramDisposition::DestinationBlocked => {
                         rejected_datagrams = rejected_datagrams.saturating_add(1);
                         metrics.rejected.fetch_add(1, Ordering::Relaxed);
                     }
@@ -438,7 +436,6 @@ async fn handle_connection(
 
     if let Some(address) = client_address.lock().await.take() {
         sessions.write().await.remove(&address);
-        ip_allocator.release(address);
     }
 
     if valid_datagrams > 0 || rejected_datagrams > 0 {
@@ -587,6 +584,14 @@ mod tests {
             ),
             DatagramDisposition::SourceMismatch
         );
+    }
+
+    #[test]
+    fn private_destinations_are_blocked_by_default() {
+        assert!(!destination_allowed(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(192, 168, 1, 1)));
+        assert!(!destination_allowed(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(destination_allowed(Ipv4Addr::new(1, 1, 1, 1)));
     }
 
     #[test]
