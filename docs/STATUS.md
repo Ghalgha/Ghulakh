@@ -49,11 +49,11 @@ Android-приложение может запросить системное р
 - `GHULAKH_TLS_KEY` — путь к PEM private key;
 - `GHULAKH_QUIC_BIND` — UDP bind address, по умолчанию `0.0.0.0:4433`.
 
-Подробности выпуска credentials и запуска — в [SERVER_OPERATIONS.md](SERVER_OPERATIONS.md).
+Подробности выпуска credentials, настройки TUN и системного forwarding — в [SERVER_OPERATIONS.md](SERVER_OPERATIONS.md).
 
 ## Следующий этап
 
 1. Подключить существующий JNI-транспорт к Android VpnService и локальному TUN.
-3. Реализовать управление маршрутизацией и восстановлением соединения на Android.
-4. Реализовать серверный TUN, маршрутизацию и IP forwarding.
-5. Добавить защищённое управление credentials, нагрузочные тесты и fuzzing.
+2. Реализовать управление маршрутами и восстановление соединения на Android.
+3. Добавить IPv6 и настраиваемый allowlist для частных сетей.
+4. Добавить API управления credentials, нагрузочные тесты и fuzzing.
