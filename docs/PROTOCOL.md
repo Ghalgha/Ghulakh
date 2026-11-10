@@ -133,3 +133,8 @@ TURN challenge parser (401/438) реализован отдельно от crede
 `ghulakh_protocol::turn_request` provides constructors for Allocate (mandatory UDP REQUESTED-TRANSPORT), Refresh (including lifetime zero for deletion), CreatePermission (one or more peer addresses of a single address family), and ChannelBind (channel range 0x4000–0x7fff). It also parses successful Allocate/Refresh responses and checks required XOR-RELAYED-ADDRESS/LIFETIME attributes. The module deliberately does not add credentials or MESSAGE-INTEGRITY: the caller must use the negotiated auth provider and verify response integrity before parsing or applying state changes.
 
 The codec supports RFC 8489 `MESSAGE-INTEGRITY-SHA256` (full 32-byte HMAC) in addition to the legacy `MESSAGE-INTEGRITY` HMAC-SHA1. Both APIs accept an already-derived key and do not select a credential algorithm or derive TURN credentials. When both integrity attributes are present, SHA-1 precedes SHA-256 as shown in the TURN example; verification supports that layout and an optional final FINGERPRINT.
+
+
+### TURN password-algorithm negotiation
+
+The protocol crate now parses RFC 8489 `PASSWORD-ALGORITHMS` and `PASSWORD-ALGORITHM` values with strict length bounds, duplicate-ID rejection, and preservation of unknown algorithm identifiers. Selection prefers SHA-256 when offered and falls back to MD5 only when SHA-256 is absent. The module only models and encodes negotiation attributes: it does not derive long-term credential keys, infer the VK Calls authentication profile, or authorize use of an algorithm without explicit service-profile confirmation.
