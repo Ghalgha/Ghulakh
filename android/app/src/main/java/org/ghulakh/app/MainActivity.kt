@@ -223,13 +223,14 @@ class MainActivity : Activity() {
                 )
                 check(nativeTransport.nativePing(session)) { "Сервер не подтвердил ping" }
                 val tunnelReady = nativeTransport.nativeTunnelEnabled(session)
+                val forwardingReady = nativeTransport.nativeForwardingEnabled(session)
                 nativeTransport.nativeClose(session)
                 session = 0L
                 runOnUiThread {
-                    status.text = if (tunnelReady) {
-                        "QUIC, TLS и аутентификация успешны. Серверный TUN включён; локальный VPN-клиент ещё не подключён."
-                    } else {
-                        "QUIC, TLS и аутентификация успешны, но серверный TUN выключен. VPN запускать нельзя."
+                    status.text = when {
+                        !tunnelReady -> "QUIC, TLS и аутентификация успешны, но серверный TUN выключен."
+                        !forwardingReady -> "Серверный TUN включён, но администратор не подтвердил настройку IP forwarding/NAT/firewall. VPN запускать нельзя."
+                        else -> "QUIC, TLS, аутентификация и готовность серверной маршрутизации подтверждены."
                     }
                 }
             } catch (error: Throwable) {
