@@ -53,6 +53,10 @@
 
 Следовательно, текущая сборка не реализует основную функцию проекта и не должна позиционироваться как готовый TURN VPN.
 
+## Mock TURN control-plane
+
+Добавлен integration test `crates/transport/tests/mock_turn_relay.rs`: UDP mock relay обрабатывает Allocate (UDP), CreatePermission, ChannelBind и Refresh, затем пересылает ChannelData в gateway и инкапсулирует ответ gateway обратно в ChannelData клиенту. Проверяется порядок Permission перед ChannelBind, успешный uplink/downlink и Refresh с lifetime=0. Это тестовая модель control/data plane, а не production TURN server: в ней намеренно отсутствуют long-term authentication/MESSAGE-INTEGRITY, реальные relay allocations, permission expiry timers, TCP/TLS и взаимодействие с VK Calls.
+
 ## Текущий тестовый срез
 
 Добавлен loopback UDP test в `crates/transport/src/turn_data.rs`: клиентский защищённый ChannelData проходит через relay forwarder к gateway, gateway проверяет ClientToServer AEAD frame и отвечает на наблюдаемый relay source tuple, relay возвращает ServerToClient frame клиенту. Проверяются оба направления и раздельные directional keys. Это тест data-plane forwarding; он не эмулирует TURN Allocate/Refresh/CreatePermission/ChannelBind и не доказывает совместимость с VK Calls.
