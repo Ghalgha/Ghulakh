@@ -490,6 +490,47 @@ mod tests {
 
 
     #[tokio::test]
+    async fn registers_multiple_authenticated_paths_for_one_virtual_client() {
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let group_id = [0x73; 16];
+        let session_a = [0x81; 8];
+        let session_b = [0x82; 8];
+
+        let context_a = TurnPathContext { group_id, path_id: 0, path_count: 2 };
+        let context_b = TurnPathContext { group_id, path_id: 1, path_count: 2 };
+
+        gateway.register_session_with_path(
+            session_a,
+            CLIENT_IP,
+            relay_a.local_addr().unwrap(),
+            FrameOpener::new([0x11; 32], [0x31; 4], session_a, FrameDirection::ClientToServer),
+            FrameSealer::new([0x22; 32], [0x42; 4], session_a, FrameDirection::ServerToClient),
+            Some(context_a),
+        ).await.unwrap();
+        gateway.register_session_with_path(
+            session_b,
+            CLIENT_IP,
+            relay_b.local_addr().unwrap(),
+            FrameOpener::new([0x12; 32], [0x32; 4], session_b, FrameDirection::ClientToServer),
+            FrameSealer::new([0x23; 32], [0x43; 4], session_b, FrameDirection::ServerToClient),
+            Some(context_b),
+        ).await.unwrap();
+
+        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        assert_eq!(route.group_id, Some(group_id));
+        assert_eq!(route.sessions.len(), 2);
+
+        assert!(gateway.unregister_session(session_a).await);
+        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        assert_eq!(route.sessions, vec![session_b]);
+
+        assert!(gateway.unregister_session(session_b).await);
+        assert!(!gateway.clients.read().await.contains_key(&CLIENT_IP));
+    }
+
+    #[tokio::test]
     async fn full_mock_turn_client_to_server_to_client_tunnel() {
         use std::{
             collections::{HashMap, HashSet},
