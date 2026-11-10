@@ -8,6 +8,7 @@ use ghulakh_protocol::stun::StunMessage;
 use ghulakh_protocol::turn_channel_data::{
     encode_channel_data, CHANNEL_DATA_HEADER_LEN, MAX_UDP_CHANNEL_DATA_PAYLOAD,
 };
+use crate::turn_credentials::{TurnEndpoint, TurnWireTransport};
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use tokio::net::UdpSocket;
 
@@ -19,6 +20,22 @@ pub struct TurnUdpSocket {
 }
 
 impl TurnUdpSocket {
+    /// Resolve and bind a TURN URI using UDP. TCP/TLS URIs are parsed by the
+    /// credential layer but rejected by this UDP-only socket adapter.
+    pub async fn bind_endpoint(local: SocketAddr, endpoint: &TurnEndpoint) -> Result<Self> {
+        ensure!(
+            endpoint.transport == TurnWireTransport::Udp,
+            "TURN endpoint is not supported by the UDP socket adapter"
+        );
+        let mut addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+            .await
+            .context("resolve TURN endpoint")?;
+        let server = addresses
+            .find(|address| address.is_ipv4() == local.is_ipv4())
+            .context("TURN endpoint has no address matching the local socket family")?;
+        Self::bind(local, server).await
+    }
+
     /// Bind a new UDP socket. On Android, prefer from_protected_socket so the
     /// caller can protect the descriptor before it is attached to the VPN.
     pub async fn bind(local: SocketAddr, server: SocketAddr) -> Result<Self> {
@@ -123,6 +140,35 @@ mod tests {
         let mut buffer = [0u8; 64];
         let (length, _) = server.recv_from(&mut buffer).await.unwrap();
         assert_eq!(&buffer[..length], &[0x40, 0x01, 0, 5, b'f', b'r', b'a', b'm', b'e']);
+    }
+
+    #[tokio::test]
+    async fn binds_from_parsed_udp_endpoint() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let endpoint = TurnEndpoint {
+            scheme: crate::turn_credentials::TurnScheme::Turn,
+            host: address.ip().to_string(),
+            port: address.port(),
+            transport: TurnWireTransport::Udp,
+            query: vec![("transport".to_owned(), "udp".to_owned())],
+        };
+        let client = TurnUdpSocket::bind_endpoint("127.0.0.1:0".parse().unwrap(), &endpoint)
+            .await.unwrap();
+        assert_eq!(client.server_addr(), address);
+    }
+
+    #[tokio::test]
+    async fn refuses_tcp_turn_endpoint_in_udp_adapter() {
+        let endpoint = TurnEndpoint {
+            scheme: crate::turn_credentials::TurnScheme::Turn,
+            host: "relay.example".to_owned(),
+            port: 3478,
+            transport: TurnWireTransport::Tcp,
+            query: vec![("transport".to_owned(), "tcp".to_owned())],
+        };
+        assert!(TurnUdpSocket::bind_endpoint("127.0.0.1:0".parse().unwrap(), &endpoint)
+            .await.is_err());
     }
 
     #[tokio::test]
