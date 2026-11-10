@@ -94,6 +94,14 @@ impl TurnClientDriver {
         self.data_rx.take()
     }
 
+    /// Transfer the data receiver and a clone of the actor send handle to the
+    /// dataplane. Control transactions retain their own actor handle.
+    pub fn take_data_plane_parts(
+        &mut self,
+    ) -> Option<(TurnSocketHandle, mpsc::Receiver<TurnInbound>)> {
+        Some((self.socket.as_ref()?.clone(), self.data_rx.take()?))
+    }
+
     pub fn allocation(&self) -> Option<&AllocationLease> {
         self.allocations.lease()
     }
