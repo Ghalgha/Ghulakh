@@ -117,3 +117,10 @@ README всех шести указанных пользователем исх�
 
 
 - TURN 401/438 challenge parser now validates and preserves a server `PASSWORD-ALGORITHMS` offer, rejects duplicate/malformed offers, and exposes the original attribute for the authenticated retry. This supports RFC 8489 downgrade protection. NONCE remains opaque and is retained unchanged.
+
+
+### TURN data framing
+
+- Added a UDP ChannelData encoder/decoder with declared-length validation and optional UDP padding support.
+- Corrected ChannelBind and ChannelData channel-number validation to the RFC 8656 range `0x4000–0x4FFF` (not the older wider range).
+- Channel binding registry, permission expiry, peer validation, authenticated frame protection and relay socket integration remain outstanding.
