@@ -49,8 +49,8 @@ Android пока требует вручную предоставить поль
 - Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
 - Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
 - Проверить lifecycle server TUN, IP forwarding/NAT/firewall и session cleanup под нагрузкой.
-- Расширить end-to-end mock TURN tunnel test сценариями потерь/переупорядочивания, повторной передачи, переполнения очередей и ротации credentials.
-- Добавить fuzz/property tests, network loss/reorder simulation, queue saturation, MTU/fragmentation, replay, source spoofing, reconnect и credential rotation.
+- Расширить end-to-end mock TURN tunnel test сценариями переполнения очередей, отказа/повторного создания allocation и ротации credentials. Потеря отдельного sequence, переупорядочивание и replay rejection уже покрыты отдельным gateway test.
+- Добавить fuzz/property tests, deterministic network fault simulation на полном пути TURN, queue saturation, MTU/fragmentation, source spoofing, reconnect и credential rotation.
 - Провести security review Noise/session protocol; библиотека Snow не заявляется как формально аудированная.
 - Удалить остаточный QUIC runtime и код после успешного TURN vertical slice и тестирования; TURN→QUIC fallback не добавлять.
 - Провести физические Android/VPS испытания ближе к завершению проекта, затем измерить throughput, loss, CPU wakeups, энергопотребление и память.
@@ -67,7 +67,13 @@ Android пока требует вручную предоставить поль
 
 ## Сравнительный аудит и производительность
 
-Одинаковые функции в исходных реализациях сравниваются по владению ресурсами, количеству копирований, очередям, wakeups, retry policy и устойчивости к перегрузке. В актуальных Rust-реализациях источников обнаружен общий legacy-профиль MD5(username:realm:password) + HMAC-SHA1; vendor attribute 0x8021 требует отдельного подтверждения. Для peer-facing datapath выбран raw UDP payload, поскольку TURN снимает ChannelData framing перед пересылкой пиру.
+Одинаковые задачи сравниваются на уровне решений, а не переноса исходного кода. В нескольких Android-реализациях повторяется полезная модель учёта доступных физических сетей как множества с переходами AVAILABLE/CHANGED/UNAVAILABLE; это позволяет не рвать туннель при появлении/исчезновении вторичного интерфейса, пока остаётся пригодная сеть. Политика повторного использования TUN требует одновременно живого дескриптора, неизменной конфигурации и отсутствия принудительной перестройки; восстановление через уже закрытый дескриптор не допускается. Эти принципы следует применить к lifecycle Android-клиента, но не копировать конкретные классы.
+
+Варианты с большим числом worker-сессий и групп предназначены для параллельных TURN allocations. Для текущей модели Ghulakh — одна allocation и один защищённый session — такая конкуренция не обоснована; фиксированный пул потоков не вводится. Из Go-вариантов полезна идея изолировать направление uplink/downlink и ограничивать буферы, но отдельные goroutine/pipe на каждую сессию не дают основания усложнять уже выбранное владение сокетом. В Rust-вариантах есть более сложные очереди, packet pools, burst scheduling и адаптивное распределение потока; их преимущества нельзя переносить без измерений и без соответствия односессионной архитектуре.
+
+Тестовая стратегия также различается: синтетические throughput/soak тесты измеряют поведение очередей при заданной нагрузке, но не доказывают реальную пропускную способность TURN. Обнаруженный крупный chaos harness в одной ветке отключён условной компиляцией и потому не считается действующим покрытием CI. Ghulakh добавляет собственные тесты на уровне gateway: пропуск sequence, переупорядочивание и обязательное отклонение повторного кадра. Следующий этап — моделирование очередей и отказов allocation на полном mock TURN пути.
+
+Для VK Calls auth profile в актуальных Rust-вариантах прослеживается общий подход MD5(username:realm:password) + HMAC-SHA1, однако vendor attribute 0x8021 и поведение PASSWORD-ALGORITHMS требуют подтверждения на реальном relay. Для peer-facing datapath выбран raw UDP payload, поскольку TURN снимает ChannelData framing перед пересылкой пиру.
 
 Для первого среза выбраны bounded Tokio queues и один socket actor: это упрощает ownership и backpressure. Более сложные packet pools и ring buffers остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
 
