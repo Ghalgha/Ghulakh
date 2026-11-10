@@ -255,7 +255,7 @@ mod tests {
         let binding_expiry = now + CHANNEL_BINDING_LIFETIME;
         assert_eq!(
             registry.expire(binding_expiry),
-            ExpiredPeerState { permissions: 0, channels: 1 }
+            ExpiredPeerState { permissions: 1, channels: 1 }
         );
         assert_eq!(
             registry.install_channel_binding(
