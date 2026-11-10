@@ -115,3 +115,10 @@ MESSAGE-INTEGRITY проверяется HMAC-SHA1 с constant-time MAC verifica
 - Проверка HMAC выполняется constant-time через криптографическую библиотеку.
 
 TURN long-term credential derivation, challenge handling (401/438), transaction management и allocation lifecycle пока не реализованы.
+
+
+### TURN authentication challenge parser
+
+Модуль `ghulakh_protocol::turn_auth` извлекает ограниченные по размеру challenge-ответы 401 и 438 для ожидаемого метода. Он проверяет класс/метод ответа, формат ERROR-CODE, уникальность ERROR-CODE/REALM/NONCE, UTF-8 и границы длины текстовых атрибутов. Вызывающий TURN transaction manager обязан до принятия challenge сопоставить transaction ID и адрес источника с ожидающим запросом.
+
+Парсер не выводит ключ, не выбирает PASSWORD-ALGORITHM и не считает challenge доказательством подлинности сервера. Эти решения остаются за будущим auth provider после подтверждения фактического профиля TURN endpoint.
