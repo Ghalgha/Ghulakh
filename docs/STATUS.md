@@ -84,3 +84,10 @@ README всех шести указанных пользователем исх�
 ## Физические испытания
 
 Не проводились. Они отложены до завершения спецификации, локальных интеграционных тестов и проверок безопасности.
+
+
+## TURN control plane
+
+- Реализованы STUN framing/address/integrity primitives и bounded parser challenge 401/438.
+- Добавлен UDP transaction manager с криптографически случайными transaction ID, строгим response matching, лимитом 10 outstanding requests на endpoint, retransmission schedule по RFC 8489 и детерминированными тестами.
+- Пока отсутствуют socket integration, TURN credential acquisition/key derivation, Allocate/Refresh/CreatePermission/ChannelBind lifecycle и relay data plane. Профиль аутентификации VK Calls не считается подтверждённым.
