@@ -216,6 +216,7 @@ async fn handle_control_stream(
     ip_allocator: Arc<IpAllocator>,
     client_address: Arc<tokio::sync::Mutex<Option<Ipv4Addr>>>,
     tunnel_enabled: bool,
+    forwarding_enabled: bool,
 ) -> Result<()> {
     let bytes = match tokio::time::timeout(
         Duration::from_secs(15),
@@ -287,6 +288,7 @@ async fn handle_control_stream(
                 session_id: session_id.as_ref().clone(),
                 client_ipv4: address.to_string(),
                 tunnel_enabled,
+                forwarding_enabled,
                 request_id,
             }
         }
@@ -377,6 +379,7 @@ async fn handle_connection(
     sessions: SessionMap,
     ip_allocator: Arc<IpAllocator>,
     tunnel_enabled: bool,
+    forwarding_enabled: bool,
 ) -> Result<()> {
     let session_id = Arc::new(new_session_id());
     let authenticated = Arc::new(AtomicBool::new(false));
@@ -401,6 +404,7 @@ async fn handle_connection(
                 let allocator = Arc::clone(&ip_allocator);
                 let assigned_address = Arc::clone(&client_address);
                 let tun_active = tunnel_enabled;
+                let routing_active = forwarding_enabled;
                 let _control_stream_task = tokio::spawn(async move {
                     if let Err(error) = handle_control_stream(
                         connection.clone(),
@@ -413,6 +417,7 @@ async fn handle_connection(
                         allocator,
                         assigned_address,
                         tun_active,
+                        routing_active,
                     ).await {
                         eprintln!("control stream rejected: {error:#}");
                     }
@@ -490,6 +495,10 @@ async fn main() -> Result<()> {
     let tun_enabled = env::var("GHULAKH_TUN_ENABLED")
         .unwrap_or_else(|_| "false".to_string())
         .eq_ignore_ascii_case("true");
+    let forwarding_enabled = tun_enabled
+        && env::var("GHULAKH_FORWARDING_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .eq_ignore_ascii_case("true");
     let tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let sender = start_tun(&name, Arc::clone(&sessions))?;
@@ -533,6 +542,7 @@ async fn main() -> Result<()> {
                         session_map,
                         allocator,
                         tun_enabled,
+                        forwarding_enabled,
                     )
                     .await
                     {
@@ -684,6 +694,7 @@ mod tests {
                             None,
                             sessions,
                             allocator,
+                            false,
                             false,
                         )
                         .await;
