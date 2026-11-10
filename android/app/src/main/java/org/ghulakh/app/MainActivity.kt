@@ -199,16 +199,17 @@ class MainActivity : Activity() {
             var transport: NativeTransport? = null
             var session = 0L
             try {
-                transport = NativeTransport()
-                session = transport.nativeConnect(
+                val nativeTransport = NativeTransport()
+                transport = nativeTransport
+                session = nativeTransport.nativeConnect(
                     profile.host,
                     profile.port,
                     profile.serverName,
                     profile.rootCertificateDer,
                     profile.credential,
                 )
-                check(transport.nativePing(session)) { "Сервер не подтвердил ping" }
-                transport.nativeClose(session)
+                check(nativeTransport.nativePing(session)) { "Сервер не подтвердил ping" }
+                nativeTransport.nativeClose(session)
                 session = 0L
                 runOnUiThread {
                     status.text = "QUIC-соединение, проверка TLS и аутентификация прошли успешно. VPN-трафик пока не маршрутизируется."
