@@ -12,6 +12,9 @@ pub const MAX_MESSAGE_LEN: usize = HEADER_LEN + u16::MAX as usize;
 
 pub const ATTR_USERNAME: u16 = 0x0006;
 pub const ATTR_MESSAGE_INTEGRITY: u16 = 0x0008;
+pub const ATTR_MESSAGE_INTEGRITY_SHA256: u16 = 0x001C;
+pub const ATTR_PASSWORD_ALGORITHM: u16 = 0x001D;
+pub const ATTR_PASSWORD_ALGORITHMS: u16 = 0x8002;
 pub const ATTR_ERROR_CODE: u16 = 0x0009;
 pub const ATTR_CHANNEL_NUMBER: u16 = 0x000C;
 pub const ATTR_LIFETIME: u16 = 0x000D;
@@ -44,6 +47,8 @@ pub enum StunError {
     InvalidIntegrityLayout,
     InvalidIntegrityKey,
     IntegrityMismatch,
+    InvalidSha256IntegrityLayout,
+    Sha256IntegrityMismatch,
     InvalidFingerprintLayout,
     FingerprintMismatch,
 }
@@ -192,6 +197,71 @@ pub fn verify_message_integrity(input: &[u8], key: &[u8]) -> Result<(), StunErro
     mac.verify_slice(&input[offset + 4..offset + 24]).map_err(|_| StunError::IntegrityMismatch)
 }
 
+
+/// Append RFC 8489 MESSAGE-INTEGRITY-SHA256 using a caller-supplied key.
+/// The full 32-byte HMAC is emitted; password/key derivation is external.
+pub fn append_message_integrity_sha256(message: &StunMessage, key: &[u8]) -> Result<Vec<u8>, StunError> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    if key.is_empty() || message.attributes.iter().any(|a| {
+        a.kind == ATTR_MESSAGE_INTEGRITY
+            || a.kind == ATTR_MESSAGE_INTEGRITY_SHA256
+            || a.kind == ATTR_FINGERPRINT
+    }) {
+        return Err(StunError::InvalidSha256IntegrityLayout);
+    }
+    let mut signed = message.clone();
+    signed.attributes.push(StunAttribute {
+        kind: ATTR_MESSAGE_INTEGRITY_SHA256,
+        value: vec![0; 32],
+    });
+    let mut encoded = signed.encode()?;
+    let attr_offset = encoded.len() - 36;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
+    mac.update(&encoded[..attr_offset]);
+    let tag = mac.finalize().into_bytes();
+    encoded[attr_offset + 4..attr_offset + 36].copy_from_slice(&tag);
+    Ok(encoded)
+}
+
+/// Verify a full-length RFC 8489 MESSAGE-INTEGRITY-SHA256 attribute.
+/// A final FINGERPRINT is permitted; this is authentication only when the
+/// caller has independently selected the correct credential and key profile.
+pub fn verify_message_integrity_sha256(input: &[u8], key: &[u8]) -> Result<(), StunError> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let message = StunMessage::decode(input)?;
+    let positions: Vec<usize> = message.attributes.iter().enumerate()
+        .filter_map(|(i, a)| (a.kind == ATTR_MESSAGE_INTEGRITY_SHA256).then_some(i)).collect();
+    if positions.len() != 1 || key.is_empty() {
+        return Err(StunError::InvalidSha256IntegrityLayout);
+    }
+    let index = positions[0];
+    if message.attributes[index].value.len() != 32 {
+        return Err(StunError::InvalidSha256IntegrityLayout);
+    }
+    let trailing = &message.attributes[index + 1..];
+    if !(trailing.is_empty() || (trailing.len() == 1 && trailing[0].kind == ATTR_FINGERPRINT)) {
+        return Err(StunError::InvalidSha256IntegrityLayout);
+    }
+    let offset = HEADER_LEN + message.attributes[..index].iter()
+        .map(|a| 4 + ((a.value.len() + 3) & !3)).sum::<usize>();
+    let expected_len = offset + 36 + if trailing.is_empty() { 0 } else { 8 };
+    if input.len() != expected_len {
+        return Err(StunError::InvalidSha256IntegrityLayout);
+    }
+    let mut signed_prefix = input[..offset].to_vec();
+    let adjusted_len = u16::try_from(offset + 36 - HEADER_LEN)
+        .map_err(|_| StunError::InvalidLength)?;
+    signed_prefix[2..4].copy_from_slice(&adjusted_len.to_be_bytes());
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
+    mac.update(&signed_prefix);
+    mac.verify_slice(&input[offset + 4..offset + 36])
+        .map_err(|_| StunError::Sha256IntegrityMismatch)
+}
+
 /// Append the STUN FINGERPRINT attribute (CRC-32 XOR 0x5354554e).
 pub fn append_fingerprint(input: &[u8]) -> Result<Vec<u8>, StunError> {
     let message = StunMessage::decode(input)?;
@@ -285,6 +355,34 @@ mod tests {
         let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;
         assert_eq!(verify_message_integrity(&tampered, b"test-key"), Err(StunError::IntegrityMismatch));
     }
+    #[test] fn message_integrity_sha256_round_trip_and_tamper_detection() {
+        let m = sample(StunClass::Request);
+        let encoded = append_message_integrity_sha256(&m, b"test-key").unwrap();
+        verify_message_integrity_sha256(&encoded, b"test-key").unwrap();
+        let with_fingerprint = append_fingerprint(&encoded).unwrap();
+        verify_message_integrity_sha256(&with_fingerprint, b"test-key").unwrap();
+        verify_fingerprint(&with_fingerprint).unwrap();
+        let mut tampered = encoded;
+        tampered[HEADER_LEN] ^= 1;
+        assert_eq!(
+            verify_message_integrity_sha256(&tampered, b"test-key"),
+            Err(StunError::Sha256IntegrityMismatch)
+        );
+    }
+
+    #[test] fn rejects_truncated_sha256_integrity() {
+        let mut message = sample(StunClass::Request);
+        message.attributes.push(StunAttribute {
+            kind: ATTR_MESSAGE_INTEGRITY_SHA256,
+            value: vec![0; 16],
+        });
+        let encoded = message.encode().unwrap();
+        assert_eq!(
+            verify_message_integrity_sha256(&encoded, b"test-key"),
+            Err(StunError::InvalidSha256IntegrityLayout)
+        );
+    }
+
     #[test] fn fingerprint_round_trip_and_tamper_detection() {
         let encoded = sample(StunClass::Request).encode().unwrap();
         let encoded = append_fingerprint(&encoded).unwrap();
