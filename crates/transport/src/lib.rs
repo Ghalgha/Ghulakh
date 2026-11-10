@@ -20,6 +20,7 @@ pub mod turn_auth;
 pub mod turn_data;
 pub mod turn_dataplane;
 pub mod turn_credentials;
+pub mod turn_handshake_task;
 
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_BUFFER: usize = MAX_DATAGRAM_SIZE * 32;
