@@ -17,7 +17,6 @@ use std::{
 use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
     secure_frame::{protected_frame_session_id, FrameOpener, FrameSealer},
-    turn_channel_data::{decode_channel_data, encode_channel_data, CHANNEL_NUMBER_MAX, CHANNEL_NUMBER_MIN},
     DataDatagram, IpPacketKind,
 };
 use tokio::{
@@ -37,7 +36,6 @@ struct SessionCrypto {
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
     relay_peer: SocketAddr,
-    channel_number: u16,
     crypto: Mutex<SessionCrypto>,
 }
 
@@ -121,8 +119,7 @@ impl TurnGateway {
         &self,
         payload: &[u8],
         relay_peer: SocketAddr,
-        channel_number: u16,
-    ) -> Result<()> {
+        ) -> Result<()> {
         use super::turn_handshake_service::TurnHandshakeOutcome;
 
         let outcome = {
@@ -135,11 +132,9 @@ impl TurnGateway {
             TurnHandshakeOutcome::Cached { response } => (response, None),
             TurnHandshakeOutcome::Response { response, established } => (response, established),
         };
-        let encoded = encode_channel_data(channel_number, &response)
-            .context("encode TURN handshake response ChannelData")?;
-        let sent = self.socket.send_to(&encoded, relay_peer).await
-            .context("send TURN handshake response through relay")?;
-        ensure!(sent == encoded.len(), "partial TURN handshake response send");
+        let sent = self.socket.send_to(&response, relay_peer).await
+            .context("send raw handshake response through TURN relay")?;
+        ensure!(sent == response.len(), "partial TURN handshake response send");
 
         if let Some(established) = established {
             let client_ipv4 = self.allocate_client_ipv4()?;
@@ -149,7 +144,6 @@ impl TurnGateway {
                 session_id,
                 client_ipv4,
                 established.relay_peer,
-                channel_number,
                 opener,
                 sealer,
             ).await.context("register authenticated TURN session after ServerAck send")?;
@@ -164,17 +158,12 @@ impl TurnGateway {
         session_id: [u8; 8],
         client_ipv4: Ipv4Addr,
         relay_peer: SocketAddr,
-        channel_number: u16,
-        opener: FrameOpener,
+            opener: FrameOpener,
         sealer: FrameSealer,
     ) -> Result<()> {
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
         ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
-        ensure!(
-            (CHANNEL_NUMBER_MIN..=CHANNEL_NUMBER_MAX).contains(&channel_number),
-            "TURN channel number is outside the RFC range"
-        );
         ensure!(opener.session_id() == session_id, "opener session identifier mismatch");
         ensure!(sealer.session_id() == session_id, "sealer session identifier mismatch");
 
@@ -185,7 +174,6 @@ impl TurnGateway {
         let session = Arc::new(GatewaySession {
             client_ipv4,
             relay_peer,
-            channel_number,
             crypto: Mutex::new(SessionCrypto { opener, sealer }),
         });
         sessions.insert(session_id, session);
@@ -216,20 +204,15 @@ impl TurnGateway {
     }
 
     async fn process_datagram(&self, datagram: &[u8], source: SocketAddr) {
-        let channel = match decode_channel_data(datagram) {
-            Ok(channel) => channel,
-            Err(_) => {
-                self.counters.malformed.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        if channel.data.starts_with(b"GHHS") {
-            if self.process_handshake(channel.data, source, channel.channel_number).await.is_err() {
+        // TURN removes ChannelData framing before forwarding a datagram to
+        // the peer. The gateway therefore receives raw UDP payloads.
+        if datagram.starts_with(b"GHHS") {
+            if self.process_handshake(datagram, source).await.is_err() {
                 self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
-        let session_id = match protected_frame_session_id(channel.data) {
+        let session_id = match protected_frame_session_id(datagram) {
             Ok(session_id) => session_id,
             Err(_) => {
                 self.counters.malformed.fetch_add(1, Ordering::Relaxed);
@@ -245,11 +228,6 @@ impl TurnGateway {
             self.counters.rejected_source.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        if channel.channel_number != session.channel_number {
-            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-
         let decoded = {
             let mut crypto = match session.crypto.lock() {
                 Ok(crypto) => crypto,
@@ -258,7 +236,7 @@ impl TurnGateway {
                     return;
                 }
             };
-            crypto.opener.open(channel.data)
+            crypto.opener.open(datagram)
         };
         let plaintext = match decoded {
             Ok(plaintext) => plaintext,
@@ -305,13 +283,11 @@ impl TurnGateway {
             .context("TURN session disappeared during downlink routing")?;
         let encoded = {
             let mut crypto = session.crypto.lock().map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
-            let frame = crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
-                .context("protect TURN downlink frame")?;
-            encode_channel_data(session.channel_number, &frame)
-                .context("encode TURN downlink ChannelData")?
+            crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
+                .context("protect TURN downlink frame")?
         };
         let sent = self.socket.send_to(&encoded, session.relay_peer).await
-            .context("send downlink to observed TURN relay peer")?;
+            .context("send raw downlink payload to observed TURN relay peer")?;
         ensure!(sent == encoded.len(), "partial TURN gateway UDP datagram send");
         self.counters.downlink_sent.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -337,7 +313,6 @@ mod tests {
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
     const SESSION: [u8; 8] = [0x61; 8];
-    const CHANNEL: u16 = 0x4001;
     const CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
     const CLIENT_KEY: [u8; 32] = [0x11; 32];
     const SERVER_KEY: [u8; 32] = [0x22; 32];
@@ -366,7 +341,6 @@ mod tests {
             SESSION,
             CLIENT_IP,
             relay_addr,
-            CHANNEL,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
         ).await.unwrap();
@@ -379,8 +353,7 @@ mod tests {
         let uplink = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 9));
         let mut client_tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
-        let channel_data = encode_channel_data(CHANNEL, &protected).unwrap();
-        relay.send_to(&channel_data, gateway_addr).await.unwrap();
+        relay.send_to(&protected, gateway_addr).await.unwrap();
 
         let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
         assert_eq!(received, uplink);
@@ -390,10 +363,8 @@ mod tests {
         let mut buffer = [0u8; 2048];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
         assert_eq!(source, gateway_addr);
-        let channel = decode_channel_data(&buffer[..length]).unwrap();
-        assert_eq!(channel.channel_number, CHANNEL);
         let mut client_rx = FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient);
-        let plaintext = client_rx.open(channel.data).unwrap();
+        let plaintext = client_rx.open(&buffer[..length]).unwrap();
         assert_eq!(DataDatagram::decode(&plaintext).unwrap(), downlink);
 
         assert_eq!(gateway.stats().accepted, 1);
@@ -408,7 +379,7 @@ mod tests {
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         gateway.register_session(
-            SESSION, CLIENT_IP, relay_addr, CHANNEL,
+            SESSION, CLIENT_IP, relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
         ).await.unwrap();
@@ -422,15 +393,14 @@ mod tests {
         );
         let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(203, 0, 113, 2));
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
-        relay.send_to(&encode_channel_data(CHANNEL, &spoofed_frame).unwrap(), gateway_addr)
-            .await.unwrap();
+        relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(tun_rx.try_recv().is_err());
         assert_eq!(gateway.stats().rejected_packet, 1);
 
         let valid = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 2));
         let valid_frame = client_tx.seal(&valid.encode().unwrap()).unwrap();
-        let valid_datagram = encode_channel_data(CHANNEL, &valid_frame).unwrap();
+        let valid_datagram = valid_frame;
         relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
         assert_eq!(
             timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
@@ -461,7 +431,7 @@ mod tests {
         };
         let mut tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
         let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 1)).encode().unwrap()).unwrap();
-        let datagram = encode_channel_data(CHANNEL, &protected).unwrap();
+        let datagram = protected;
         wrong_relay.send_to(&datagram, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(gateway.stats().rejected_source, 1);
