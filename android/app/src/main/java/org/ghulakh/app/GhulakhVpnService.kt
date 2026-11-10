@@ -36,7 +36,7 @@ class GhulakhVpnService : VpnService() {
             return START_NOT_STICKY
         }
         try {
-            startForeground(NOTIFICATION_ID, notification("Подключение к серверу"))
+            startForeground(NOTIFICATION_ID, notification("Получение временных credentials VK Calls"))
         } catch (error: Exception) {
             Log.e(TAG, "Unable to start foreground VPN service", error)
             stopSelf()
@@ -50,9 +50,11 @@ class GhulakhVpnService : VpnService() {
     }
 
     private fun runTunnel() {
+        var vkSession: VkCallsSession? = null
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
+            vkSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
             val transport = NativeTransport()
             nativeTransport = transport
 
@@ -60,7 +62,7 @@ class GhulakhVpnService : VpnService() {
                 this,
                 profile.host,
                 profile.port,
-                profile.turnCredentialsJson,
+                vkSession.turnCredentialsJson,
                 decodeHexKey(profile.pinnedServerPublicKeyHex),
                 profile.credential,
             )
@@ -130,6 +132,8 @@ class GhulakhVpnService : VpnService() {
             }
         } finally {
             stopTunnel()
+            runCatching { vkSession?.finish() }
+                .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls session", error) }
             stopSelf()
         }
     }
