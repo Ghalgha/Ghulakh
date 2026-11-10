@@ -376,7 +376,6 @@ mod tests {
 
     #[tokio::test]
     async fn native_client_authenticates_and_sends_quic_datagram() {
-        use ghulakh_protocol::{DataDatagram, IpPacketKind};
         use ghulakh_transport::{ClientOptions, QuicClient};
 
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
