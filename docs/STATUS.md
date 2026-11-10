@@ -21,6 +21,7 @@
 - VK Calls credential provider.
 - TURN client/allocation manager в Ghulakh.
 - TURN UDP/TCP/TLS data path между Android-клиентом и серверным gateway.
+- Вертикальный end-to-end срез одного allocation и обратного relay-пути.
 - Защищённый data framing для целевого TURN-пути.
 - Подтверждённый двусторонний relay routing и server-side session mapping.
 - Fragmentation/reassembly, replay protection и управление потерями для TURN data path.
@@ -53,6 +54,17 @@ README всех шести указанных пользователем исх�
 6. Подключить Android VpnService к новому transport core через JNI.
 7. Добавить fuzz/property tests, сетевую симуляцию и нагрузочные тесты.
 8. Физические Android/VPS испытания — ближе к завершению проекта.
+
+## Новые результаты статического аудита
+
+- Серверный gateway в одном из исследованных raw-IP путей — обычный UDP listener с защищённым packet wrapper, а не собственный TURN server.
+- Relay datagrams принимаются с UDP peer tuple TURN-реле; обратные пакеты отправляются на relay peer tuple, чтобы TURN allocation доставил их клиенту.
+- Серверный TUN downlink маршрутизируется по назначенному клиентскому destination IP к одной из активных relay-сессий устройства.
+- В сложных реализациях допускаются несколько allocation workers на устройство; балансировка и chunk scheduling должны появиться только после рабочего single-allocation пути.
+- Один из современных Rust-клиентов содержит TURN control plane (Allocate/Refresh/CreatePermission/ChannelBind), UDP и framed stream transports, ChannelData framing, bounded queues и allocation lifecycle driver. Это клиентская реализация; наличие отдельного совместимого сервера в том же репозитории не предполагается.
+- Текущая архитектура Ghulakh должна заменить QUIC connection registry на relay session registry и UDP gateway ingress для целевого data path.
+
+Подробности: [Исследование двустороннего TURN data path](RELAY_PATH_FINDINGS.md).
 
 ## Физические испытания
 
