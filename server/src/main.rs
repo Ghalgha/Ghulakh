@@ -1,30 +1,144 @@
 use anyhow::{bail, Context, Result};
+use bytes::Bytes;
 use ghulakh_protocol::{
     validate_envelope, validate_message, ControlEnvelope, ControlMessage, DataDatagram,
-    MAX_CONTROL_BODY, MAX_DATAGRAM_SIZE, PROTOCOL_VERSION,
+    IpPacketKind, MAX_CONTROL_BODY, MAX_DATAGRAM_SIZE, PROTOCOL_VERSION,
 };
-use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
+use quinn::{crypto::rustls::QuicServerConfig, Connection, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
-    env, fs, fs::File, io::BufReader, net::SocketAddr,
+    collections::{HashMap, VecDeque},
+    env, fs, fs::File, io::BufReader, net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::Duration,
 };
 use subtle::ConstantTimeEq;
-use tokio::io::AsyncWriteExt;
+use tokio::{
+    io::AsyncWriteExt,
+    sync::{mpsc, RwLock},
+};
+use tun_rs::DeviceBuilder;
 
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
+const TUN_MTU: u16 = 1100;
+const TUN_QUEUE_CAPACITY: usize = 512;
+const TUN_SERVER_IPV4: &str = "10.77.0.1";
+type SessionMap = Arc<RwLock<HashMap<Ipv4Addr, Connection>>>;
 
 #[derive(Default)]
 struct DatagramMetrics {
     accepted: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
+}
+
+struct IpAllocator {
+    available: Mutex<VecDeque<Ipv4Addr>>,
+}
+
+impl IpAllocator {
+    fn new() -> Self {
+        let available = (2..=254)
+            .map(|host| Ipv4Addr::new(10, 77, 0, host))
+            .collect();
+        Self {
+            available: Mutex::new(available),
+        }
+    }
+
+    fn allocate(&self) -> Result<Ipv4Addr> {
+        self.available
+            .lock()
+            .map_err(|_| anyhow::anyhow!("client address pool is unavailable"))?
+            .pop_front()
+            .context("no client IPv4 addresses remain")
+    }
+
+    fn release(&self, address: Ipv4Addr) {
+        if !(2..=254).contains(&address.octets()[3])
+            || address.octets()[..3] != [10, 77, 0]
+        {
+            return;
+        }
+        if let Ok(mut available) = self.available.lock() {
+            if !available.contains(&address) {
+                available.push_back(address);
+            }
+        }
+    }
+}
+
+fn ipv4_endpoints(packet: &[u8]) -> Option<(Ipv4Addr, Ipv4Addr)> {
+    if packet.len() < 20 || packet[0] >> 4 != 4 {
+        return None;
+    }
+    Some((
+        Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
+        Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
+    ))
+}
+
+fn start_tun(name: &str, sessions: SessionMap) -> Result<mpsc::Sender<Vec<u8>>> {
+    let device = Arc::new(
+        DeviceBuilder::new()
+            .name(name)
+            .ipv4(TUN_SERVER_IPV4, 24, None)
+            .mtu(TUN_MTU)
+            .build_async()
+            .with_context(|| format!("create TUN interface {name}"))?,
+    );
+    let (packet_sender, mut packet_receiver) = mpsc::channel::<Vec<u8>>(TUN_QUEUE_CAPACITY);
+
+    let writer = Arc::clone(&device);
+    tokio::spawn(async move {
+        while let Some(packet) = packet_receiver.recv().await {
+            if let Err(error) = writer.send(&packet).await {
+                eprintln!("TUN write failed: {error}");
+                break;
+            }
+        }
+    });
+
+    let reader = Arc::clone(&device);
+    tokio::spawn(async move {
+        let mut buffer = vec![0u8; 65_535];
+        loop {
+            let length = match reader.recv(&mut buffer).await {
+                Ok(length) => length,
+                Err(error) => {
+                    eprintln!("TUN read failed: {error}");
+                    break;
+                }
+            };
+            let Some((_, destination)) = ipv4_endpoints(&buffer[..length]) else {
+                continue;
+            };
+            let connection = sessions.read().await.get(&destination).cloned();
+            let Some(connection) = connection else {
+                continue;
+            };
+            let datagram = DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: buffer[..length].to_vec(),
+            };
+            let Ok(encoded) = datagram.encode() else {
+                continue;
+            };
+            let Some(maximum) = connection.max_datagram_size() else {
+                continue;
+            };
+            if encoded.len() <= maximum {
+                let _ = connection.send_datagram_wait(Bytes::from(encoded)).await;
+            }
+        }
+    });
+
+    Ok(packet_sender)
 }
 
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
@@ -109,12 +223,15 @@ fn request_id(message: &ControlMessage) -> &str {
 }
 
 async fn handle_control_stream(
-    connection: quinn::Connection,
+    connection: Connection,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     credential_hashes: Arc<Vec<[u8; 32]>>,
     session_id: Arc<String>,
     authenticated: Arc<AtomicBool>,
+    sessions: SessionMap,
+    ip_allocator: Arc<IpAllocator>,
+    client_address: Arc<tokio::sync::Mutex<Option<Ipv4Addr>>>,
 ) -> Result<()> {
     let bytes = match tokio::time::timeout(
         Duration::from_secs(15),
@@ -165,8 +282,18 @@ async fn handle_control_stream(
                 connection.close(0u32.into(), b"authentication failed");
                 bail!("client authentication failed or repeated");
             }
+            let address = match ip_allocator.allocate() {
+                Ok(address) => address,
+                Err(error) => {
+                    connection.close(0u32.into(), b"address pool exhausted");
+                    return Err(error);
+                }
+            };
+            sessions.write().await.insert(address, connection.clone());
+            *client_address.lock().await = Some(address);
             ControlMessage::ServerHello {
                 session_id: session_id.as_ref().clone(),
+                client_ipv4: address.to_string(),
                 request_id,
             }
         }
@@ -201,28 +328,49 @@ async fn handle_control_stream(
 enum DatagramDisposition {
     Unauthenticated,
     Invalid,
-    Accepted(usize),
+    UnsupportedAddressFamily,
+    SourceMismatch,
+    Accepted(Vec<u8>),
 }
 
-fn inspect_datagram(bytes: &[u8], authenticated: bool) -> DatagramDisposition {
-    if !authenticated {
+fn inspect_datagram(
+    bytes: &[u8],
+    authenticated: bool,
+    expected_source: Option<Ipv4Addr>,
+) -> DatagramDisposition {
+    if !authenticated || expected_source.is_none() {
         return DatagramDisposition::Unauthenticated;
     }
     match DataDatagram::decode(bytes) {
-        Ok(packet) => DatagramDisposition::Accepted(packet.packet.len()),
+        Ok(datagram) if datagram.kind == IpPacketKind::Ipv4 => {
+            let Some((source, _)) = ipv4_endpoints(&datagram.packet) else {
+                return DatagramDisposition::Invalid;
+            };
+            if Some(source) != expected_source {
+                return DatagramDisposition::SourceMismatch;
+            }
+            DatagramDisposition::Accepted(datagram.packet)
+        }
+        Ok(_) => DatagramDisposition::UnsupportedAddressFamily,
         Err(_) => DatagramDisposition::Invalid,
     }
 }
 
 async fn handle_connection(
-    connection: quinn::Connection,
+    connection: Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
     metrics: Arc<DatagramMetrics>,
+    tun_sender: Option<mpsc::Sender<Vec<u8>>>,
+    sessions: SessionMap,
+    ip_allocator: Arc<IpAllocator>,
 ) -> Result<()> {
     let session_id = Arc::new(new_session_id());
     let authenticated = Arc::new(AtomicBool::new(false));
+    let client_address = Arc::new(tokio::sync::Mutex::new(None));
     let mut valid_datagrams = 0u64;
     let mut rejected_datagrams = 0u64;
+    let mut forwarded_datagrams = 0u64;
+    let mut queue_drops = 0u64;
 
     loop {
         tokio::select! {
@@ -235,6 +383,9 @@ async fn handle_connection(
                 let hashes = Arc::clone(&credential_hashes);
                 let session = Arc::clone(&session_id);
                 let auth = Arc::clone(&authenticated);
+                let session_map = Arc::clone(&sessions);
+                let allocator = Arc::clone(&ip_allocator);
+                let assigned_address = Arc::clone(&client_address);
                 tokio::spawn(async move {
                     if let Err(error) = handle_control_stream(
                         connection.clone(),
@@ -243,6 +394,9 @@ async fn handle_connection(
                         hashes,
                         session,
                         auth,
+                        session_map,
+                        allocator,
+                        assigned_address,
                     ).await {
                         eprintln!("control stream rejected: {error:#}");
                     }
@@ -253,15 +407,27 @@ async fn handle_connection(
                     Ok(bytes) => bytes,
                     Err(_) => break,
                 };
-
-                match inspect_datagram(bytes.as_ref(), authenticated.load(Ordering::Acquire)) {
-                    DatagramDisposition::Accepted(_packet_len) => {
-                        // The validated packet boundary is ready for the future TUN adapter.
-                        // Until a server TUN is configured, packets are deliberately not routed.
+                let expected_source = *client_address.lock().await;
+                match inspect_datagram(
+                    bytes.as_ref(),
+                    authenticated.load(Ordering::Acquire),
+                    expected_source,
+                ) {
+                    DatagramDisposition::Accepted(packet) => {
                         valid_datagrams = valid_datagrams.saturating_add(1);
                         metrics.accepted.fetch_add(1, Ordering::Relaxed);
+                        if let Some(sender) = &tun_sender {
+                            if sender.try_send(packet).is_ok() {
+                                forwarded_datagrams = forwarded_datagrams.saturating_add(1);
+                            } else {
+                                queue_drops = queue_drops.saturating_add(1);
+                            }
+                        }
                     }
-                    DatagramDisposition::Unauthenticated | DatagramDisposition::Invalid => {
+                    DatagramDisposition::Unauthenticated
+                    | DatagramDisposition::Invalid
+                    | DatagramDisposition::UnsupportedAddressFamily
+                    | DatagramDisposition::SourceMismatch => {
                         rejected_datagrams = rejected_datagrams.saturating_add(1);
                         metrics.rejected.fetch_add(1, Ordering::Relaxed);
                     }
@@ -270,10 +436,19 @@ async fn handle_connection(
         }
     }
 
+    if let Some(address) = client_address.lock().await.take() {
+        sessions.write().await.remove(&address);
+        ip_allocator.release(address);
+    }
+
     if valid_datagrams > 0 || rejected_datagrams > 0 {
         eprintln!(
-            "connection datagrams: accepted={}, rejected={}, forwarding=disabled",
-            valid_datagrams, rejected_datagrams
+            "connection packets: valid={}, rejected={}, forwarded_to_tun={}, queue_drops={}, tun_enabled={}",
+            valid_datagrams,
+            rejected_datagrams,
+            forwarded_datagrams,
+            queue_drops,
+            tun_sender.is_some()
         );
     }
     Ok(())
@@ -294,6 +469,24 @@ async fn main() -> Result<()> {
         .parse()
         .context("invalid GHULAKH_QUIC_BIND address")?;
 
+    let sessions: SessionMap = Arc::new(RwLock::new(HashMap::new()));
+    let ip_allocator = Arc::new(IpAllocator::new());
+    let tun_enabled = env::var("GHULAKH_TUN_ENABLED")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
+    let tun_sender = if tun_enabled {
+        let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
+        let sender = start_tun(&name, Arc::clone(&sessions))?;
+        eprintln!(
+            "TUN interface {} is active at {}/24 with MTU {}",
+            name, TUN_SERVER_IPV4, TUN_MTU
+        );
+        Some(sender)
+    } else {
+        eprintln!("TUN forwarding is disabled; authenticated packets are validated and dropped");
+        None
+    };
+
     let server_config = load_server_config(&cert_path, &key_path)?;
     let endpoint = Endpoint::server(server_config, bind)?;
 
@@ -308,12 +501,24 @@ async fn main() -> Result<()> {
             .await
             .context("connection limit semaphore closed")?;
         let hashes = Arc::clone(&credential_hashes);
+        let metrics = Arc::new(DatagramMetrics::default());
+        let sender = tun_sender.clone();
+        let session_map = Arc::clone(&sessions);
+        let allocator = Arc::clone(&ip_allocator);
         tokio::spawn(async move {
             let _permit = permit;
             match connecting.await {
                 Ok(connection) => {
-                    let metrics = Arc::new(DatagramMetrics::default());
-                    if let Err(error) = handle_connection(connection, hashes, metrics).await {
+                    if let Err(error) = handle_connection(
+                        connection,
+                        hashes,
+                        metrics,
+                        sender,
+                        session_map,
+                        allocator,
+                    )
+                    .await
+                    {
                         eprintln!("connection closed: {error:#}");
                     }
                 }
@@ -330,10 +535,12 @@ mod tests {
     use super::*;
     use ghulakh_protocol::{DataDatagram, IpPacketKind};
 
-    fn valid_ipv4_datagram() -> Vec<u8> {
+    fn valid_ipv4_datagram(source: Ipv4Addr) -> Vec<u8> {
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
         packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
         DataDatagram {
             kind: IpPacketKind::Ipv4,
             packet,
@@ -345,23 +552,47 @@ mod tests {
     #[test]
     fn datagrams_are_rejected_before_authentication() {
         assert_eq!(
-            inspect_datagram(&valid_ipv4_datagram(), false),
+            inspect_datagram(
+                &valid_ipv4_datagram(Ipv4Addr::new(10, 77, 0, 2)),
+                false,
+                None
+            ),
             DatagramDisposition::Unauthenticated
         );
     }
 
     #[test]
-    fn authenticated_valid_datagram_is_accepted_for_tun_adapter() {
+    fn authenticated_datagram_requires_assigned_source_address() {
+        let assigned = Ipv4Addr::new(10, 77, 0, 2);
         assert_eq!(
-            inspect_datagram(&valid_ipv4_datagram(), true),
-            DatagramDisposition::Accepted(20)
+            inspect_datagram(&valid_ipv4_datagram(assigned), true, Some(assigned)),
+            DatagramDisposition::Accepted({
+                let mut packet = vec![0u8; 20];
+                packet[0] = 0x45;
+                packet[2..4].copy_from_slice(&20u16.to_be_bytes());
+                packet[12..16].copy_from_slice(&assigned.octets());
+                packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
+                packet
+            })
+        );
+    }
+
+    #[test]
+    fn spoofed_source_address_is_rejected() {
+        assert_eq!(
+            inspect_datagram(
+                &valid_ipv4_datagram(Ipv4Addr::new(10, 77, 0, 9)),
+                true,
+                Some(Ipv4Addr::new(10, 77, 0, 2))
+            ),
+            DatagramDisposition::SourceMismatch
         );
     }
 
     #[test]
     fn malformed_datagram_is_rejected() {
         assert_eq!(
-            inspect_datagram(b"not-a-packet", true),
+            inspect_datagram(b"not-a-packet", true, Some(Ipv4Addr::new(10, 77, 0, 2))),
             DatagramDisposition::Invalid
         );
     }
@@ -401,14 +632,28 @@ mod tests {
         let hashes = Arc::new(load_credential_hashes(credential_path.to_str().unwrap()).unwrap());
         let metrics = Arc::new(DatagramMetrics::default());
         let server_metrics = Arc::clone(&metrics);
+        let sessions: SessionMap = Arc::new(RwLock::new(HashMap::new()));
+        let server_sessions = Arc::clone(&sessions);
+        let allocator = Arc::new(IpAllocator::new());
+        let server_allocator = Arc::clone(&allocator);
 
         let server_task = tokio::spawn(async move {
             while let Some(connecting) = server_endpoint.accept().await {
                 let hashes = Arc::clone(&hashes);
                 let metrics = Arc::clone(&server_metrics);
+                let sessions = Arc::clone(&server_sessions);
+                let allocator = Arc::clone(&server_allocator);
                 tokio::spawn(async move {
                     if let Ok(connection) = connecting.await {
-                        let _ = handle_connection(connection, hashes, metrics).await;
+                        let _ = handle_connection(
+                            connection,
+                            hashes,
+                            metrics,
+                            None,
+                            sessions,
+                            allocator,
+                        )
+                        .await;
                     }
                 });
             }
@@ -424,15 +669,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(client.session_id().len(), 32);
+        assert_eq!(client.client_ipv4(), "10.77.0.2");
         client.ping().await.unwrap();
 
-        let mut ipv4 = vec![0u8; 20];
-        ipv4[0] = 0x45;
-        ipv4[2..4].copy_from_slice(&20u16.to_be_bytes());
+        let assigned: Ipv4Addr = client.client_ipv4().parse().unwrap();
         client
             .send_packet(&DataDatagram {
                 kind: IpPacketKind::Ipv4,
-                packet: ipv4,
+                packet: {
+                    let mut ipv4 = vec![0u8; 20];
+                    ipv4[0] = 0x45;
+                    ipv4[2..4].copy_from_slice(&20u16.to_be_bytes());
+                    ipv4[12..16].copy_from_slice(&assigned.octets());
+                    ipv4[16..20].copy_from_slice(&[1, 1, 1, 1]);
+                    ipv4
+                },
             })
             .await
             .unwrap();
