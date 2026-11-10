@@ -23,7 +23,7 @@ pub enum TurnRequestError {
     EmptyPeerList,
     #[error("peer addresses must use one address family")]
     MixedPeerFamilies,
-    #[error("channel number is outside the TURN range 0x4000..=0x7fff")]
+    #[error("channel number is outside the TURN range 0x4000..=0x4fff")]
     InvalidChannelNumber,
     #[error("invalid STUN attribute length or value")]
     InvalidAttribute,
