@@ -8,7 +8,8 @@ use ghulakh_protocol::stun::{
     verify_message_integrity, verify_message_integrity_sha256,
     StunClass, StunMessage, StunAttribute,
     ATTR_USERNAME, ATTR_REALM, ATTR_NONCE, ATTR_MESSAGE_INTEGRITY,
-    ATTR_MESSAGE_INTEGRITY_SHA256,
+    ATTR_MESSAGE_INTEGRITY_SHA256, ATTR_PASSWORD_ALGORITHM,
+    ATTR_PASSWORD_ALGORITHMS, ATTR_FINGERPRINT,
 };
 use ghulakh_protocol::turn_password::{
     parse_password_algorithms, password_algorithm_attribute, PasswordAlgorithmId,
@@ -139,6 +140,8 @@ impl TurnAuthContext {
                 attribute.kind,
                 ATTR_USERNAME | ATTR_REALM | ATTR_NONCE
                     | ATTR_MESSAGE_INTEGRITY | ATTR_MESSAGE_INTEGRITY_SHA256
+                    | ATTR_PASSWORD_ALGORITHM | ATTR_PASSWORD_ALGORITHMS
+                    | ATTR_FINGERPRINT
             ))
         {
             return Err(TurnAuthError::InvalidRequest);
@@ -307,9 +310,11 @@ mod tests {
     #[test]
     fn rejects_duplicate_or_preexisting_auth_attributes() {
         let auth = context(TurnIntegrityAlgorithm::Sha1);
-        let mut invalid = request();
-        invalid.attributes.push(StunAttribute { kind: ATTR_USERNAME, value: b"forged".to_vec() });
-        assert!(matches!(auth.sign_request(&invalid), Err(TurnAuthError::InvalidRequest)));
+        for kind in [ATTR_USERNAME, ATTR_PASSWORD_ALGORITHM, ATTR_PASSWORD_ALGORITHMS, ATTR_FINGERPRINT] {
+            let mut invalid = request();
+            invalid.attributes.push(StunAttribute { kind, value: vec![0; 4] });
+            assert!(matches!(auth.sign_request(&invalid), Err(TurnAuthError::InvalidRequest)));
+        }
     }
 
     #[test]
