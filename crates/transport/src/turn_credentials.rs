@@ -371,6 +371,15 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_debug_redacts_query_parameters() {
+        let endpoint = parse_turn_uri("turn:relay.example:3478?transport=udp&secret=not-logged")
+            .unwrap();
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("not-logged"));
+        assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
     fn rejects_invalid_transport_components_and_hosts() {
         for uri in [
             "turn:relay.example?transport=udp&transport=tcp",
