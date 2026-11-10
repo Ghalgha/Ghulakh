@@ -97,7 +97,12 @@ class GhulakhVpnService : VpnService() {
                     val buffer = ByteArray(MAX_IP_PACKET_SIZE)
                     while (running.get()) {
                         val length = input.read(buffer)
-                        if (length < 0) break
+                        if (length < 0) {
+                            if (running.get()) {
+                                throw IllegalStateException("Android TUN input reached end-of-stream")
+                            }
+                            break
+                        }
                         if (length > 0 && !transport.nativeSendPacket(handle, buffer.copyOf(length))) {
                             throw IllegalStateException("QUIC-транспорт отклонил IP-пакет")
                         }
@@ -110,7 +115,8 @@ class GhulakhVpnService : VpnService() {
             val tunWriter = Thread({
                 try {
                     while (running.get()) {
-                        val packet = transport.nativeReceivePacket(handle) ?: continue
+                        val packet = transport.nativeReceivePacket(handle)
+                            ?: throw IllegalStateException("QUIC transport returned an empty packet result")
                         output.write(packet)
                         output.flush()
                     }
