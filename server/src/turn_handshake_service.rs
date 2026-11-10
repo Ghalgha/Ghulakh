@@ -6,7 +6,7 @@
 //! Noise state a second time.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{Ipv4Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
@@ -68,6 +68,7 @@ pub struct TurnHandshakeService {
     pending: HashMap<(SocketAddr, [u8; 16]), PendingHandshake>,
     peer_rates: HashMap<SocketAddr, PeerRate>,
     next_client_host: u32,
+    allocated_ips: HashSet<Ipv4Addr>,
 }
 
 impl TurnHandshakeService {
@@ -89,6 +90,7 @@ impl TurnHandshakeService {
             pending: HashMap::with_capacity(MAX_ACTIVE_HANDSHAKES),
             peer_rates: HashMap::with_capacity(MAX_RATE_PEERS),
             next_client_host: 2,
+            allocated_ips: HashSet::new(),
         })
     }
 
@@ -152,10 +154,8 @@ impl TurnHandshakeService {
                     self.pending.remove(&key);
                     bail!("client handshake expired");
                 }
-                ensure!(self.next_client_host < 65_534, "server virtual IPv4 pool exhausted");
-                let host = self.next_client_host;
                 let config = TurnSessionConfig {
-                    virtual_ipv4: Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8),
+                    virtual_ipv4: self.allocate_virtual_ipv4()?,
                     mtu: SERVER_TUN_MTU,
                 };
                 let config_payload = config.encode()
@@ -187,7 +187,7 @@ impl TurnHandshakeService {
                     now,
                 ).context("cache ServerAck before sending")?;
                 self.pending.remove(&key);
-                self.next_client_host += 1;
+                self.allocated_ips.insert(config.virtual_ipv4);
 
                 Ok(TurnHandshakeOutcome::Response {
                     response,
@@ -234,6 +234,26 @@ impl TurnHandshakeService {
         self.peer_rates.retain(|_, rate| {
             now.saturating_duration_since(rate.window_started) < RATE_WINDOW
         });
+    }
+
+    fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
+        for _ in 0..65_532 {
+            let host = self.next_client_host;
+            self.next_client_host = if host >= 65_533 { 2 } else { host + 1 };
+            let address = Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8);
+            if !self.allocated_ips.contains(&address) {
+                return Ok(address);
+            }
+        }
+        bail!("server virtual IPv4 pool exhausted");
+    }
+
+    pub fn release_virtual_ipv4(&mut self, address: Ipv4Addr) -> bool {
+        self.allocated_ips.remove(&address)
+    }
+
+    pub fn allocated_virtual_ipv4_count(&self) -> usize {
+        self.allocated_ips.len()
     }
 
     pub fn active_handshakes(&self) -> usize {
