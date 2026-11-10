@@ -4,86 +4,68 @@
 
 ## Целевая функция
 
-Единственный транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC не является целевым транспортом и пока остаётся действующим экспериментальным путём в Android и сервере; до завершения замены приложение нельзя считать реализующим целевую функцию.
+Единственный транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC не является целевым транспортом и пока остаётся действующим экспериментальным путём в Android и сервере. До полной замены QUIC целевым TURN-путём приложение нельзя считать реализующим основную функцию.
 
-## Реализованные строительные блоки
+## Реализованные компоненты
 
 - STUN codec: framing, method/class, TLV attributes, XOR address IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1/SHA-256, FINGERPRINT CRC-32.
-- Ограниченный parser TURN challenge 401/438, включая PASSWORD-ALGORITHMS.
-- Парсер TURN credentials и URI: ограничение размеров, redaction Debug, Zeroizing для username/password.
-- TURN transaction manager: случайные transaction ID, matching по endpoint/method/id, retransmission policy и лимит незавершённых запросов.
+- Parser TURN challenge 401/438, включая PASSWORD-ALGORITHMS.
+- Parser TURN credentials и TURN/TURNS URI с ограничениями размеров и redaction секретов.
+- TURN transaction manager: случайные transaction ID, matching по endpoint/method/id, ограниченные retransmissions и лимит незавершённых запросов.
 - Конструкторы Allocate/Refresh/CreatePermission/ChannelBind и parser успешных Allocate/Refresh ответов.
 - Allocation state machine с lease, expiry, refresh deadline и обработкой неудачного refresh.
-- Peer registry для permissions и channel bindings с expiry и cooldown; он обновляется только после подтверждённого вызывающим кодом успеха.
-- UDP adapter для STUN/TURN datagrams и ChannelData; умеет принимать заранее созданный и защищённый Android socket.
-- Bounded TURN socket actor, подключённый к control driver: единственный reader/writer task, классификация STUN control / ChannelData / Data indications, bounded control/data queues, drop-newest для перегруженной data queue и счётчики malformed/drop. Исходные wire bytes сохраняются для проверки MESSAGE-INTEGRITY; data receiver можно передать отдельному dataplane consumer.
-- Асинхронный TURN control driver: сериализованные Allocate/Refresh/CreatePermission/ChannelBind transactions, точное сопоставление endpoint/method/transaction ID, ограниченные retransmissions/timeouts, проверка MESSAGE-INTEGRITY для успешных ответов и authenticated 438, возврат начального 401 challenge вызывающему слою, обновление allocation/peer state только после успешной проверки.
-- TURN session supervisor: автоматическая обработка первоначального 401 и проверенного 438 с ограничением до трёх повторов; отдельный TurnAuthProvider; автоматическое планирование Refresh allocation, CreatePermission и ChannelBind до их сроков истечения; единый владелец control driver. Peer registry предоставляет точные deadlines для permission/channel.
-- TURN auth context для USERNAME/REALM/NONCE и MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 с явно переданным integrity key; отдельные параметры password derivation и HMAC, сохранение и точное эхо PASSWORD-ALGORITHMS из challenge, выбор PASSWORD-ALGORITHM по RFC 8656: SHA-256 при совместном предложении MD5/SHA-256 и поддержке обоих клиентом; иначе — первый поддерживаемый алгоритм в порядке серверного списка и проверка согласованности выбранного алгоритма. Ключ не выводится из VK credentials автоматически.
-- Codec защищённых кадров поверх TURN ChannelData с AEAD и защитой от replay.
-- Client TURN dataplane: bounded actor data queue, relay source check, ChannelData/channel validation, directional AEAD/replay validation и bounded TUN-facing packet queues.
-- Server TURN gateway core: session-id lookup, exact relay source tuple pinning, channel validation, AEAD/replay validation, inner IPv4 source binding, bounded TUN-ingress queue и downlink на зарегистрированный relay tuple. Core доступен как server module, но пока не подключён к production TUN/session lifecycle.
-- Client TURN dataplane: actor data queue → проверка relay source → ChannelData/channel validation → AEAD/session/direction/replay validation → IP packet; uplink проходит обратный путь через directional AEAD и actor send queue. Supervisor/driver передают actor handle и data receiver без передачи socket ownership.
+- Peer registry для permissions и channel bindings с expiry/cooldown.
+- UDP adapter, включая принятие заранее созданного Android socket после `VpnService.protect(fd)`.
+- Единый bounded TURN socket actor: один reader/writer task, раздельные control/data queues, классификация STUN/ChannelData/Data indications, явная drop-newest политика для data overload, сохранение исходных wire bytes и счётчики malformed/drop.
+- TURN control driver поверх socket actor: Allocate/Refresh/CreatePermission/ChannelBind, matching ответов, MESSAGE-INTEGRITY verification, retransmission/timeout и изменение allocation/peer state только после принятого успешного ответа.
+- TURN session supervisor: обработка 401/438 с ограниченными повторами, внешний `TurnAuthProvider`, планирование Refresh allocation и обновления permission/channel binding.
+- TURN auth context с раздельными профилями password derivation и MESSAGE-INTEGRITY HMAC. Integrity key передаётся извне; автоматическое получение/выведение из VK credentials не реализовано.
+- Protected frame codec: directional AEAD, session ID, sequence numbers и replay window.
+- Client TURN dataplane: bounded uplink/downlink queues, проверка relay source, ChannelData/channel, AEAD, session/direction/replay и формата IP-пакета. Доступен через `TurnSessionSupervisor::take_data_plane_parts()`.
+- Server TURN gateway core: lookup по session ID, проверка зарегистрированного relay source tuple и channel, AEAD/replay, проверка внутреннего IPv4 source, bounded TUN-ingress queue и downlink на зарегистрированный relay tuple. Реализован в `server/src/turn_gateway.rs`, но пока не включён в production server TUN/session lifecycle.
+- Mock UDP tests для TURN socket actor, client dataplane и server gateway; отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и ChannelData forwarding.
 - Экспериментальный QUIC-клиент/сервер, серверный TUN и Android VpnService/JNI-интеграция.
 
-Эти компоненты являются библиотечными примитивами и моделями состояния. Их наличие не означает, что сетевой TURN driver или сквозной туннель уже собран.
+## Что эти компоненты пока не означают
 
-## Зафиксированное проектирование
+Наличие codec, driver, supervisor и gateway core не означает, что сквозной VPN уже работает. Client dataplane и server gateway протестированы на loopback/mock UDP, но не связаны между собой через реальную TURN allocation, production TUN и единый authenticated session manager.
 
-- `docs/TURN_DRIVER_DESIGN.md` описывает ownership единственной allocation, сериализацию control state, обработку 401/438, границу credential/auth providers, data path, bounded queues и критерии готовности вертикального среза.
-- Выбран bounded Tokio queue + один control owner для первого среза. SPSC/ring buffer и packet pool остаются кандидатами для benchmark, а не преждевременной оптимизацией.
+## Оставшиеся критические задачи
 
-## Что ещё не реализовано в целевом пути
+- Проверить текущий VK Calls credential flow и реализовать получение/обновление временных TURN credentials.
+- Подтвердить фактический VK TURN authentication profile: normalization, password derivation, MESSAGE-INTEGRITY key и поведение при rotation. Нельзя предполагать совместимость профиля только по RFC или fixture-тестам.
+- Реализовать отдельный аутентифицированный обмен directional tunnel session keys. TURN username/password не являются ключами шифрования IP-трафика.
+- Создать единый session manager, который связывает authenticated identity, назначенный virtual IPv4, TURN relayed address, channel binding и frame keys.
+- Подключить server gateway к production server TUN reader/writer и проверенному session manager.
+- Подключить client dataplane к Android TUN worker/JNI и protected TURN UDP socket.
+- Удалить QUIC из production runtime Android/server после завершения и тестирования TURN vertical slice; fallback с TURN на QUIC не добавлять.
+- Завершить сквозные mock-тесты Allocate → Permission → ChannelBind → protected uplink → gateway → protected downlink → TUN.
+- Проверить MTU/fragmentation, IPv4/IPv6 scope, queue saturation, packet loss, replay, source spoofing, reconnect и credential rotation.
+- Провести fuzz/property tests, сетевую симуляцию, нагрузочные и энергопотребительские измерения. Физические Android/VPS испытания — ближе к завершению проекта.
 
-- Реальное получение и обновление VK Calls credentials.
-- Подтверждённый профиль TURN-аутентификации VK: нормализация строк, derivation MESSAGE-INTEGRITY key и обработка credential rotation. Auth context пока требует явно предоставленный ключ; реальный обмен VK не подтверждён.
-- Автоматическое получение/обновление VK Calls credentials и ограниченный reconnect. Supervisor уже обрабатывает TURN 401/438 и обслуживает сроки allocation/permission/channel, но credential rotation и восстановление после потери allocation ещё не реализованы. Socket actor уже подключён к TurnClientDriver: отдельный reader принимает data параллельно с control-транзакциями, а control responses проходят matching и MESSAGE-INTEGRITY verification в driver. Client dataplane реализован как библиотечный packet pump и покрыт mock-UDP тестом, но ещё не подключён к Android TUN. Server gateway, session-key handshake и credential rotation ещё не реализованы.
-- Согласование и аутентифицированный обмен отдельными tunnel session keys. TURN credentials не являются ключами шифрования IP-трафика.
-- Интеграция server gateway core с production TUN, session manager и проверенным источником relay tuple.
-- Привязка server-side tunnel session к назначенному IP и проверенной relay-сессии.
-- Android TUN worker, работающий через TURN driver и socket, защищённый VpnService.protect().
-- Полный mock-relay integration test: Allocate → Permission/ChannelBind → uplink → gateway → downlink → TUN.
-- Проверки MTU/fragmentation, очередей, backpressure, reconnect, потерь и длительной стабильности.
+## Архитектурные решения
 
-## Архитектурные решения по производительности и устойчивости
+- Первая реализация — одна TURN allocation на устройство.
+- Control plane и dataplane разделены; один socket actor владеет UDP socket и выполняет единственный receive loop.
+- Все межзадачные очереди ограничены. Data overload использует явный drop-newest; control queue применяет backpressure.
+- Packet pool/SPSC/ring buffer не вводить до benchmark: сравнивать throughput, loss, queue drops, CPU wakeups и память.
+- Все retry ограничены и классифицируются по TURN/STUN error code.
+- Сервер отвечает на фактический relay source tuple, заранее закреплённый при authenticated session registration. Не использовать адрес, извлечённый из незашифрованного IP payload.
+- Key agreement, TURN credentials и TURN long-term authentication — отдельные security boundaries.
 
-- Начинать с одного allocation на устройство. Многоканальность добавлять только после корректного single-allocation пути и измерений.
-- Использовать bounded queues с явной политикой backpressure; не допускать неограниченного роста памяти.
-- Предпочитать event-driven wakeups вместо периодического polling там, где это не ухудшает latency.
-- Не фиксировать крупные socket buffers без измерений: сравнивать throughput, packet loss, queue drops, CPU wakeups и память.
-- Сохранять один выделенный receive loop на allocation и сериализовать критические TURN control transitions. Single-reader socket actor интегрирован с driver; data receiver должен быть передан dataplane consumer через take_data_receiver().
-- Любой retry должен быть ограниченным, классифицировать STUN-код/тип ошибки и не повторять бесконечно заведомо невалидные credentials.
-- Не включать дополнительные allocations и дублирование пакетов до измерения энергопотребления и влияния на порядок TCP-потоков.
+## Проверенные mock-сценарии
 
-## Статус действующего приложения
+- Socket actor маршрутизирует STUN control и ChannelData/Data indications через один reader.
+- Client dataplane передаёт защищённый IP packet через actor и принимает ответ с независимыми directional keys.
+- Server gateway проверяет relay source tuple, channel, AEAD, inner source IP и replay; downlink отправляется на зарегистрированный relay tuple.
+- Mock control-plane test моделирует Allocate, CreatePermission, ChannelBind, Refresh и двусторонний ChannelData forwarding.
 
-- Android VpnService сейчас вызывает QUIC JNI API.
-- JNI bridge создаёт QUIC client и отправляет IP packets через QUIC DATAGRAM.
-- Серверный основной путь принимает QUIC connections и маршрутизирует IP-пакеты через серверный TUN.
-- TURN UDP adapter и TURN data codec пока не подключены к Android TUN или серверному gateway.
-- Автоматического fallback с TURN на QUIC в целевой архитектуре быть не должно.
+Mock-тесты не являются испытаниями VK Calls и не доказывают совместимость с реальными VK TURN relay credentials, allocation policy или network behavior.
 
-Следовательно, текущая сборка не реализует основную функцию проекта и не должна позиционироваться как готовый TURN VPN.
+## Производительность и сравнительный аудит
 
-## Mock TURN control-plane
-
-Добавлен integration test `crates/transport/tests/mock_turn_relay.rs`: UDP mock relay обрабатывает Allocate (UDP), CreatePermission, ChannelBind и Refresh, затем пересылает ChannelData в gateway и инкапсулирует ответ gateway обратно в ChannelData клиенту. Проверяется порядок Permission перед ChannelBind, успешный uplink/downlink и Refresh с lifetime=0. Это тестовая модель control/data plane, а не production TURN server: в ней намеренно отсутствуют long-term authentication/MESSAGE-INTEGRITY, реальные relay allocations, permission expiry timers, TCP/TLS и взаимодействие с VK Calls.
-
-## Текущий тестовый срез
-
-Добавлен loopback UDP test в `crates/transport/src/turn_data.rs`: клиентский защищённый ChannelData проходит через relay forwarder к gateway, gateway проверяет ClientToServer AEAD frame и отвечает на наблюдаемый relay source tuple, relay возвращает ServerToClient frame клиенту. Проверяются оба направления и раздельные directional keys. Это тест data-plane forwarding; он не эмулирует TURN Allocate/Refresh/CreatePermission/ChannelBind и не доказывает совместимость с VK Calls.
-
-## План ближайшего вертикального среза
-
-1. Подключить data receiver к TurnDataReceiver и реализовать проверяемый client-side uplink/downlink до TUN.
-2. Реализовать локальный mock TURN relay с Allocate/Refresh/Permission/ChannelBind и relay forwarding.
-3. Реализовать клиентский driver поверх существующих STUN/TURN примитивов; каждое состояние менять только после matching и MESSAGE-INTEGRITY verification.
-4. Реализовать серверный UDP gateway с аутентификацией кадров и обратной отправкой на relay source tuple.
-5. Пройти mock end-to-end путь с тестовыми IP-пакетами и проверкой replay, source spoofing, malformed frames, queue saturation и reconnect.
-6. Подключить Android VpnService/JNI к TURN driver; убрать QUIC из production path и оставить его только вне целевой сборки либо удалить.
-7. Выполнить fuzz/property tests, сетевую симуляцию и нагрузочные/энергетические измерения.
-8. Физические Android/VPS испытания провести ближе к завершению проекта.
+При выборе реализации сравниваются одинаковые функции, владение ресурсами, количество копирований, очереди, wakeups, retry policy и устойчивость к перегрузке. Для первого среза выбраны bounded Tokio queues и один socket actor: это упрощает ownership и backpressure. Более сложные packet pools и ring buffers остаются кандидатами на последующие измерения; заявлений о превосходстве по скорости или энергопотреблению без benchmark не делается.
 
 ## Лицензирование
 
-До переноса исходного кода необходимо завершить проверку лицензий каждого источника. Технические решения могут быть сравнены, но наличие исходного кода в публичном репозитории само по себе не даёт права копировать его реализацию.
+До переноса исходного кода требуется завершить проверку лицензий каждого источника. Сравнение архитектурных решений не даёт автоматического права копировать исходную реализацию.
