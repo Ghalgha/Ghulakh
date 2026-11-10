@@ -212,6 +212,19 @@ impl TurnHandshakeServer {
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), TurnHandshakeError> {
+        self.receive_client_finish_with_path_context_builder(
+            datagram,
+            verify_credential,
+            |_| Ok(acknowledgement_payload.to_vec()),
+        )
+    }
+
+    pub fn receive_client_finish_with_path_context_builder(
+        &mut self,
+        datagram: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        build_acknowledgement: impl FnOnce(Option<TurnPathContext>) -> Result<Vec<u8>, SessionHandshakeError>,
+    ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         if envelope.phase != HandshakePhase::ClientFinish {
             return Err(TurnHandshakeError::UnexpectedPhase);
@@ -221,10 +234,10 @@ impl TurnHandshakeServer {
         }
         let noise = self.noise.take().ok_or(TurnHandshakeError::InvalidState)?;
         let (acknowledgement, keys, path_context) =
-            noise.receive_client_finish_with_path_context(
+            noise.receive_client_finish_with_path_context_builder(
                 &envelope.payload,
                 verify_credential,
-                acknowledgement_payload,
+                build_acknowledgement,
             )?;
         let response = HandshakeEnvelope {
             phase: HandshakePhase::ServerAck,
