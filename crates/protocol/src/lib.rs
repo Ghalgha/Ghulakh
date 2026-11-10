@@ -5,6 +5,8 @@ use thiserror::Error;
 
 pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_CONTROL_BODY: usize = 16 * 1024;
+pub const MAX_REQUEST_ID_LEN: usize = 128;
+pub const MAX_CREDENTIAL_LEN: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ControlEnvelope {
@@ -42,6 +44,10 @@ pub enum ProtocolError {
     BodyTooLarge,
     #[error("empty request identifier")]
     EmptyRequestId,
+    #[error("request identifier exceeds maximum length")]
+    RequestIdTooLong,
+    #[error("credential length is invalid")]
+    InvalidCredentialLength,
 }
 
 pub fn validate_envelope(
@@ -57,6 +63,18 @@ pub fn validate_envelope(
     }
     if request_id.trim().is_empty() {
         return Err(ProtocolError::EmptyRequestId);
+    }
+    if request_id.len() > MAX_REQUEST_ID_LEN {
+        return Err(ProtocolError::RequestIdTooLong);
+    }
+    Ok(())
+}
+
+pub fn validate_message(message: &ControlMessage) -> Result<(), ProtocolError> {
+    if let ControlMessage::ClientHello { credential, .. } = message {
+        if credential.is_empty() || credential.len() > MAX_CREDENTIAL_LEN {
+            return Err(ProtocolError::InvalidCredentialLength);
+        }
     }
     Ok(())
 }
@@ -87,6 +105,24 @@ mod tests {
             validate_envelope(1, 1, "  "),
             Err(ProtocolError::EmptyRequestId)
         );
+    }
+
+    #[test]
+    fn rejects_long_request_id() {
+        let request_id = "x".repeat(MAX_REQUEST_ID_LEN + 1);
+        assert_eq!(
+            validate_envelope(1, 1, &request_id),
+            Err(ProtocolError::RequestIdTooLong)
+        );
+    }
+
+    #[test]
+    fn rejects_empty_credential() {
+        let message = ControlMessage::ClientHello {
+            credential: String::new(),
+            request_id: "r1".into(),
+        };
+        assert_eq!(validate_message(&message), Err(ProtocolError::InvalidCredentialLength));
     }
 
     #[test]
