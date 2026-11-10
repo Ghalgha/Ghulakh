@@ -19,6 +19,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Resolve dependencies
+        run: cargo generate-lockfile
+      - uses: taiki-e/install-action@cargo-audit
+      - name: Audit dependencies
+        run: cargo audit
       - name: Format
         run: cargo fmt --all
       - name: Verify formatting
