@@ -82,6 +82,14 @@ impl TurnClientDriver {
         self.peers.as_ref()
     }
 
+    /// Expire local permission and channel state using the caller's monotonic clock.
+    pub fn expire_peer_state(
+        &mut self,
+        now: Instant,
+    ) -> Option<ghulakh_protocol::turn_peer::ExpiredPeerState> {
+        self.peers.as_mut().map(|registry| registry.expire(now))
+    }
+
     /// Perform an unauthenticated Allocate. A 401 challenge is returned to the
     /// caller; retry by calling allocate again with the newly built auth context.
     pub async fn allocate(
