@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use ghulakh_protocol::{validate_envelope, ControlEnvelope, ControlMessage, PROTOCOL_VERSION, MAX_CONTROL_BODY};
 use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
     env,
