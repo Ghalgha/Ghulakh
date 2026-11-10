@@ -434,8 +434,9 @@ mod tests {
         assert_eq!(config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
         assert_eq!(config.mtu, 1100);
 
+        let session_id = keys.session_id();
         let (mut client_tx, _) = keys.into_client_codecs();
-        let session = gateway.sessions.read().await.get(&keys.session_id()).cloned();
+        let session = gateway.sessions.read().await.get(&session_id).cloned();
         let session = session.unwrap();
         let previous_activity = *session.last_activity.lock().unwrap();
         let keepalive = client_tx.seal(ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD).unwrap();
