@@ -19,6 +19,7 @@ use anyhow::{Context, Result};
 use ghulakh_protocol::{
     stun::{StunClass, StunMessage, METHOD_DATA},
     turn_channel_data::decode_channel_data,
+    handshake_datagram::HandshakeEnvelope,
 };
 use tokio::{
     sync::{mpsc, oneshot},
@@ -29,6 +30,7 @@ use crate::turn_udp::{TurnUdpSocket, MAX_UDP_DATAGRAM_SIZE};
 const COMMAND_CAPACITY: usize = 32;
 const CONTROL_CAPACITY: usize = 32;
 const DATA_CAPACITY: usize = 128;
+const HANDSHAKE_CAPACITY: usize = 16;
 
 #[derive(Debug)]
 pub enum TurnInbound {
@@ -94,6 +96,8 @@ pub struct TurnSocketActorReceivers {
     pub control: mpsc::Receiver<TurnInbound>,
     /// Bounded data stream; overload drops the newest data datagram.
     pub data: mpsc::Receiver<TurnInbound>,
+    /// Bounded handshake stream, isolated from STUN control and IP dataplane.
+    pub handshake: mpsc::Receiver<TurnInbound>,
 }
 
 pub struct TurnSocketActor;
@@ -105,6 +109,7 @@ impl TurnSocketActor {
         let (command_tx, mut command_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (control_tx, control_rx) = mpsc::channel(CONTROL_CAPACITY);
         let (data_tx, data_rx) = mpsc::channel(DATA_CAPACITY);
+        let (handshake_tx, handshake_rx) = mpsc::channel(HANDSHAKE_CAPACITY);
         let counters = Arc::new(Counters::default());
         let task_counters = Arc::clone(&counters);
 
@@ -126,6 +131,20 @@ impl TurnSocketActor {
                             Err(_) => break,
                         };
                         let packet = &buffer[..length];
+                        if packet.starts_with(b"GHHS") {
+                            if HandshakeEnvelope::decode(packet).is_err() {
+                                task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            let event = TurnInbound::Handshake {
+                                datagram: packet.to_vec(),
+                                source,
+                            };
+                            if handshake_tx.send(event).await.is_err() {
+                                break;
+                            }
+                            continue;
+                        }
                         if packet.first().is_some_and(|byte| byte & 0xC0 == 0x40) {
                             if decode_channel_data(packet).is_err() {
                                 task_counters.malformed_datagrams.fetch_add(1, Ordering::Relaxed);
@@ -176,6 +195,7 @@ impl TurnSocketActor {
             TurnSocketActorReceivers {
                 control: control_rx,
                 data: data_rx,
+                handshake: handshake_rx,
             },
         )
     }
@@ -261,4 +281,42 @@ mod tests {
         assert_eq!(handle.stats().malformed_datagrams, 1);
         relay_task.await.unwrap();
     }
+    #[tokio::test]
+    async fn routes_valid_handshake_envelopes_to_isolated_queue() {
+        let (handle, mut receivers, relay, relay_addr) = pair().await;
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 256];
+            let (_, source) = relay.recv_from(&mut buffer).await.unwrap();
+            let envelope = HandshakeEnvelope {
+                phase: ghulakh_protocol::handshake_datagram::HandshakePhase::ServerResponse,
+                handshake_id: [7; 16],
+                payload: b"noise-message-2".to_vec(),
+            }.encode().unwrap();
+            relay.send_to(&envelope, source).await.unwrap();
+        });
+        handle.send_datagram(vec![1]).await.unwrap();
+        let event = timeout(Duration::from_secs(2), receivers.handshake.recv())
+            .await.unwrap().unwrap();
+        assert!(matches!(event, TurnInbound::Handshake { datagram, source }
+            if HandshakeEnvelope::decode(&datagram).is_ok() && source == relay_addr));
+        assert!(receivers.control.try_recv().is_err());
+        assert!(receivers.data.try_recv().is_err());
+        relay_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_handshake_envelope_is_counted_and_dropped() {
+        let (handle, mut receivers, relay, _) = pair().await;
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 64];
+            let (_, source) = relay.recv_from(&mut buffer).await.unwrap();
+            relay.send_to(b"GHHS-invalid", source).await.unwrap();
+        });
+        handle.send_datagram(vec![1]).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(receivers.handshake.try_recv().is_err());
+        assert_eq!(handle.stats().malformed_datagrams, 1);
+        relay_task.await.unwrap();
+    }
+
 }
