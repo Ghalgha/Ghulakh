@@ -84,7 +84,7 @@ class GhulakhVpnService : VpnService() {
                 .establish()
                 ?: throw IllegalStateException("Android не создал TUN-интерфейс")
             tunnelDescriptor = descriptor
-            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 отключён")
+            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 блокируется")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -100,8 +100,15 @@ class GhulakhVpnService : VpnService() {
                             }
                             break
                         }
-                        if (length > 0 && !transport.nativeTurnSendPacket(handle, buffer.copyOf(length))) {
-                            throw IllegalStateException("TURN-транспорт отклонил IP-пакет")
+                        if (length > 0) {
+                            val version = (buffer[0].toInt() and 0xff) ushr 4
+                            if (version == 6) continue
+                            if (version != 4) {
+                                throw IllegalStateException("Android TUN returned an unsupported IP version")
+                            }
+                            if (!transport.nativeTurnSendPacket(handle, buffer.copyOf(length))) {
+                                throw IllegalStateException("TURN-транспорт отклонил IPv4-пакет")
+                            }
                         }
                     }
                 } catch (error: Throwable) {
