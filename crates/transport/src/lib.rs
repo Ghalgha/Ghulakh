@@ -35,6 +35,7 @@ pub struct QuicClient {
     session_id: String,
     client_ipv4: String,
     tunnel_enabled: bool,
+    forwarding_enabled: bool,
 }
 
 impl QuicClient {
@@ -99,13 +100,19 @@ impl QuicClient {
         )
         .await?;
 
-        let (session_id, client_ipv4, tunnel_enabled) = match response {
+        let (session_id, client_ipv4, tunnel_enabled, forwarding_enabled) = match response {
             ControlMessage::ServerHello {
                 session_id,
                 client_ipv4,
                 tunnel_enabled,
+                forwarding_enabled,
                 request_id: response_id,
-            } if response_id == request_id => (session_id, client_ipv4, tunnel_enabled),
+            } if response_id == request_id => (
+                session_id,
+                client_ipv4,
+                tunnel_enabled,
+                forwarding_enabled,
+            ),
             _ => {
                 connection.close(0u32.into(), b"invalid server authentication response");
                 bail!("server returned an unexpected authentication response");
@@ -131,6 +138,7 @@ impl QuicClient {
             session_id,
             client_ipv4,
             tunnel_enabled,
+            forwarding_enabled,
         })
     }
 
@@ -144,6 +152,10 @@ impl QuicClient {
 
     pub fn tunnel_enabled(&self) -> bool {
         self.tunnel_enabled
+    }
+
+    pub fn forwarding_enabled(&self) -> bool {
+        self.forwarding_enabled
     }
 
     pub fn max_datagram_size(&self) -> Option<usize> {
