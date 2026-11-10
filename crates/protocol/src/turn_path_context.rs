@@ -167,12 +167,12 @@ mod tests {
     #[test]
     fn rejects_empty_and_oversized_credentials() {
         assert_eq!(
-            TurnClientAuthPayload::new(context(0), b""),
-            Err(TurnPathContextError::InvalidCredentialLength)
+            TurnClientAuthPayload::new(context(0), b"").err(),
+            Some(TurnPathContextError::InvalidCredentialLength)
         );
         assert_eq!(
-            TurnClientAuthPayload::new(context(0), &vec![1; MAX_CREDENTIAL_LEN + 1]),
-            Err(TurnPathContextError::InvalidCredentialLength)
+            TurnClientAuthPayload::new(context(0), &vec![1; MAX_CREDENTIAL_LEN + 1]).err(),
+            Some(TurnPathContextError::InvalidCredentialLength)
         );
     }
 
