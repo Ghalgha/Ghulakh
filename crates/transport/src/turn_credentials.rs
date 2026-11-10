@@ -96,8 +96,8 @@ impl TurnCredentials {
             .get("credential")
             .and_then(serde_json::Value::as_str)
             .ok_or(TurnCredentialError::MissingCredential)?;
-        validate_secret(username)?;
-        validate_secret(password)?;
+        validate_secret(username, TurnCredentialError::MissingUsername)?;
+        validate_secret(password, TurnCredentialError::MissingCredential)?;
 
         let urls = turn
             .get("urls")
@@ -165,13 +165,9 @@ pub enum TurnCredentialError {
     InvalidUriComponents,
 }
 
-fn validate_secret(value: &str) -> Result<(), TurnCredentialError> {
+fn validate_secret(value: &str, error: TurnCredentialError) -> Result<(), TurnCredentialError> {
     if value.is_empty() || value.len() > MAX_CREDENTIAL_LEN || value.chars().any(char::is_control) {
-        return Err(if value.len() > MAX_CREDENTIAL_LEN {
-            TurnCredentialError::MissingCredential
-        } else {
-            TurnCredentialError::MissingUsername
-        });
+        return Err(error);
     }
     Ok(())
 }
