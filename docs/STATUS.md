@@ -31,7 +31,7 @@ QUIC не является целевым транспортом. Его runtime
 - JNI-интерфейс Android для подключения, передачи и приёма IP-пакетов, получения виртуального IPv4/MTU и закрытия TURN-сессии.
 - Android VpnService использует TURN runtime, защищает UDP socket через VpnService.protect(fd), настраивает TUN из authenticated session config и передаёт IP-пакеты в native dataplane.
 - Android VkCallsCredentialProvider получает временные credentials через messages.getCallToken, auth.anonymLogin, vchat.startConversation и vchat.getConversationParams; при завершении вызывает vchat.hangupConversation. HTTP использует обычный HTTPS без имитации браузерного TLS fingerprint. VK access token, tunnel credential и pinned Noise key хранятся зашифрованными Android Keystore. Временные TURN credentials заново запрашиваются при каждом подключении.
-- Mock UDP tests покрывают socket actor, client dataplane, server gateway и интегрированный Noise handshake → encrypted session config → session registration → protected uplink. Отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и клиентскую ChannelData forwarding.
+- Mock UDP tests покрывают socket actor, client dataplane, server gateway и интегрированный Noise handshake → encrypted session config → session registration → protected uplink. Full mock TURN tunnel test дополнительно проверяет Allocate/Permission/ChannelBind, authenticated Noise handshake, protected uplink через server TUN, protected downlink до client TUN и Refresh. Эмулятор TURN использует отдельные client-facing и peer-facing UDP sockets, поэтому gateway видит адрес allocation relay, а не адрес TURN control endpoint. Отдельный mock control-plane test покрывает Allocate/Permission/ChannelBind/Refresh и клиентскую ChannelData forwarding.
 
 ## Ограничения текущего этапа
 
@@ -49,7 +49,7 @@ Android пока требует вручную предоставить поль
 - Подтвердить реальный TURN auth profile: username/password normalization, MD5 long-term key, HMAC-SHA1, vendor attribute 0x8021, PASSWORD-ALGORITHMS и credential rotation. Не включать непроверенные атрибуты/алгоритмы на основании одного исходного варианта.
 - Добавить надёжное получение/обновление VK access token (OAuth UI) без scraping cookies и обхода CAPTCHA.
 - Проверить lifecycle server TUN, IP forwarding/NAT/firewall и session cleanup под нагрузкой.
-- Завершить end-to-end mock test полного пути через mock TURN relay: Allocate → Permission → ChannelBind → Noise handshake → protected uplink → server TUN → protected downlink → client TUN.
+- Расширить end-to-end mock TURN tunnel test сценариями потерь/переупорядочивания, повторной передачи, переполнения очередей и ротации credentials.
 - Добавить fuzz/property tests, network loss/reorder simulation, queue saturation, MTU/fragmentation, replay, source spoofing, reconnect и credential rotation.
 - Провести security review Noise/session protocol; библиотека Snow не заявляется как формально аудированная.
 - Удалить остаточный QUIC runtime и код после успешного TURN vertical slice и тестирования; TURN→QUIC fallback не добавлять.
