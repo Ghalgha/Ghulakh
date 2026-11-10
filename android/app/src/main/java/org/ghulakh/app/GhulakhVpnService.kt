@@ -13,8 +13,7 @@ import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Bridges Android's packet TUN to the native QUIC transport.
- * The native layer protects the underlying UDP socket before VPN routes are installed.
+ * Bridges Android's packet TUN to the protected VK Calls TURN dataplane.
  */
 class GhulakhVpnService : VpnService() {
     private val running = AtomicBoolean(false)
@@ -57,27 +56,22 @@ class GhulakhVpnService : VpnService() {
             val transport = NativeTransport()
             nativeTransport = transport
 
-            val handle = transport.nativeConnect(
+            val handle = transport.nativeTurnConnect(
                 this,
                 profile.host,
                 profile.port,
-                profile.serverName,
-                profile.rootCertificateDer,
+                profile.turnCredentialsJson,
+                decodeHexKey(profile.pinnedServerPublicKeyHex),
                 profile.credential,
             )
             sessionHandle = handle
 
-            if (!transport.nativeTunnelEnabled(handle)) {
-                throw IllegalStateException("На сервере выключен IPv4 TUN; маршрутизация запрещена")
-            }
-            if (!transport.nativeForwardingEnabled(handle)) {
-                throw IllegalStateException("Серверный IP forwarding/NAT/firewall не подтверждён администратором")
-            }
-
-            val clientAddress = transport.nativeClientIpv4(handle)
+            val clientAddress = transport.nativeTurnClientIpv4(handle)
+            val mtu = transport.nativeTurnMtu(handle)
+            require(mtu in MIN_TUN_MTU..MAX_TUN_MTU) { "Сервер передал недопустимый MTU" }
             val descriptor = Builder()
                 .setSession("Ghulakh")
-                .setMtu(TUN_MTU)
+                .setMtu(mtu)
                 .addAddress(clientAddress, 32)
                 .addAddress("fd77::2", 128)
                 .addRoute("0.0.0.0", 0)
@@ -87,7 +81,7 @@ class GhulakhVpnService : VpnService() {
                 .establish()
                 ?: throw IllegalStateException("Android не создал TUN-интерфейс")
             tunnelDescriptor = descriptor
-            updateNotification("VPN активен · IPv4 через QUIC · IPv6 отключён")
+            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 отключён")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -103,8 +97,8 @@ class GhulakhVpnService : VpnService() {
                             }
                             break
                         }
-                        if (length > 0 && !transport.nativeSendPacket(handle, buffer.copyOf(length))) {
-                            throw IllegalStateException("QUIC-транспорт отклонил IP-пакет")
+                        if (length > 0 && !transport.nativeTurnSendPacket(handle, buffer.copyOf(length))) {
+                            throw IllegalStateException("TURN-транспорт отклонил IP-пакет")
                         }
                     }
                 } catch (error: Throwable) {
@@ -115,13 +109,13 @@ class GhulakhVpnService : VpnService() {
             val tunWriter = Thread({
                 try {
                     while (running.get()) {
-                        val packet = transport.nativeReceivePacket(handle)
-                            ?: throw IllegalStateException("QUIC transport returned an empty packet result")
+                        val packet = transport.nativeTurnReceivePacket(handle)
+                            ?: throw IllegalStateException("TURN transport returned an empty packet result")
                         output.write(packet)
                         output.flush()
                     }
                 } catch (error: Throwable) {
-                    if (running.get()) failSession("Ошибка приёма QUIC-пакета", error)
+                    if (running.get()) failSession("Ошибка приёма TURN-пакета", error)
                 }
             }, "ghulakh-tun-writer")
 
@@ -137,6 +131,15 @@ class GhulakhVpnService : VpnService() {
         } finally {
             stopTunnel()
             stopSelf()
+        }
+    }
+
+    private fun decodeHexKey(value: String): ByteArray {
+        require(value.length == 64 && value.all { it in "0123456789abcdefABCDEF" }) {
+            "Pinned Noise key must contain exactly 64 hexadecimal characters"
+        }
+        return ByteArray(32) { index ->
+            value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
         }
     }
 
@@ -160,9 +163,9 @@ class GhulakhVpnService : VpnService() {
         sessionHandle = 0L
         if (handle != 0L) {
             try {
-                nativeTransport?.nativeClose(handle)
+                nativeTransport?.nativeTurnClose(handle)
             } catch (error: Throwable) {
-                Log.w(TAG, "Failed to close native QUIC session", error)
+                Log.w(TAG, "Failed to close native TURN session", error)
             }
         }
         nativeTransport = null
@@ -214,7 +217,8 @@ class GhulakhVpnService : VpnService() {
         private const val TAG = "GhulakhVpn"
         private const val CHANNEL_ID = "ghulakh_vpn"
         private const val NOTIFICATION_ID = 7701
-        private const val TUN_MTU = 1100
+        private const val MIN_TUN_MTU = 576
+        private const val MAX_TUN_MTU = 1500
         private const val MAX_IP_PACKET_SIZE = 65_535
     }
 }
