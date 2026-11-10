@@ -21,7 +21,7 @@
 
 - VK Calls credential provider.
 - TURN client/allocation manager в Ghulakh.
-- TURN long-term credential/key derivation и сетевой auth flow; bounded parser challenge 401/438 реализован, но не подключён к transaction manager.
+- TURN long-term credential/key derivation и сетевой auth flow; bounded parser challenge 401/438 и request/response builders реализованы, но auth flow и allocation state machine пока не связаны.
 - TURN UDP/TCP/TLS data path между Android-клиентом и серверным gateway.
 - Вертикальный end-to-end срез одного allocation и обратного relay-пути.
 - Защищённый data framing для целевого TURN-пути.
@@ -91,3 +91,8 @@ README всех шести указанных пользователем исх�
 - Реализованы STUN framing/address/integrity primitives и bounded parser challenge 401/438.
 - Добавлен UDP transaction manager с криптографически случайными transaction ID, строгим response matching, лимитом 10 outstanding requests на endpoint, retransmission schedule по RFC 8489 и детерминированными тестами.
 - Пока отсутствуют socket integration, TURN credential acquisition/key derivation, Allocate/Refresh/CreatePermission/ChannelBind lifecycle и relay data plane. Профиль аутентификации VK Calls не считается подтверждённым.
+
+
+### TURN request layer
+
+Добавлены независимые конструкторы Allocate/Refresh/CreatePermission/ChannelBind и структурный разбор успешных Allocate/Refresh ответов. Они не подменяют проверку подлинности: вызывающий код обязан проверить совпадение transaction ID/method/source endpoint и MESSAGE-INTEGRITY до применения результата. VK Calls credential provider и конкретный алгоритм MESSAGE-INTEGRITY остаются не подтверждены.
