@@ -100,12 +100,12 @@ fn make_protected_socket(_env: &mut JNIEnv, service: &JObject) -> Result<Option<
 
 fn connect_impl(
     env: &mut JNIEnv,
-    vpn_service: JObject<'local'>,
+    vpn_service: JObject,
     host: JString,
     port: jint,
     server_name: JString,
     root_certificate_der: JByteArray,
-    credential: JString<'local>,
+    credential: JString,
 ) -> Result<jlong> {
     let host = env.get_string(&host)?.to_string_lossy().into_owned();
     let server_name = env
