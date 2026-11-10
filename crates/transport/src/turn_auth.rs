@@ -306,6 +306,44 @@ mod tests {
     }
 
     #[test]
+    fn derives_legacy_vk_calls_key_from_username_realm_password() {
+        let challenge = TurnChallenge {
+            code: 401,
+            realm: "turn.example".to_owned(),
+            nonce: "nonce-value".to_owned(),
+            password_algorithms: None,
+        };
+        let auth = TurnAuthContext::new_vk_calls_legacy(
+            "temporary-user".to_owned(),
+            "temporary-password",
+            challenge,
+        ).unwrap();
+        let wire = auth.sign_request(&request()).unwrap();
+        let mut digest = Md5::new();
+        digest.update(b"temporary-user:turn.example:temporary-password");
+        let key = digest.finalize();
+        assert!(verify_message_integrity(&wire, &key).is_ok());
+    }
+
+    #[test]
+    fn refuses_unverified_password_algorithm_offer_for_legacy_vk_profile() {
+        let challenge = TurnChallenge {
+            code: 401,
+            realm: "turn.example".to_owned(),
+            nonce: "nonce-value".to_owned(),
+            password_algorithms: Some(vec![0, 1, 0, 0]),
+        };
+        assert!(matches!(
+            TurnAuthContext::new_vk_calls_legacy(
+                "temporary-user".to_owned(),
+                "temporary-password",
+                challenge,
+            ),
+            Err(TurnAuthError::InvalidPasswordProfile)
+        ));
+    }
+
+    #[test]
     fn signs_and_verifies_sha1_response() {
         let auth = context(TurnIntegrityAlgorithm::Sha1);
         let wire = auth.sign_request(&request()).unwrap();
