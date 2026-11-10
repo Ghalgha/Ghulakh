@@ -64,10 +64,12 @@ sudo nft add rule ip ghulakh_nat postrouting ip saddr 10.77.0.0/16 oifname "$WAN
 
 export GHULAKH_TUN_ENABLED=true
 export GHULAKH_TUN_NAME=ghulakh0
+# Установить true только после проверки sysctl и всех firewall/NAT правил.
+export GHULAKH_FORWARDING_ENABLED=true
 cargo run --release -p ghulakh-server
 ```
 
-Команды nftables приведены как минимальный пример для выделенного хоста. Для существующей системы объедините правила с действующей политикой firewall, сохраните их в постоянной конфигурации и проверьте обратный трафик. Сервер не включает IP forwarding и не меняет firewall автоматически.
+Команды nftables приведены как минимальный пример для выделенного хоста. Для существующей системы объедините правила с действующей политикой firewall, сохраните их в постоянной конфигурации и проверьте обратный трафик. Сервер не включает IP forwarding и не меняет firewall автоматически. Даже при созданном TUN Android-клиент откажется активировать маршруты, пока администратор явно не установит `GHULAKH_FORWARDING_ENABLED=true`. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности firewall.
 
 ## Ограничения
 
