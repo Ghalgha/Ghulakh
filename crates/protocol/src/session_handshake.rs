@@ -70,6 +70,30 @@ impl NoiseServerKeyPair {
     pub fn public_key(&self) -> &[u8] {
         &self.public_key
     }
+
+    /// Export only for writing to a protected server key store.
+    pub fn private_key_bytes(&self) -> &[u8] {
+        &self.private_key
+    }
+
+    /// Load a persisted key pair and verify that its public/private halves match.
+    pub fn from_bytes(
+        private_key: Vec<u8>,
+        public_key: Vec<u8>,
+    ) -> Result<Self, SessionHandshakeError> {
+        if private_key.len() != 32 || public_key.len() != 32 {
+            return Err(SessionHandshakeError::ServerIdentityMismatch);
+        }
+        let keypair = Self {
+            private_key: Zeroizing::new(private_key),
+            public_key,
+        };
+        let (client, first) = NoiseClientHandshake::new(keypair.public_key(), b"key-pair-check")?;
+        let mut server = NoiseServerHandshake::new(&keypair)?;
+        let second = server.receive_client_hello(&first)?;
+        client.receive_server_hello(&second)?;
+        Ok(keypair)
+    }
 }
 
 /// Client-side Noise XX state. The credential is only sent in the encrypted
@@ -358,6 +382,22 @@ mod tests {
         assert_eq!(server_rx.open(&uplink).unwrap(), packet.encode().unwrap());
         let downlink = server_tx.seal(&packet.encode().unwrap()).unwrap();
         assert_eq!(client_rx.open(&downlink).unwrap(), packet.encode().unwrap());
+    }
+
+    #[test]
+    fn persisted_server_key_pair_is_validated() {
+        let generated = NoiseServerKeyPair::generate().unwrap();
+        let loaded = NoiseServerKeyPair::from_bytes(
+            generated.private_key_bytes().to_vec(),
+            generated.public_key().to_vec(),
+        ).unwrap();
+        assert_eq!(loaded.public_key(), generated.public_key());
+
+        let wrong = NoiseServerKeyPair::generate().unwrap();
+        assert!(NoiseServerKeyPair::from_bytes(
+            generated.private_key_bytes().to_vec(),
+            wrong.public_key().to_vec(),
+        ).is_err());
     }
 
     #[test]
