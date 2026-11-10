@@ -285,12 +285,6 @@ mod tests {
         DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
     }
 
-    fn client_uplink() -> (FrameSealer, FrameOpener) {
-        (
-            FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        )
-    }
 
     #[tokio::test]
     async fn routes_authenticated_uplink_to_tun_and_downlink_to_relay_tuple() {
