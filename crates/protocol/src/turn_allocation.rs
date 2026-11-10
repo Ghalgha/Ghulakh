@@ -6,7 +6,6 @@
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::stun::{METHOD_ALLOCATE, METHOD_REFRESH};
 use crate::turn_request::TurnSuccess;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +67,7 @@ impl AllocationManager {
     }
 
     pub fn begin_allocate(&mut self, transaction_id: [u8; 12]) -> Result<(), AllocationError> {
-        if !matches!(self.state, AllocationState::Idle) {
+        if !matches!(&self.state, AllocationState::Idle) {
             return Err(AllocationError::InvalidState);
         }
         self.state = AllocationState::AwaitingAllocate { transaction_id };
