@@ -169,15 +169,26 @@ pub fn verify_message_integrity(input: &[u8], key: &[u8]) -> Result<(), StunErro
     let message = StunMessage::decode(input)?;
     let positions: Vec<usize> = message.attributes.iter().enumerate()
         .filter_map(|(i, a)| (a.kind == ATTR_MESSAGE_INTEGRITY).then_some(i)).collect();
-    if positions.len() != 1 || positions[0] + 1 != message.attributes.len() || key.is_empty() {
+    if positions.len() != 1 || key.is_empty() {
         return Err(StunError::InvalidIntegrityLayout);
     }
     let attr_index = positions[0];
+    let trailing = &message.attributes[attr_index + 1..];
+    if !(trailing.is_empty() || (trailing.len() == 1 && trailing[0].kind == ATTR_FINGERPRINT)) {
+        return Err(StunError::InvalidIntegrityLayout);
+    }
     let offset = HEADER_LEN + message.attributes[..attr_index].iter()
         .map(|a| 4 + ((a.value.len() + 3) & !3)).sum::<usize>();
-    if input.len() != offset + 24 { return Err(StunError::InvalidIntegrityLayout); }
+    let expected_len = offset + 24 + if trailing.is_empty() { 0 } else { 8 };
+    if input.len() != expected_len { return Err(StunError::InvalidIntegrityLayout); }
+    // RFC 5389 requires the header length used for HMAC to end at MESSAGE-INTEGRITY,
+    // even when a FINGERPRINT attribute follows it in the wire message.
+    let mut signed_prefix = input[..offset].to_vec();
+    let integrity_end_body_len = u16::try_from(offset + 24 - HEADER_LEN)
+        .map_err(|_| StunError::InvalidLength)?;
+    signed_prefix[2..4].copy_from_slice(&integrity_end_body_len.to_be_bytes());
     let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
-    mac.update(&input[..offset]);
+    mac.update(&signed_prefix);
     mac.verify_slice(&input[offset + 4..offset + 24]).map_err(|_| StunError::IntegrityMismatch)
 }
 
@@ -268,6 +279,9 @@ mod tests {
         let m = sample(StunClass::Request);
         let encoded = append_message_integrity(&m, b"test-key").unwrap();
         verify_message_integrity(&encoded, b"test-key").unwrap();
+        let with_fingerprint = append_fingerprint(&encoded).unwrap();
+        verify_message_integrity(&with_fingerprint, b"test-key").unwrap();
+        verify_fingerprint(&with_fingerprint).unwrap();
         let mut tampered = encoded; tampered[HEADER_LEN] ^= 1;
         assert_eq!(verify_message_integrity(&tampered, b"test-key"), Err(StunError::IntegrityMismatch));
     }
