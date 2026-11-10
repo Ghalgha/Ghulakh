@@ -83,7 +83,7 @@ Android пока требует вручную предоставить поль
 
 ## Многопутевая архитектура
 
-**Статус: протокольная основа начата; production multipath ещё не реализован.** Реализован формат защищённых метаданных path group и handshake API, но клиентский runtime по-прежнему поднимает одну allocation, а gateway пока регистрирует один session ID на виртуальный IPv4.
+**Статус: протокол и серверная регистрация multipath реализованы частично; production multipath ещё не завершён.** Реализованы защищённые group/path metadata, server-side shared IPv4 lease и несколько relay sessions на один адрес с flow-stable downlink. Клиентский runtime по-прежнему поднимает одну allocation; клиентский path group, uplink scheduler и group reorder sequence ещё не реализованы.
 
 Обязательное требование — несколько независимых TURN allocations в одной логической VPN-сессии. Дополнительные OS threads поверх одной allocation не устраняют ограничение скорости отдельного relay-потока. Каждая allocation становится отдельным transport path с собственным UDP socket, permission, ChannelBind, Noise keys и очередями; tunnel group использует один виртуальный IPv4 и один TUN.
 
