@@ -28,6 +28,14 @@ impl TurnDataSender {
         encode_channel_data(self.channel_number, &protected)
             .context("encode TURN ChannelData")
     }
+
+    /// Encode an authenticated keepalive without injecting a synthetic IP packet.
+    pub fn encode_keepalive(&mut self) -> Result<Vec<u8>> {
+        let protected = self.sealer.seal(ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD)
+            .context("protect TURN session keepalive")?;
+        encode_channel_data(self.channel_number, &protected)
+            .context("encode TURN keepalive ChannelData")
+    }
 }
 
 pub struct TurnDataReceiver {
