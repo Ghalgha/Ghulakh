@@ -1,30 +1,29 @@
 use anyhow::{bail, Context, Result};
-use ghulakh_protocol::{validate_envelope, ControlEnvelope, ControlMessage, PROTOCOL_VERSION, MAX_CONTROL_BODY};
+use ghulakh_protocol::{
+    validate_envelope, ControlEnvelope, ControlMessage, MAX_CONTROL_BODY, PROTOCOL_VERSION,
+};
 use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
-use std::{
-    env,
-    fs::File,
-    io::BufReader,
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{env, fs::File, io::BufReader, net::SocketAddr, sync::Arc};
 use subtle::ConstantTimeEq;
 
 const ALPN: &[u8] = b"ghulakh/1";
 
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
-    let mut cert_reader = BufReader::new(File::open(cert_path)
-        .with_context(|| format!("open certificate file: {cert_path}"))?);
+    let mut cert_reader = BufReader::new(
+        File::open(cert_path)
+            .with_context(|| format!("open certificate file: {cert_path}"))?,
+    );
     let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
         .collect::<std::result::Result<Vec<_>, _>>()
         .context("parse certificate chain")?;
     anyhow::ensure!(!cert_chain.is_empty(), "certificate chain is empty");
 
-    let mut key_reader = BufReader::new(File::open(key_path)
-        .with_context(|| format!("open private key file: {key_path}"))?);
+    let mut key_reader = BufReader::new(
+        File::open(key_path).with_context(|| format!("open private key file: {key_path}"))?,
+    );
     let key = rustls_pemfile::private_key(&mut key_reader)
         .context("parse private key")?
         .context("private key file contains no supported key")?;
@@ -35,8 +34,8 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
         .context("configure TLS certificate")?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
 
-    let crypto = QuicServerConfig::try_from(tls)
-        .context("configure QUIC TLS crypto")?;
+    let crypto =
+        QuicServerConfig::try_from(tls).context("configure QUIC TLS crypto")?;
     Ok(quinn::ServerConfig::with_crypto(Arc::new(crypto)))
 }
 
@@ -89,19 +88,25 @@ async fn handle_connection(
             bail!("control message exceeds limit");
         }
 
-        let envelope: ControlEnvelope = serde_json::from_slice(&bytes)
-            .context("decode control envelope")?;
+        let envelope: ControlEnvelope =
+            serde_json::from_slice(&bytes).context("decode control envelope")?;
         validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
             .context("validate control envelope")?;
 
         let response = match envelope.message {
-            ControlMessage::ClientHello { credential, request_id } => {
+            ControlMessage::ClientHello {
+                credential,
+                request_id,
+            } => {
                 if !credential_matches(&credential, credential_hashes.as_slice()) {
                     let _ = connection.close(0u32.into(), b"authentication failed");
                     bail!("client authentication failed");
                 }
                 authenticated = true;
-                ControlMessage::ServerHello { session_id: session_id.clone(), request_id }
+                ControlMessage::ServerHello {
+                    session_id: session_id.clone(),
+                    request_id,
+                }
             }
             ControlMessage::Ping { request_id } if authenticated => {
                 ControlMessage::Pong { request_id }
@@ -123,7 +128,9 @@ async fn handle_connection(
         if encoded.len() > MAX_CONTROL_BODY {
             bail!("internal response exceeds protocol limit");
         }
-        send.write_all(&encoded).await.context("write control response")?;
+        send.write_all(&encoded)
+            .await
+            .context("write control response")?;
         send.finish().context("finish control response stream")?;
     }
 
@@ -134,7 +141,10 @@ async fn handle_connection(
 async fn main() -> Result<()> {
     let token = env::var("GHULAKH_BOOTSTRAP_TOKEN")
         .context("set GHULAKH_BOOTSTRAP_TOKEN to a unique high-entropy credential")?;
-    anyhow::ensure!(token.len() >= 32, "credential must contain at least 32 characters");
+    anyhow::ensure!(
+        token.len() >= 32,
+        "credential must contain at least 32 characters"
+    );
 
     let cert_path = env::var("GHULAKH_TLS_CERT")
         .context("set GHULAKH_TLS_CERT to a PEM certificate chain")?;
@@ -150,7 +160,10 @@ async fn main() -> Result<()> {
     let server_config = load_server_config(&cert_path, &key_path)?;
     let endpoint = Endpoint::server(server_config, bind)?;
 
-    eprintln!("ГӀулакх QUIC control endpoint listening on {}", endpoint.local_addr()?);
+    eprintln!(
+        "ГӀулакх QUIC control endpoint listening on {}",
+        endpoint.local_addr()?
+    );
     while let Some(connecting) = endpoint.accept().await {
         let hashes = Arc::clone(&credential_hashes);
         tokio::spawn(async move {
