@@ -11,7 +11,10 @@ use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
 use zeroize::{Zeroize, Zeroizing};
 use std::net::Ipv4Addr;
 
-use crate::secure_frame::{FrameDirection, FrameOpener, FrameSealer};
+use crate::{
+    secure_frame::{FrameDirection, FrameOpener, FrameSealer},
+    turn_path_context::{TurnClientAuthPayload, TurnPathContext},
+};
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 const PROTOCOL_PROLOGUE: &[u8] = b"Ghulakh TURN tunnel session v1";
@@ -208,10 +211,35 @@ impl NoiseClientHandshake {
         pinned_server_key: &[u8],
         credential: &[u8],
     ) -> Result<(Self, Vec<u8>), SessionHandshakeError> {
+        if credential.is_empty() || credential.len() > MAX_CREDENTIAL_SIZE {
+            return Err(SessionHandshakeError::InvalidCredential);
+        }
+        Self::new_with_encoded_credential(
+            pinned_server_key,
+            Zeroizing::new(credential.to_vec()),
+        )
+    }
+
+    pub fn new_with_path_context(
+        pinned_server_key: &[u8],
+        credential: &[u8],
+        context: TurnPathContext,
+    ) -> Result<(Self, Vec<u8>), SessionHandshakeError> {
+        let payload = TurnClientAuthPayload::new(context, credential)
+            .map_err(|_| SessionHandshakeError::InvalidCredential)?
+            .encode()
+            .map_err(|_| SessionHandshakeError::InvalidCredential)?;
+        Self::new_with_encoded_credential(pinned_server_key, payload)
+    }
+
+    fn new_with_encoded_credential(
+        pinned_server_key: &[u8],
+        credential: Zeroizing<Vec<u8>>,
+    ) -> Result<(Self, Vec<u8>), SessionHandshakeError> {
         if pinned_server_key.len() != 32 {
             return Err(SessionHandshakeError::ServerIdentityMismatch);
         }
-        if credential.is_empty() || credential.len() > MAX_CREDENTIAL_SIZE {
+        if credential.is_empty() || credential.len() > MAX_HANDSHAKE_MESSAGE - 64 {
             return Err(SessionHandshakeError::InvalidCredential);
         }
 
@@ -233,7 +261,7 @@ impl NoiseClientHandshake {
             Self {
                 state: Some(state),
                 pinned_server_key: pinned_server_key.to_vec(),
-                credential: Zeroizing::new(credential.to_vec()),
+                credential,
             },
             message[..length].to_vec(),
         ))
@@ -315,24 +343,51 @@ impl NoiseServerHandshake {
     }
 
     pub fn receive_client_finish_with_payload(
-        mut self,
+        self,
         message: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys), SessionHandshakeError> {
+        let (ack, keys, _) = self.receive_client_finish_with_path_context(
+            message,
+            verify_credential,
+            acknowledgement_payload,
+        )?;
+        Ok((ack, keys))
+    }
+
+    pub fn receive_client_finish_with_path_context(
+        mut self,
+        message: &[u8],
+        verify_credential: impl FnOnce(&[u8]) -> bool,
+        acknowledgement_payload: &[u8],
+    ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), SessionHandshakeError> {
         if message.len() > MAX_HANDSHAKE_MESSAGE
             || AUTH_ACCEPTED.len() + acknowledgement_payload.len() > MAX_HANDSHAKE_MESSAGE
         {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
         let mut state = self.state.take().ok_or(SessionHandshakeError::InvalidState)?;
-        let mut credential = Zeroizing::new([0u8; MAX_HANDSHAKE_MESSAGE]);
-        let length = state.read_message(message, credential.as_mut())
+        let mut plaintext = Zeroizing::new([0u8; MAX_HANDSHAKE_MESSAGE]);
+        let length = state.read_message(message, plaintext.as_mut())
             .map_err(noise_error)?;
-        if length == 0 || length > MAX_CREDENTIAL_SIZE {
+        if length == 0 || length > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::InvalidCredential);
         }
-        if !verify_credential(&credential[..length]) {
+
+        let (credential, path_context) = if plaintext[..length].starts_with(b"GHMP") {
+            let payload = TurnClientAuthPayload::decode(&plaintext[..length])
+                .map_err(|_| SessionHandshakeError::InvalidCredential)?;
+            let context = payload.context;
+            let credential = Zeroizing::new(payload.credential().to_vec());
+            (credential, Some(context))
+        } else {
+            if length > MAX_CREDENTIAL_SIZE {
+                return Err(SessionHandshakeError::InvalidCredential);
+            }
+            (Zeroizing::new(plaintext[..length].to_vec()), None)
+        };
+        if !verify_credential(&credential) {
             return Err(SessionHandshakeError::CredentialRejected);
         }
 
@@ -342,9 +397,9 @@ impl NoiseServerHandshake {
         let mut acknowledgement_plaintext = Vec::with_capacity(AUTH_ACCEPTED.len() + acknowledgement_payload.len());
         acknowledgement_plaintext.extend_from_slice(AUTH_ACCEPTED);
         acknowledgement_plaintext.extend_from_slice(acknowledgement_payload);
-        let length = transport.write_message(&acknowledgement_plaintext, &mut acknowledgement)
+        let ack_length = transport.write_message(&acknowledgement_plaintext, &mut acknowledgement)
             .map_err(noise_error)?;
-        Ok((acknowledgement[..length].to_vec(), keys))
+        Ok((acknowledgement[..ack_length].to_vec(), keys, path_context))
     }
 }
 
