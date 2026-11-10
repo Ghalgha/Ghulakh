@@ -44,12 +44,14 @@ pub enum TurnInbound {
 pub struct TurnSocketActorStats {
     pub malformed_datagrams: u64,
     pub dropped_data_datagrams: u64,
+    pub dropped_handshake_datagrams: u64,
 }
 
 #[derive(Default)]
 struct Counters {
     malformed_datagrams: AtomicU64,
     dropped_data_datagrams: AtomicU64,
+    dropped_handshake_datagrams: AtomicU64,
 }
 
 enum Command {
@@ -87,6 +89,7 @@ impl TurnSocketHandle {
         TurnSocketActorStats {
             malformed_datagrams: self.counters.malformed_datagrams.load(Ordering::Relaxed),
             dropped_data_datagrams: self.counters.dropped_data_datagrams.load(Ordering::Relaxed),
+            dropped_handshake_datagrams: self.counters.dropped_handshake_datagrams.load(Ordering::Relaxed),
         }
     }
 }
@@ -140,8 +143,8 @@ impl TurnSocketActor {
                                 datagram: packet.to_vec(),
                                 source,
                             };
-                            if handshake_tx.send(event).await.is_err() {
-                                break;
+                            if handshake_tx.try_send(event).is_err() {
+                                task_counters.dropped_handshake_datagrams.fetch_add(1, Ordering::Relaxed);
                             }
                             continue;
                         }
@@ -162,8 +165,8 @@ impl TurnSocketActor {
                                     datagram: channel.data.to_vec(),
                                     source,
                                 };
-                                if handshake_tx.send(event).await.is_err() {
-                                    break;
+                                if handshake_tx.try_send(event).is_err() {
+                                    task_counters.dropped_handshake_datagrams.fetch_add(1, Ordering::Relaxed);
                                 }
                             } else {
                                 let event = TurnInbound::Data {
