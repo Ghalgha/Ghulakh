@@ -173,3 +173,8 @@ The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN
 ### TURN tunnel data codec composition
 
 The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This is a codec composition only: it does not own UDP receive dispatch, TURN state transitions, or the authenticated key exchange.
+
+
+### VK Calls credential and URI parser
+
+The transport crate parses the VK Calls `turn_server` response into a short-lived credential object. Username and credential strings use zeroizing storage and are redacted from Debug output. TURN/TURNS URIs are parsed into scheme, host, port, wire transport and preserved query parameters; malformed authorities, duplicate/unsupported transport parameters and invalid hosts are rejected. The UDP socket adapter can resolve and bind a parsed UDP endpoint, while TCP/TLS endpoints remain explicitly unsupported by the current socket driver.
