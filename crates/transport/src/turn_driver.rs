@@ -361,3 +361,48 @@ impl TurnClientDriver {
         }
     }
 }
+
+
+#[cfg(test)]
+mod socket_actor_integration_tests {
+    use super::*;
+    use ghulakh_protocol::stun::{
+        StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM,
+    };
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    #[tokio::test]
+    async fn driver_receives_initial_challenge_through_single_socket_actor() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
+            .await.unwrap();
+        let mut driver = TurnClientDriver::new(socket);
+        assert!(driver.take_data_receiver().is_some());
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 1024];
+            let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let request = StunMessage::decode(&buffer[..length]).unwrap();
+            let challenge = StunMessage {
+                method: request.method,
+                class: StunClass::ErrorResponse,
+                transaction_id: request.transaction_id,
+                attributes: vec![
+                    StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                    StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                    StunAttribute { kind: ATTR_NONCE, value: b"opaque-nonce".to_vec() },
+                ],
+            }.encode().unwrap();
+            relay.send_to(&challenge, source).await.unwrap();
+        });
+
+        let error = driver.allocate(None).await.unwrap_err();
+        let challenge = error.downcast_ref::<TurnDriverError>().unwrap();
+        assert!(matches!(challenge, TurnDriverError::Challenge(value)
+            if value.code == 401 && value.realm == "turn.example.invalid"));
+        relay_task.await.unwrap();
+        driver.close();
+    }
+}
