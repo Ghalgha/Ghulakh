@@ -23,7 +23,7 @@ pub fn flow_hash(packet: &[u8]) -> u64 {
     feed(&packet[12..20]);
     feed(&[packet[9]]);
     let fragment = u16::from_be_bytes([packet[6], packet[7]]);
-    if fragment & 0x1fff != 0 {
+    if fragment & 0x3fff != 0 {
         feed(&packet[4..6]);
     } else if (packet[9] == 6 || packet[9] == 17) && packet.len() >= header_len + 4 {
         feed(&packet[header_len..header_len + 4]);
@@ -38,7 +38,8 @@ mod tests {
     fn ipv4(src: [u8; 4], dst: [u8; 4], proto: u8, source_port: u16, destination_port: u16) -> Vec<u8> {
         let mut packet = vec![0u8; 24];
         packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(packet.len() as u16).to_be_bytes());
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
         packet[9] = proto;
         packet[12..16].copy_from_slice(&src);
         packet[16..20].copy_from_slice(&dst);
