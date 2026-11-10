@@ -518,6 +518,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn downlink_skips_path_without_recent_authenticated_client_traffic() {
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let group_id = [0x74; 16];
+        let session_a = [0x83; 8];
+        let session_b = [0x84; 8];
+
+        for (session_id, relay, path_id, key) in [
+            (session_a, &relay_a, 0u16, [0x51; 32]),
+            (session_b, &relay_b, 1u16, [0x52; 32]),
+        ] {
+            let context = TurnPathContext { group_id, path_id, path_count: 2 };
+            gateway.register_session_with_path(
+                session_id,
+                CLIENT_IP,
+                relay.local_addr().unwrap(),
+                FrameOpener::new(key, [0x61; 4], session_id, FrameDirection::ClientToServer),
+                FrameSealer::new(key, [0x71; 4], session_id, FrameDirection::ServerToClient),
+                Some(context),
+            ).await.unwrap();
+        }
+
+        let stale = gateway.sessions.read().await.get(&session_a).cloned().unwrap();
+        *stale.last_activity.lock().unwrap() =
+            Instant::now() - SESSION_IDLE_TIMEOUT - Duration::from_secs(1);
+
+        let outbound = packet(Ipv4Addr::new(203, 0, 113, 10), CLIENT_IP);
+        gateway.send_downlink(&outbound).await.unwrap();
+
+        let mut buffer = [0u8; 1500];
+        let (length, _) = timeout(Duration::from_secs(1), relay_b.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        assert!(length > 0);
+        assert!(timeout(Duration::from_millis(30), relay_a.recv_from(&mut buffer)).await.is_err());
+    }
+
+    #[tokio::test]
     async fn full_mock_turn_client_to_server_to_client_tunnel() {
         use std::{
             collections::{HashMap, HashSet},
