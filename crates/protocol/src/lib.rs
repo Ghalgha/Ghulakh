@@ -6,6 +6,7 @@ pub mod turn_transaction;
 pub mod turn_request;
 pub mod turn_password;
 pub mod turn_allocation;
+pub mod turn_channel_data;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
