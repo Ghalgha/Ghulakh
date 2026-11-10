@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use ghulakh_protocol::{
-    validate_envelope, validate_message, ControlEnvelope, ControlMessage, MAX_CONTROL_BODY,
-    PROTOCOL_VERSION,
+    validate_envelope, validate_message, ControlEnvelope, ControlMessage, DataDatagram,
+    MAX_CONTROL_BODY, MAX_DATAGRAM_SIZE, PROTOCOL_VERSION,
 };
 use quinn::{crypto::rustls::QuicServerConfig, Endpoint};
 use rand::{rngs::OsRng, RngCore};
@@ -14,6 +14,7 @@ use subtle::ConstantTimeEq;
 use tokio::{io::AsyncWriteExt, sync::Semaphore};
 
 const ALPN: &[u8] = b"ghulakh/1";
+const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
 
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
     let mut cert_reader = BufReader::new(
@@ -43,6 +44,8 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
     let mut transport = quinn::TransportConfig::default();
     transport.max_concurrent_bidi_streams(quinn::VarInt::from_u32(16));
     transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(0));
+    transport.datagram_receive_buffer_size(Some(DATAGRAM_RECEIVE_BUDGET));
+    transport.datagram_send_buffer_size(DATAGRAM_RECEIVE_BUDGET);
     server_config.transport_config(Arc::new(transport));
     Ok(server_config)
 }
@@ -100,76 +103,111 @@ async fn handle_connection(
 ) -> Result<()> {
     let session_id = new_session_id();
     let mut authenticated = false;
+    let mut valid_datagrams = 0u64;
+    let mut rejected_datagrams = 0u64;
 
     loop {
-        let (mut send, mut recv) = match connection.accept_bi().await {
-            Ok(streams) => streams,
-            Err(_) => break,
-        };
+        tokio::select! {
+            incoming = connection.accept_bi() => {
+                let (mut send, mut recv) = match incoming {
+                    Ok(streams) => streams,
+                    Err(_) => break,
+                };
 
-        let bytes = match tokio::time::timeout(
-            Duration::from_secs(15),
-            recv.read_to_end(MAX_CONTROL_BODY),
-        ).await {
-            Ok(Ok(bytes)) => bytes,
-            Ok(Err(_)) | Err(_) => {
-                connection.close(0u32.into(), b"invalid control stream");
-                bail!("control stream read failed");
-            }
-        };
+                let bytes = match tokio::time::timeout(
+                    Duration::from_secs(15),
+                    recv.read_to_end(MAX_CONTROL_BODY),
+                ).await {
+                    Ok(Ok(bytes)) => bytes,
+                    Ok(Err(_)) | Err(_) => {
+                        connection.close(0u32.into(), b"invalid control stream");
+                        bail!("control stream read failed");
+                    }
+                };
 
-        if bytes.len() > MAX_CONTROL_BODY {
-            connection.close(0u32.into(), b"control message too large");
-            bail!("control message exceeds limit");
-        }
-
-        let envelope: ControlEnvelope =
-            serde_json::from_slice(&bytes).context("decode control envelope")?;
-        validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
-            .context("validate control envelope")?;
-        validate_message(&envelope.message).context("validate control message")?;
-
-        let response = match envelope.message {
-            ControlMessage::ClientHello {
-                credential,
-                request_id,
-            } if !authenticated => {
-                if !credential_matches(&credential, credential_hashes.as_slice()) {
-                    connection.close(0u32.into(), b"authentication failed");
-                    bail!("client authentication failed");
+                if bytes.len() > MAX_CONTROL_BODY {
+                    connection.close(0u32.into(), b"control message too large");
+                    bail!("control message exceeds limit");
                 }
-                authenticated = true;
-                ControlMessage::ServerHello {
-                    session_id: session_id.clone(),
-                    request_id,
+
+                let envelope: ControlEnvelope =
+                    serde_json::from_slice(&bytes).context("decode control envelope")?;
+                validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
+                    .context("validate control envelope")?;
+                validate_message(&envelope.message).context("validate control message")?;
+
+                let response = match envelope.message {
+                    ControlMessage::ClientHello {
+                        credential,
+                        request_id,
+                    } if !authenticated => {
+                        if !credential_matches(&credential, credential_hashes.as_slice()) {
+                            connection.close(0u32.into(), b"authentication failed");
+                            bail!("client authentication failed");
+                        }
+                        authenticated = true;
+                        ControlMessage::ServerHello {
+                            session_id: session_id.clone(),
+                            request_id,
+                        }
+                    }
+                    ControlMessage::Ping { request_id } if authenticated => {
+                        ControlMessage::Pong { request_id }
+                    }
+                    ControlMessage::Close { .. } if authenticated => {
+                        connection.close(0u32.into(), b"client requested close");
+                        break;
+                    }
+                    _ => {
+                        connection.close(0u32.into(), b"unexpected control message");
+                        bail!("unexpected control message or unauthenticated request");
+                    }
+                };
+
+                let encoded = serde_json::to_vec(&ControlEnvelope {
+                    version: PROTOCOL_VERSION,
+                    message: response,
+                })?;
+                if encoded.len() > MAX_CONTROL_BODY {
+                    bail!("internal response exceeds protocol limit");
+                }
+                send.write_all(&encoded)
+                    .await
+                    .context("write control response")?;
+                send.finish().context("finish control response stream")?;
+            }
+            datagram = connection.read_datagram() => {
+                let bytes = match datagram {
+                    Ok(bytes) => bytes,
+                    Err(_) => break,
+                };
+
+                if !authenticated {
+                    rejected_datagrams = rejected_datagrams.saturating_add(1);
+                    continue;
+                }
+
+                match DataDatagram::decode(bytes.as_ref()) {
+                    Ok(packet) => {
+                        // The validated packet boundary is ready for the future TUN adapter.
+                        // Until a server TUN is configured, packets are deliberately not routed.
+                        valid_datagrams = valid_datagrams.saturating_add(1);
+                        let _packet_len = packet.packet.len();
+                    }
+                    Err(_) => {
+                        rejected_datagrams = rejected_datagrams.saturating_add(1);
+                    }
                 }
             }
-            ControlMessage::Ping { request_id } if authenticated => {
-                ControlMessage::Pong { request_id }
-            }
-            ControlMessage::Close { .. } if authenticated => {
-                connection.close(0u32.into(), b"client requested close");
-                break;
-            }
-            _ => {
-                connection.close(0u32.into(), b"unexpected control message");
-                bail!("unexpected control message or unauthenticated request");
-            }
-        };
-
-        let encoded = serde_json::to_vec(&ControlEnvelope {
-            version: PROTOCOL_VERSION,
-            message: response,
-        })?;
-        if encoded.len() > MAX_CONTROL_BODY {
-            bail!("internal response exceeds protocol limit");
         }
-        send.write_all(&encoded)
-            .await
-            .context("write control response")?;
-        send.finish().context("finish control response stream")?;
     }
 
+    if valid_datagrams > 0 || rejected_datagrams > 0 {
+        eprintln!(
+            "connection datagrams: accepted={}, rejected={}, forwarding=disabled",
+            valid_datagrams, rejected_datagrams
+        );
+    }
     Ok(())
 }
 
@@ -192,7 +230,7 @@ async fn main() -> Result<()> {
     let endpoint = Endpoint::server(server_config, bind)?;
 
     eprintln!(
-        "ГӀулакх QUIC control endpoint listening on {}",
+        "ГӀулакх QUIC endpoint listening on {}",
         endpoint.local_addr()?
     );
     let connection_limit = Arc::new(Semaphore::new(1024));
