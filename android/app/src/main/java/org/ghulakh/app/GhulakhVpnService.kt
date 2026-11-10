@@ -38,6 +38,7 @@ class GhulakhVpnService : VpnService() {
         }
         startForeground(NOTIFICATION_ID, notification("Подключение к серверу"))
         if (running.compareAndSet(false, true)) {
+            isActive = true
             worker = Thread({ runTunnel() }, "ghulakh-vpn-session").apply { start() }
         }
         return START_NOT_STICKY
@@ -159,6 +160,7 @@ class GhulakhVpnService : VpnService() {
     }
 
     override fun onDestroy() {
+        isActive = false
         stopTunnel()
         worker?.interrupt()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -189,11 +191,15 @@ class GhulakhVpnService : VpnService() {
         manager.notify(NOTIFICATION_ID, notification(message))
     }
 
-    private companion object {
-        const val TAG = "GhulakhVpn"
-        const val CHANNEL_ID = "ghulakh_vpn"
-        const val NOTIFICATION_ID = 7701
-        const val TUN_MTU = 1100
-        const val MAX_IP_PACKET_SIZE = 65_535
+    companion object {
+        @Volatile
+        var isActive: Boolean = false
+            private set
+
+        private const val TAG = "GhulakhVpn"
+        private const val CHANNEL_ID = "ghulakh_vpn"
+        private const val NOTIFICATION_ID = 7701
+        private const val TUN_MTU = 1100
+        private const val MAX_IP_PACKET_SIZE = 65_535
     }
 }
