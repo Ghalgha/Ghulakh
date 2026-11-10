@@ -106,3 +106,11 @@ README всех шести указанных пользователем исх�
 - Unknown algorithm identifiers are retained; duplicate IDs, malformed lengths, and oversized parameter blocks are rejected.
 - Generic selection prefers SHA-256 when offered and otherwise MD5. This is protocol negotiation logic only, not evidence that VK Calls currently offers either algorithm.
 - Credential normalization, key derivation, and VK Calls profile confirmation remain unimplemented.
+
+
+### TURN allocation lifecycle
+
+- Added an event-driven allocation manager for Allocate/Refresh state transitions.
+- Tracks relayed address, granted lifetime, monotonic expiry and an 80%-lifetime refresh deadline.
+- Rejects transaction mismatches and unexpected response types; supports refresh failure recovery and expiry/deletion.
+- No socket integration, credentials, permission/channel binding lifecycle or data plane is implied by this state machine.
