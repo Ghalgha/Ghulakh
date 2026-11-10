@@ -518,14 +518,19 @@ async fn main() -> Result<()> {
         .context("set GHULAKH_CREDENTIAL_HASHES to a file of SHA-256 credential digests")?;
     let credential_hashes = Arc::new(load_credential_hashes(&credential_path)?);
 
-    let cert_path = env::var("GHULAKH_TLS_CERT")
-        .context("set GHULAKH_TLS_CERT to a PEM certificate chain")?;
-    let key_path = env::var("GHULAKH_TLS_KEY")
-        .context("set GHULAKH_TLS_KEY to a PEM private key")?;
-    let bind: SocketAddr = env::var("GHULAKH_QUIC_BIND")
-        .unwrap_or_else(|_| "0.0.0.0:4433".to_string())
-        .parse()
-        .context("invalid GHULAKH_QUIC_BIND address")?;
+    let quic_enabled = env::var("GHULAKH_QUIC_ENABLED")
+        .unwrap_or_else(|_| "false".to_string())
+        .eq_ignore_ascii_case("true");
+    let quic_bind = if quic_enabled {
+        Some(
+            env::var("GHULAKH_QUIC_BIND")
+                .unwrap_or_else(|_| "0.0.0.0:4433".to_string())
+                .parse::<SocketAddr>()
+                .context("invalid GHULAKH_QUIC_BIND address")?,
+        )
+    } else {
+        None
+    };
 
     let sessions: SessionMap = Arc::new(RwLock::new(HashMap::new()));
     let ip_allocator = Arc::new(IpAllocator::new());
@@ -580,6 +585,11 @@ async fn main() -> Result<()> {
         None
     };
 
+    anyhow::ensure!(
+        quic_enabled || turn_gateway_setup.is_some(),
+        "no transport enabled: configure TURN gateway or explicitly enable legacy QUIC"
+    );
+
     let tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _)| Arc::clone(gateway));
@@ -604,49 +614,59 @@ async fn main() -> Result<()> {
         None
     };
 
-    let server_config = load_server_config(&cert_path, &key_path)?;
-    let endpoint = Endpoint::server(server_config, bind)?;
+    if quic_enabled {
+        let cert_path = env::var("GHULAKH_TLS_CERT")
+            .context("set GHULAKH_TLS_CERT when GHULAKH_QUIC_ENABLED=true")?;
+        let key_path = env::var("GHULAKH_TLS_KEY")
+            .context("set GHULAKH_TLS_KEY when GHULAKH_QUIC_ENABLED=true")?;
+        let bind = quic_bind.context("QUIC bind address is missing")?;
+        let server_config = load_server_config(&cert_path, &key_path)?;
+        let endpoint = Endpoint::server(server_config, bind)?;
 
-    eprintln!(
-        "ГӀулакх QUIC endpoint listening on {}",
-        endpoint.local_addr()?
-    );
-    let connection_limit = Arc::new(tokio::sync::Semaphore::new(1024));
-    while let Some(connecting) = endpoint.accept().await {
-        let permit = Arc::clone(&connection_limit)
-            .acquire_owned()
-            .await
-            .context("connection limit semaphore closed")?;
-        let hashes = Arc::clone(&credential_hashes);
-        let metrics = Arc::new(DatagramMetrics::default());
-        let sender = tun_sender.clone();
-        let session_map = Arc::clone(&sessions);
-        let allocator = Arc::clone(&ip_allocator);
-        let _connection_task = tokio::spawn(async move {
-            let _permit = permit;
-            match connecting.await {
-                Ok(connection) => {
-                    if let Err(error) = handle_connection(
-                        connection,
-                        hashes,
-                        metrics,
-                        sender,
-                        session_map,
-                        allocator,
-                        tun_enabled,
-                        forwarding_enabled,
-                    )
-                    .await
-                    {
-                        eprintln!("connection closed: {error:#}");
+        eprintln!(
+            "Legacy QUIC endpoint listening on {}",
+            endpoint.local_addr()?
+        );
+        let connection_limit = Arc::new(tokio::sync::Semaphore::new(1024));
+        while let Some(connecting) = endpoint.accept().await {
+            let permit = Arc::clone(&connection_limit)
+                .acquire_owned()
+                .await
+                .context("connection limit semaphore closed")?;
+            let hashes = Arc::clone(&credential_hashes);
+            let metrics = Arc::new(DatagramMetrics::default());
+            let sender = tun_sender.clone();
+            let session_map = Arc::clone(&sessions);
+            let allocator = Arc::clone(&ip_allocator);
+            let _connection_task = tokio::spawn(async move {
+                let _permit = permit;
+                match connecting.await {
+                    Ok(connection) => {
+                        if let Err(error) = handle_connection(
+                            connection,
+                            hashes,
+                            metrics,
+                            sender,
+                            session_map,
+                            allocator,
+                            tun_enabled,
+                            forwarding_enabled,
+                        )
+                        .await
+                        {
+                            eprintln!("connection closed: {error:#}");
+                        }
                     }
+                    Err(error) => eprintln!("QUIC handshake failed: {error}"),
                 }
-                Err(error) => eprintln!("QUIC handshake failed: {error}"),
-            }
-        });
+            });
+        }
+        bail!("QUIC endpoint stopped accepting connections")
+    } else {
+        eprintln!("Legacy QUIC runtime disabled; VK Calls TURN is the only active transport");
+        std::future::pending::<()>().await;
     }
-
-    bail!("QUIC endpoint stopped accepting connections")
+    Ok(())
 }
 
 #[cfg(test)]
