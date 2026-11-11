@@ -26,6 +26,21 @@ class NativeTransport {
 
     external fun nativeTurnClose(session: Long)
 
+    /** Returns path identifiers whose authenticated TURN dataplane has failed. */
+    external fun nativeTurnFailedPaths(session: Long): IntArray
+
+    /** Recreates one failed path using a fresh protected socket and TURN allocation. */
+    external fun nativeTurnRecoverPath(
+        vpnService: android.net.VpnService,
+        session: Long,
+        gatewayHost: String,
+        gatewayPort: Int,
+        turnCredentialsJson: String,
+        pinnedServerKey: ByteArray,
+        credential: String,
+        pathId: Int,
+    ): Boolean
+
     external fun nativeConnect(
         vpnService: android.net.VpnService?,
         host: String,
