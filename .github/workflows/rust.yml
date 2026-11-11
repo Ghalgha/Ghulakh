@@ -32,7 +32,9 @@ jobs:
         run: cargo test --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - name: Fuzz STUN decoder
         run: cargo fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
