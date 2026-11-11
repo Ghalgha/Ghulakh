@@ -13,8 +13,8 @@ use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
 
-fn keepalive_expired(pending: Option<(u64, Instant)>, now: Instant) -> bool {
-    pending.is_some_and(|(_, sent)| now.saturating_duration_since(sent) >= KEEPALIVE_TIMEOUT)
+fn keepalive_expired(last_ack: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_ack) >= KEEPALIVE_TIMEOUT
 }
 
 use crate::{
@@ -67,7 +67,8 @@ impl TurnDataPlane {
         let mut stats = TurnDataPlaneStats::default();
         let mut keepalive = interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
         let mut next_keepalive_nonce = 0u64;
-        let mut pending_keepalive: Option<(u64, Instant)> = None;
+        let mut last_acked_nonce: Option<u64> = None;
+        let mut last_keepalive_ack = Instant::now();
         enum Event {
             Inbound(Option<TurnInbound>),
             Uplink(Option<DataDatagram>),
@@ -79,9 +80,7 @@ impl TurnDataPlane {
                 inbound = self.inbound.recv() => Event::Inbound(inbound),
                 packet = uplink.recv() => Event::Uplink(packet),
                 _ = keepalive.tick() => Event::Keepalive,
-                _ = tokio::time::sleep_until(
-                    pending_keepalive.map(|(_, sent)| sent + KEEPALIVE_TIMEOUT).unwrap_or_else(|| Instant::now() + Duration::from_secs(24 * 60 * 60))
-                ) => Event::KeepaliveTimeout,
+                _ = tokio::time::sleep_until(last_keepalive_ack + KEEPALIVE_TIMEOUT) => Event::KeepaliveTimeout,
             };
             match event {
                 Event::Inbound(inbound) => {
@@ -100,8 +99,11 @@ impl TurnDataPlane {
                             stats.received_frames = stats.received_frames.saturating_add(1);
                         }
                         Ok(crate::turn_data::TurnDataPayload::KeepaliveAck(nonce)) => {
-                            if pending_keepalive.is_some_and(|(pending, _)| pending == nonce) {
-                                pending_keepalive = None;
+                            if nonce < next_keepalive_nonce
+                                && last_acked_nonce.map_or(true, |last| nonce > last)
+                            {
+                                last_acked_nonce = Some(nonce);
+                                last_keepalive_ack = Instant::now();
                                 stats.keepalive_acks_received = stats.keepalive_acks_received.saturating_add(1);
                             }
                         }
@@ -121,21 +123,18 @@ impl TurnDataPlane {
                     stats.sent_frames = stats.sent_frames.saturating_add(1);
                 }
                 Event::Keepalive => {
-                    if pending_keepalive.is_none() {
-                        let nonce = next_keepalive_nonce;
-                        next_keepalive_nonce = next_keepalive_nonce.checked_add(1)
-                            .context("TURN keepalive nonce space exhausted")?;
-                        let datagram = self.sender.encode_keepalive(nonce)
-                            .context("encode authenticated TURN path-health probe")?;
-                        self.actor.send_datagram(datagram).await
-                            .context("send authenticated TURN path-health probe")?;
-                        pending_keepalive = Some((nonce, Instant::now()));
-                        stats.keepalives_sent = stats.keepalives_sent.saturating_add(1);
-                    }
+                    let nonce = next_keepalive_nonce;
+                    next_keepalive_nonce = next_keepalive_nonce.checked_add(1)
+                        .context("TURN keepalive nonce space exhausted")?;
+                    let datagram = self.sender.encode_keepalive(nonce)
+                        .context("encode authenticated TURN path-health probe")?;
+                    self.actor.send_datagram(datagram).await
+                        .context("send authenticated TURN path-health probe")?;
+                    stats.keepalives_sent = stats.keepalives_sent.saturating_add(1);
                 }
                 Event::KeepaliveTimeout => {
-                    if keepalive_expired(pending_keepalive, Instant::now()) {
-                        anyhow::bail!("authenticated TURN path-health probe timed out");
+                    if keepalive_expired(last_keepalive_ack, Instant::now()) {
+                        anyhow::bail!("authenticated TURN path-health acknowledgements timed out");
                     }
                 }
             }
@@ -164,9 +163,8 @@ mod tests {
     #[test]
     fn path_is_marked_failed_only_after_keepalive_ack_deadline() {
         let sent = Instant::now();
-        assert!(!keepalive_expired(Some((7, sent)), sent + KEEPALIVE_TIMEOUT - Duration::from_secs(1)));
-        assert!(keepalive_expired(Some((7, sent)), sent + KEEPALIVE_TIMEOUT));
-        assert!(!keepalive_expired(None, sent + KEEPALIVE_TIMEOUT * 2));
+        assert!(!keepalive_expired(sent, sent + KEEPALIVE_TIMEOUT - Duration::from_secs(1)));
+        assert!(keepalive_expired(sent, sent + KEEPALIVE_TIMEOUT));
     }
 
     fn packet() -> DataDatagram {
