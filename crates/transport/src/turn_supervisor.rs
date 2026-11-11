@@ -971,7 +971,6 @@ mod authenticated_allocation_quota_tests {
         append_message_integrity, StunAttribute, StunClass, StunMessage,
         ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, METHOD_ALLOCATE,
     };
-    use std::net::SocketAddr;
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
     struct QuotaTestProvider;
