@@ -514,7 +514,15 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnRecoverPat
         credential, path_id,
     }) {
         Ok(()) => 1,
-        Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); 0 }
+        Err(error) => {
+            let message = if is_turn_allocation_quota_error(&error) {
+                "TURN_ALLOCATION_QUOTA_486".to_owned()
+            } else {
+                error.to_string()
+            };
+            throw_error(&mut env, "java/lang/IllegalStateException", message);
+            0
+        }
     }
 }
 
