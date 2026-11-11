@@ -276,12 +276,20 @@ async fn release_failed_turn_setup(
     error: anyhow::Error,
     context: &'static str,
 ) -> anyhow::Error {
-    let _ = tokio::time::timeout(
+    let cleanup = tokio::time::timeout(
         std::time::Duration::from_secs(3),
         supervisor.deallocate(),
     ).await;
     supervisor.close();
-    error.context(context)
+    match cleanup {
+        Ok(Ok(())) => error.context(context),
+        Ok(Err(cleanup_error)) => error.context(format!(
+            "{context}; TURN allocation cleanup failed: {cleanup_error:#}"
+        )),
+        Err(_) => error.context(format!(
+            "{context}; TURN allocation cleanup timed out after 3 seconds"
+        )),
+    }
 }
 
 /// Bounded retry policy for recreating one failed TURN allocation.
