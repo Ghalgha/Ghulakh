@@ -288,7 +288,6 @@ mod authenticated_stale_nonce_tests {
         ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
         METHOD_ALLOCATE, METHOD_REFRESH,
     };
-    use std::net::SocketAddr;
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
     struct TestProvider {
