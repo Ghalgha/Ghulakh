@@ -43,4 +43,23 @@ class TurnQuotaRetryPolicyTest {
         assertEquals(1_000L, TurnQuotaRetryPolicy.retryDelayMillis(Int.MAX_VALUE))
         assertEquals(250L, TurnQuotaRetryPolicy.retryDelayMillis(Int.MIN_VALUE))
     }
+    @Test
+    fun rejectedCredentialsAreTrackedPerPathWithBoundedHistory() {
+        val rejected = mutableMapOf<Int, LinkedHashSet<String>>()
+        TurnQuotaRetryPolicy.rememberRejectedFingerprint(rejected, 1, "first")
+        TurnQuotaRetryPolicy.rememberRejectedFingerprint(rejected, 2, "other-path")
+
+        assertTrue(TurnQuotaRetryPolicy.wasRejectedForPath(rejected, 1, "first"))
+        assertFalse(TurnQuotaRetryPolicy.wasRejectedForPath(rejected, 2, "first"))
+
+        repeat(TurnQuotaRetryPolicy.MAX_REJECTED_FINGERPRINTS_PER_PATH + 1) { index ->
+            TurnQuotaRetryPolicy.rememberRejectedFingerprint(rejected, 3, "credential-$index")
+        }
+        assertEquals(
+            TurnQuotaRetryPolicy.MAX_REJECTED_FINGERPRINTS_PER_PATH,
+            rejected.getValue(3).size,
+        )
+        assertFalse(TurnQuotaRetryPolicy.wasRejectedForPath(rejected, 3, "credential-0"))
+    }
+
 }
