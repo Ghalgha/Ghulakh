@@ -203,14 +203,43 @@ impl TurnClientRuntime {
         let (shutdown_signal, mut shutdown_rx) = watch::channel(false);
         let maintenance_task = tokio::spawn(async move {
             let result = tokio::select! {
-                result = supervisor.maintain_allocation() => result,
+                result = supervisor.maintain_allocation() => {
+                    match result {
+                        Ok(()) => {
+                            supervisor.close();
+                            Ok(())
+                        }
+                        Err(error) => {
+                            let cleanup = tokio::time::timeout(
+                                std::time::Duration::from_secs(3),
+                                supervisor.deallocate(),
+                            ).await;
+                            supervisor.close();
+                            match cleanup {
+                                Ok(Ok(())) => Err(error.context("TURN maintenance stopped; allocation deallocated")),
+                                Ok(Err(cleanup_error)) => Err(error.context(format!(
+                                    "TURN maintenance stopped; allocation cleanup failed: {cleanup_error:#}"
+                                ))),
+                                Err(_) => Err(error.context(
+                                    "TURN maintenance stopped; allocation cleanup timed out after 3 seconds"
+                                )),
+                            }
+                        }
+                    }
+                }
                 _ = shutdown_rx.changed() => {
-                    let _ = tokio::time::timeout(
+                    let cleanup = tokio::time::timeout(
                         std::time::Duration::from_secs(3),
                         supervisor.deallocate(),
                     ).await;
                     supervisor.close();
-                    Ok(())
+                    match cleanup {
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(error)) => Err(error.context("deallocate TURN allocation during shutdown")),
+                        Err(_) => Err(anyhow::anyhow!(
+                            "TURN allocation deallocation timed out after 3 seconds during shutdown"
+                        )),
+                    }
                 }
             };
             let _ = maintenance_stopped_tx.send(true);
