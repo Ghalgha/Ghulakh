@@ -571,6 +571,31 @@ mod path_group_tests {
         drop(downlink_a);
     }
 
+
+    #[tokio::test]
+    async fn all_failed_paths_drop_uplink_without_closing_tun_sender() {
+        let group_id = [0x7c; 16];
+        let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        drop(downlink_a);
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.active_paths() != 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let datagram = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(24567),
+        };
+        group.send_packet(datagram).await.unwrap();
+        assert_eq!(group.uplink_queue_drops(), 1);
+        assert_eq!(group.failed_path_ids(), vec![0, 1]);
+        group.close();
+    }
+
     #[tokio::test]
     async fn saturated_flow_queue_drops_newest_without_blocking_or_reassigning() {
         let (sender, mut receiver) = mpsc::channel(1);
