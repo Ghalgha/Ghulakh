@@ -29,13 +29,20 @@ impl TurnDataSender {
             .context("encode TURN ChannelData")
     }
 
-    /// Encode an authenticated keepalive without injecting a synthetic IP packet.
-    pub fn encode_keepalive(&mut self) -> Result<Vec<u8>> {
-        let protected = self.sealer.seal(ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD)
-            .context("protect TURN session keepalive")?;
+    /// Encode an authenticated path-health probe without injecting an IP packet.
+    pub fn encode_keepalive(&mut self, nonce: u64) -> Result<Vec<u8>> {
+        let payload = ghulakh_protocol::secure_frame::keepalive_request(nonce);
+        let protected = self.sealer.seal(&payload)
+            .context("protect TURN session keepalive probe")?;
         encode_channel_data(self.channel_number, &protected)
             .context("encode TURN keepalive ChannelData")
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum TurnDataPayload {
+    Packet(DataDatagram),
+    KeepaliveAck(u64),
 }
 
 pub struct TurnDataReceiver {
@@ -48,8 +55,8 @@ impl TurnDataReceiver {
         Self { channel_number, opener }
     }
 
-    /// Validate channel framing, authenticate/decrypt the frame, then decode IP.
-    pub fn decode_packet(&mut self, datagram: &[u8]) -> Result<DataDatagram> {
+    /// Validate channel framing and authenticate/decrypt one server payload.
+    pub fn decode_payload(&mut self, datagram: &[u8]) -> Result<TurnDataPayload> {
         let channel_data = decode_channel_data(datagram).context("decode TURN ChannelData")?;
         ensure!(
             channel_data.channel_number == self.channel_number,
@@ -57,7 +64,20 @@ impl TurnDataReceiver {
         );
         let plaintext = self.opener.open(channel_data.data)
             .context("authenticate tunnel frame")?;
-        DataDatagram::decode(&plaintext).context("decode protected IP datagram")
+        if let Some(nonce) = ghulakh_protocol::secure_frame::parse_keepalive_ack(&plaintext) {
+            return Ok(TurnDataPayload::KeepaliveAck(nonce));
+        }
+        Ok(TurnDataPayload::Packet(
+            DataDatagram::decode(&plaintext).context("decode protected IP datagram")?
+        ))
+    }
+
+    /// Decode an authenticated IP packet; control frames are not IP packets.
+    pub fn decode_packet(&mut self, datagram: &[u8]) -> Result<DataDatagram> {
+        match self.decode_payload(datagram)? {
+            TurnDataPayload::Packet(packet) => Ok(packet),
+            TurnDataPayload::KeepaliveAck(_) => anyhow::bail!("received keepalive acknowledgement where an IP packet was expected"),
+        }
     }
 }
 
@@ -104,7 +124,7 @@ mod tests {
     #[test]
     fn encodes_authenticated_keepalive_without_ip_payload() {
         let mut sender = pair().0;
-        let encoded = sender.encode_keepalive().unwrap();
+        let encoded = sender.encode_keepalive(0x0102_0304_0506_0708).unwrap();
         let channel = decode_channel_data(&encoded).unwrap();
         let mut opener = FrameOpener::new(
             [0x42; 32],
@@ -114,7 +134,7 @@ mod tests {
         );
         assert_eq!(
             opener.open(channel.data).unwrap().as_slice(),
-            ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD,
+            ghulakh_protocol::secure_frame::keepalive_request(0x0102_0304_0506_0708),
         );
     }
 
