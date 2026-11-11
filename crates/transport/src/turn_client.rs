@@ -44,6 +44,7 @@ pub struct TurnClientRuntime {
     downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
+    shutdown_signal: watch::Sender<bool>,
 }
 
 impl TurnClientRuntime {
@@ -172,8 +173,19 @@ impl TurnClientRuntime {
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (maintenance_stopped_tx, mut maintenance_stopped_rx) = watch::channel(false);
+        let (shutdown_signal, mut shutdown_rx) = watch::channel(false);
         let maintenance_task = tokio::spawn(async move {
-            let result = supervisor.maintain_allocation().await;
+            let result = tokio::select! {
+                result = supervisor.maintain_allocation() => result,
+                _ = shutdown_rx.changed() => {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_secs(3),
+                        supervisor.deallocate(),
+                    ).await;
+                    supervisor.close();
+                    Ok(())
+                }
+            };
             let _ = maintenance_stopped_tx.send(true);
             result
         });
@@ -193,6 +205,7 @@ impl TurnClientRuntime {
             downlink: tokio::sync::Mutex::new(downlink),
             dataplane_task,
             maintenance_task,
+            shutdown_signal,
         })
     }
 
@@ -217,15 +230,15 @@ impl TurnClientRuntime {
     }
 
     pub fn close(&self) {
+        self.shutdown_signal.send_replace(true);
         self.dataplane_task.abort();
-        self.maintenance_task.abort();
     }
 }
 
 impl Drop for TurnClientRuntime {
     fn drop(&mut self) {
+        self.shutdown_signal.send_replace(true);
         self.dataplane_task.abort();
-        self.maintenance_task.abort();
     }
 }
 
