@@ -19,6 +19,7 @@ use std::{
     collections::HashMap,
     net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex, OnceLock},
+    time::Duration,
 };
 use tokio::{runtime::{Builder, Runtime}, task::JoinSet};
 #[cfg(target_os = "android")]
@@ -248,6 +249,13 @@ fn connect_turn_impl(
                     context,
                 ).await
             });
+
+            // Stagger independent TURN allocations to avoid a synchronized
+            // burst against the relay service. This is startup pacing only;
+            // it does not serialize the established data paths.
+            if path_id + 1 < usize::from(path_count) {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
         }
 
         let mut clients = Vec::with_capacity(usize::from(path_count));
