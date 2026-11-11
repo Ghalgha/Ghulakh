@@ -183,3 +183,8 @@ The first explicit Nightly invocation exposed a second CI environment issue: the
 Сравнение Android worker-recovery реализации в актуальных исходных ветках показало одинаковую модель восстановления здоровой группы после полного обнуления числа активных workers: запоминание максимального размера группы, однократное вооружение восстановления и сброс после возврата целевого количества. Эта модель решает обнаружение потери группы, но не задаёт задержки повторных попыток отдельных TURN allocations. Ghulakh сохраняет собственную path-level exponential backoff (1, 2, 4, 8, 16, затем максимум 30 секунд), поскольку каждый TURN path восстанавливается независимо и не должен сбрасывать счётчик другого пути. Расчёт задержки вынесен в чистую Kotlin policy-функцию; добавлены JVM-тесты граничных значений, включая отрицательные и максимально большие счётчики. CI validation ожидается.
 
 Android CI workflow дополнен отдельным `testDebugUnitTest` перед сборкой APK, чтобы новые JVM-тесты recovery policy исполнялись, а не только компилировались. Проверка этого изменения ожидается в следующем CI run.
+
+
+## TURN peer-operation stale-nonce regression coverage
+
+Added mock-relay tests for CreatePermission and ChannelBind receiving a MESSAGE-INTEGRITY-verified 438 Stale Nonce. Each test verifies that the supervisor obtains the new nonce, retries with the refreshed integrity key, and installs local permission/channel state only after the authenticated success response. The reference implementations inspected for this review do not provide equivalent authenticated per-operation stale-nonce coverage; the existing serialized supervisor and bounded challenge retry policy remain the selected implementation. CI validation is pending.
