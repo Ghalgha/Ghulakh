@@ -168,3 +168,8 @@ The initial VK credential acquisition now checks the service-running flag before
 Added a separate cargo-fuzz package, excluded from the main Cargo workspace, with independent targets for the STUN message decoder and handshake datagram envelope decoder. CI runs each target for a bounded 15-second campaign with per-input timeout and RSS limits. Successful decodes are checked for encode/decode round-trip invariants. This is an initial smoke-fuzz gate, not a substitute for longer scheduled fuzz campaigns or corpus retention across releases.
 
 Comparative implementation review: worker recovery variants use bounded retry delays and worker-start pacing; scheduler variants distribute packet classes across workers. Ghulakh retains per-path exponential recovery backoff and flow affinity. Worker-start pacing may be added if physical evidence shows TURN allocation bursts or credential throttling; packet striping is still deferred because packet ordering and reassembly requirements are not yet validated.
+
+
+## Fuzz CI toolchain selection
+
+CI run #635 confirmed that installing the Nightly toolchain did not change the default compiler selected by the `cargo` proxy for `cargo fuzz`; the fuzz build therefore invoked stable rustc and rejected the required sanitizer `-Z` option. The workflow now invokes both fuzz targets explicitly through `cargo +nightly`. This correction is pending CI validation in run #636; no successful fuzz execution is claimed yet.
