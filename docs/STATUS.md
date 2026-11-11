@@ -234,3 +234,14 @@ Completed authenticated ClientFinish processing is now staged (with zeroizing du
 The handshake datagram response cache now fails closed when its global or per-peer capacity is reached instead of evicting an older live replay record. This preserves exact-response replay for existing in-flight handshakes; new handshakes must wait for cache expiry when saturated. The older standalone response-cache primitive remains separately bounded and retains its documented FIFO behavior; the live datagram driver uses the non-evicting policy.
 
 Regression coverage verifies duplicate ClientFinish retry from staged authenticated state, staged path-lease expiry, and that response-cache saturation does not evict a prior replay record. CI validation is pending for these changes.
+
+
+## Typed TURN allocation quota recovery
+
+The Android JNI boundary now preserves the typed TURN server error code through the Rust error chain and exposes a stable, non-secret marker only for authenticated Allocate error 486. Authentication challenges (401/438), other TURN errors, socket failures, and parsing errors are not classified as allocation quota failures.
+
+On initial tunnel startup, Android retries only this 486 condition. Each retry obtains a new VK Calls session and fresh TURN credentials, closes the rejected Calls conversation, and compares credentials using a SHA-256 fingerprint without logging or retaining the raw rejected credential. Startup is bounded to three total group attempts; repeated credentials stop the retry immediately. Retry delays are 250 ms and 500 ms. A successful Calls session is retained for the tunnel lifetime; failed sessions are finished before another attempt.
+
+The implementation deliberately retries the complete initial path group rather than assuming that a rejected credential can be reused for the remaining paths. The reviewed worker implementations use credential generations, allocation-attempt accounting, and quota-specific rotation/backoff; those mechanisms support bounded credential rotation but do not establish a universal VK allocation quota or guarantee that one credential can serve a fixed number of independent allocations. The group-wide retry is a conservative first step; per-path credential rotation can be introduced later without changing the tunnel protocol. Physical VK Calls quota behavior remains unverified.
+
+Regression tests cover typed 486 classification through nested Rust error context, rejection of unrelated TURN codes, credential fingerprint deduplication, bounded retry count, and retry delay bounds.
