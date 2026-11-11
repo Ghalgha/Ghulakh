@@ -340,6 +340,8 @@ impl Default for TurnPathRecoveryPolicy {
 impl TurnPathRecoveryPolicy {
     pub fn new(maximum_delay: std::time::Duration) -> Result<Self> {
         anyhow::ensure!(!maximum_delay.is_zero(), "TURN path recovery delay cap must be non-zero");
+        // Callers may lower the cap, but cannot exceed the Android policy.
+        let maximum_delay = maximum_delay.min(std::time::Duration::from_secs(30));
         Ok(Self { consecutive_failures: 0, maximum_delay })
     }
 
@@ -721,6 +723,20 @@ mod path_group_tests {
         policy.record_success();
         assert_eq!(policy.consecutive_failures(), 0);
         assert_eq!(policy.record_failure().as_secs(), 1);
+    }
+
+    #[test]
+    fn recovery_backoff_custom_cap_cannot_exceed_android_limit() {
+        let mut policy = TurnPathRecoveryPolicy::new(std::time::Duration::from_secs(120)).unwrap();
+        let delays: Vec<_> = (0..8).map(|_| policy.record_failure().as_secs()).collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+    }
+
+    #[test]
+    fn recovery_backoff_allows_a_lower_custom_cap() {
+        let mut policy = TurnPathRecoveryPolicy::new(std::time::Duration::from_secs(5)).unwrap();
+        let delays: Vec<_> = (0..7).map(|_| policy.record_failure().as_secs()).collect();
+        assert_eq!(delays, vec![1, 2, 4, 5, 5, 5, 5]);
     }
 
     #[test]
