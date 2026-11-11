@@ -63,3 +63,44 @@ class TurnQuotaRetryPolicyTest {
     }
 
 }
+
+
+class VkCallsSessionIdempotenceTest {
+    @Test
+    fun concurrentFinishRequestsRunCleanupOnlyOnce() {
+        val session = VkCallsSession(
+            turnCredentialsJson = "{}",
+            apiUrl = "https://calls.example.invalid/fb.do",
+            sessionKey = "test-session-key",
+            conversationId = "test-conversation",
+        )
+        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val callers = List(16) {
+            Thread {
+                session.finishOnce { cleanupCalls.incrementAndGet() }
+            }
+        }
+
+        callers.forEach(Thread::start)
+        callers.forEach(Thread::join)
+
+        assertEquals(1, cleanupCalls.get())
+    }
+
+    @Test
+    fun repeatedFinishRequestsDoNotRepeatCleanup() {
+        val session = VkCallsSession(
+            turnCredentialsJson = "{}",
+            apiUrl = "https://calls.example.invalid/fb.do",
+            sessionKey = "test-session-key",
+            conversationId = "test-conversation",
+        )
+        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
+        repeat(3) {
+            session.finishOnce { cleanupCalls.incrementAndGet() }
+        }
+
+        assertEquals(1, cleanupCalls.get())
+    }
+}
