@@ -427,11 +427,21 @@ mod tests {
             path_id: 1,
             ..first
         };
-        let address_a = service.reserve_path(first, [1; 16]).unwrap();
-        let address_b = service.reserve_path(second, [2; 16]).unwrap();
+        let (address_a, previous_a) = service
+            .reserve_path_transactional(first, [1; 16])
+            .unwrap();
+        let (address_b, previous_b) = service
+            .reserve_path_transactional(second, [2; 16])
+            .unwrap();
+        assert_eq!(previous_a, None);
+        assert_eq!(previous_b, None);
         assert_eq!(address_a, address_b);
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
-        assert_eq!(service.reserve_path(first, [3; 16]).unwrap(), address_a);
+        let (replacement_address, displaced) = service
+            .reserve_path_transactional(first, [3; 16])
+            .unwrap();
+        assert_eq!(replacement_address, address_a);
+        assert_eq!(displaced, Some([1; 16]));
         assert!(!service.release_path(first, [1; 16]));
         assert!(service.release_path(first, [3; 16]));
 
@@ -481,7 +491,10 @@ mod tests {
             path_id: 0,
             path_count: 2,
         };
-        let address = service.reserve_path(context, [0x31; 16]).unwrap();
+        let (address, previous) = service
+            .reserve_path_transactional(context, [0x31; 16])
+            .unwrap();
+        assert_eq!(previous, None);
         assert!(!service.release_virtual_ipv4(address));
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
         assert!(service.release_path(context, [0x31; 16]));
