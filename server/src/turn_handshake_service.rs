@@ -655,12 +655,22 @@ mod tests {
         };
         assert_eq!(established.handshake_id, handshake_id);
         assert_eq!(established.relay_peer, peer);
-        assert_eq!(service.active_handshakes(), 0);
-        // The ServerAck is not replayable until the gateway confirms registration.
+        // The authenticated result remains staged until gateway registration commits.
+        assert_eq!(service.active_handshakes(), 1);
         assert_eq!(service.cached_responses(), 1);
-        assert!(service.process(&finish, peer, now).is_err());
+        let retry = service.process(&finish, peer, now).unwrap();
+        let retry_session = match retry {
+            TurnHandshakeOutcome::Response { response, established: Some(session) } => {
+                assert_eq!(response, server_ack);
+                session
+            }
+            _ => panic!("expected staged authenticated session on retry"),
+        };
+        assert_eq!(retry_session.frame_keys.session_id(), established.frame_keys.session_id());
         service.commit_established_response(&finish, &server_ack, peer, now).unwrap();
         assert_eq!(service.cached_responses(), 2);
+        assert!(service.finalize_established_response(handshake_id, peer));
+        assert_eq!(service.active_handshakes(), 0);
         let (client_keys, client_config_payload) =
             client.receive_server_ack_with_payload(&server_ack).unwrap();
         let client_config = TurnSessionConfig::decode(&client_config_payload).unwrap();
@@ -670,6 +680,29 @@ mod tests {
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
         assert!(matches!(duplicate_finish, TurnHandshakeOutcome::Cached { response } if response == server_ack));
+
+    #[test]
+    fn staged_handshake_expires_and_releases_its_path_lease() {
+        let credential = b"device-secret";
+        let (mut service, keypair) = service(credential);
+        let now = Instant::now();
+        let peer = relay_peer();
+        let context = TurnPathContext { group_id: [0x79; 16], path_id: 0, path_count: 2 };
+        let (mut client, init) = TurnHandshakeClient::new_with_path_context(
+            keypair.public_key(), credential, context, [0x79; 16],
+        ).unwrap();
+        let response = match service.process(&init, peer, now).unwrap() {
+            TurnHandshakeOutcome::Response { response, .. } => response,
+            _ => panic!("expected ServerResponse"),
+        };
+        let finish = client.receive_server_response(&response).unwrap();
+        let _ = service.process(&finish, peer, now).unwrap();
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert_eq!(service.active_handshakes(), 1);
+        service.prune(now + HANDSHAKE_TTL);
+        assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        assert_eq!(service.active_handshakes(), 0);
+    }
     }
 
     #[test]
