@@ -766,7 +766,7 @@ mod tests {
             driver.remove_cached_response(&altered, peer()),
             Err(HandshakeDriverError::CacheConflict)
         );
-        assert_eq!(driver.cached_response(&request, peer(), now).unwrap().is_some(), true);
+        assert!(driver.cached_response(&request, peer(), now).unwrap().is_some());
         assert!(driver.remove_cached_response(&request, peer()).unwrap());
         assert_eq!(driver.cached_response(&request, peer(), now).unwrap(), None);
         assert!(!driver.remove_cached_response(&request, peer()).unwrap());
