@@ -115,6 +115,23 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
         anyhow::bail!("TURN Refresh retry loop exhausted")
     }
 
+    /// Request relay-side deletion of the active allocation using TURN Refresh(0).
+    /// Callers must impose a short timeout because relay response loss cannot be
+    /// distinguished from a request that was applied but whose response was lost.
+    pub async fn deallocate(&mut self) -> Result<()> {
+        if self.driver.allocation().is_none() {
+            self.close();
+            return Ok(());
+        }
+        match self.refresh(0).await? {
+            None => {
+                self.close();
+                Ok(())
+            }
+            Some(_) => anyhow::bail!("TURN server returned a non-zero lifetime for Refresh(0)"),
+        }
+    }
+
     /// Sleep until the allocation refresh deadline, then refresh it.
     /// The same supervisor must remain the sole owner of the driver.
     pub async fn maintain_allocation(&mut self) -> Result<()> {
