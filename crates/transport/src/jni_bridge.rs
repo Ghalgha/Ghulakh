@@ -430,6 +430,15 @@ fn close_impl(handle: jlong) -> Result<()> {
     Ok(())
 }
 
+fn is_turn_allocation_quota_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::turn_driver::TurnDriverError>(),
+            Some(crate::turn_driver::TurnDriverError::ServerError { code: 486 })
+        )
+    })
+}
+
 fn throw_error(env: &mut JNIEnv, class: &str, error: impl std::fmt::Display) {
     let _ = env.throw_new(class, error.to_string());
 }
@@ -462,7 +471,18 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
     ) {
         Ok(handle) => handle,
         Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            let message = if is_turn_allocation_quota_error(&error) {
+                "TURN_ALLOCATION_QUOTA_486"
+            } else {
+                // Keep the ordinary diagnostic while exposing a stable marker
+                // only for the authenticated TURN allocation-quota response.
+                // Error chains may contain secrets; their text is not logged here.
+                return {
+                    throw_error(&mut env, "java/lang/IllegalStateException", error);
+                    0
+                };
+            };
+            throw_error(&mut env, "java/lang/IllegalStateException", message);
             0
         }
     }
@@ -729,5 +749,33 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeForwardingEnab
             throw_error(&mut env, "java/lang/IllegalStateException", error);
             0
         }
+    }
+}
+
+
+#[cfg(test)]
+mod turn_quota_error_tests {
+    use super::is_turn_allocation_quota_error;
+    use crate::turn_driver::TurnDriverError;
+
+    #[test]
+    fn recognizes_authenticated_allocation_quota_error_through_context() {
+        let error = anyhow::Error::new(TurnDriverError::ServerError { code: 486 })
+            .context("establish one of the TURN paths");
+        assert!(is_turn_allocation_quota_error(&error));
+    }
+
+    #[test]
+    fn does_not_classify_other_turn_server_errors_as_quota() {
+        for code in [400, 401, 403, 438, 508] {
+            let error = anyhow::Error::new(TurnDriverError::ServerError { code });
+            assert!(!is_turn_allocation_quota_error(&error), "unexpected quota classification for {code}");
+        }
+    }
+
+    #[test]
+    fn does_not_classify_unrelated_errors_as_quota() {
+        let error = anyhow::anyhow!("TURN credential parsing failed");
+        assert!(!is_turn_allocation_quota_error(&error));
     }
 }
