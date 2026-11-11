@@ -379,14 +379,23 @@ impl TurnClientPathGroup {
             !self.healthy[index].load(Ordering::Acquire),
             "cannot replace a healthy TURN path"
         );
-        let replacement = Arc::new(replacement);
-        let old = std::mem::replace(&mut paths[index], Arc::clone(&replacement));
-        old.close();
-        self.healthy[index].store(true, Ordering::Release);
-        let path_health = Arc::clone(&self.healthy[index]);
+        // Acquire every fallible registry lock before mutating the path slot.
+        // Forwarders are indexed in the same stable order as path slots.
         let downlink_sender = self.downlink_senders.lock()
             .map_err(|_| anyhow::anyhow!("TURN downlink sender registry is poisoned"))?
             .clone();
+        let mut forwarders = self.forwarders.lock()
+            .map_err(|_| anyhow::anyhow!("TURN path forwarder registry is poisoned"))?;
+        anyhow::ensure!(index < forwarders.len(), "TURN path forwarder slot is missing");
+
+        let replacement = Arc::new(replacement);
+        let old = std::mem::replace(&mut paths[index], Arc::clone(&replacement));
+        // Cancel the previous watcher before publishing the replacement as
+        // healthy. Otherwise its late completion could mark the new path dead.
+        forwarders[index].abort();
+        old.close();
+
+        let path_health = Arc::clone(&self.healthy[index]);
         let forwarder = tokio::spawn(async move {
             while let Ok(packet) = replacement.receive_packet().await {
                 if downlink_sender.send(packet).await.is_err() {
@@ -395,9 +404,8 @@ impl TurnClientPathGroup {
             }
             path_health.store(false, Ordering::Release);
         });
-        self.forwarders.lock()
-            .map_err(|_| anyhow::anyhow!("TURN path forwarder registry is poisoned"))?
-            .push(forwarder);
+        forwarders[index] = forwarder;
+        self.healthy[index].store(true, Ordering::Release);
         Ok(())
     }
 
@@ -556,6 +564,7 @@ mod path_group_tests {
 
         let (replacement, mut replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
         group.replace_path(replacement).unwrap();
+        tokio::task::yield_now().await;
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
 
