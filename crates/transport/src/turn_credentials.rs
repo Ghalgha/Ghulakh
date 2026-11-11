@@ -91,6 +91,27 @@ impl TurnCredentials {
         self.endpoints.iter().find(|endpoint| endpoint.is_udp())
     }
 
+    /// Select a UDP relay endpoint deterministically for a TURN path.
+    /// Multiple URI entries for the same authority are one quota bucket; TCP/TLS
+    /// alternatives are not counted as independent UDP relays.
+    pub fn udp_endpoint_for_path(&self, path_id: u16) -> Option<&TurnEndpoint> {
+        let mut unique = Vec::new();
+        for endpoint in self.endpoints.iter().filter(|endpoint| endpoint.is_udp()) {
+            let already_seen = unique.iter().any(|existing: &&TurnEndpoint| {
+                existing.host.eq_ignore_ascii_case(&endpoint.host)
+                    && existing.port == endpoint.port
+            });
+            if !already_seen {
+                unique.push(endpoint);
+            }
+        }
+        if unique.is_empty() {
+            None
+        } else {
+            Some(unique[usize::from(path_id) % unique.len()])
+        }
+    }
+
     /// Parse the VK Calls response object containing the turn_server member.
     pub fn from_vk_response_json(input: &str) -> Result<Self, TurnCredentialError> {
         if input.len() > 512 * 1024 {
@@ -348,6 +369,35 @@ mod tests {
         assert!(!debug.contains("temporary-user"));
         assert!(!debug.contains("temporary-password"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn assigns_paths_across_unique_udp_relays_and_ignores_transport_alternatives() {
+        let response = r#"{
+            "turn_server": {
+                "username": "u",
+                "credential": "p",
+                "urls": [
+                    "turn:relay-a.example:3478?transport=udp",
+                    "turn:relay-a.example:3478?transport=udp",
+                    "turn:relay-a.example:3478?transport=tcp",
+                    "turns:relay-a.example:5349?transport=tcp",
+                    "turn:relay-b.example:3478?transport=udp"
+                ]
+            }
+        }"#;
+        let credentials = TurnCredentials::from_vk_response_json(response).unwrap();
+        assert_eq!(credentials.udp_endpoint_for_path(0).unwrap().host, "relay-a.example");
+        assert_eq!(credentials.udp_endpoint_for_path(1).unwrap().host, "relay-b.example");
+        assert_eq!(credentials.udp_endpoint_for_path(2).unwrap().host, "relay-a.example");
+    }
+
+    #[test]
+    fn udp_endpoint_selection_falls_back_to_one_relay() {
+        let credentials = TurnCredentials::from_vk_response_json(RESPONSE).unwrap();
+        for path_id in 0..10 {
+            assert_eq!(credentials.udp_endpoint_for_path(path_id).unwrap().host, "relay.example");
+        }
     }
 
     #[test]
