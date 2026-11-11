@@ -1,6 +1,6 @@
 # Текущий статус
 
-Дата фиксации: 2026-11-10.
+Дата фиксации: 2026-11-11.
 
 ## Целевая функция
 
@@ -21,9 +21,10 @@ QUIC не является целевым транспортом. Его runtime
 - Единый bounded TURN socket actor: один reader/writer task, раздельные control/data/handshake queues, классификация STUN/ChannelData/Data indications, явная drop-newest политика для data overload, сохранение исходных wire bytes и счётчики malformed/drop.
 - TURN control driver и session supervisor: Allocate/Refresh/CreatePermission/ChannelBind, matching ответов, MESSAGE-INTEGRITY verification, 401/438 retry, обновление allocation/permission/channel binding.
 - Изолированный legacy VK Calls TURN auth provider: MD5(username:realm:password) → HMAC-SHA1, по совпадающему подходу в трёх актуальных Rust-реализациях исходных репозиториев. Он отклоняет PASSWORD-ALGORITHMS offers, пока не подтверждён профиль VK. Vendor attribute 0x8021 намеренно не добавлен: его необходимость требует live-проверки. Этот provider не доказывает live-совместимость с relay.
-- Protected frame codec: directional AEAD, session ID, sequence numbers и replay window.
+- Protected frame codec: directional AEAD, session ID, sequence numbers и replay window; двусторонние authenticated keepalive probes с nonce и ответом сервера.
 - Noise XX session handshake: pinned server static key, client credential внутри encrypted handshake message, encrypted server acknowledgement, HKDF-SHA256 directional frame keys. Конфигурация сессии (виртуальный IPv4 и MTU) передаётся внутри encrypted ServerAck.
 - Клиентский run_turn_client_handshake: единый task владеет Noise state, bounded retry driver и отдельной incoming handshake queue; проверяет relay endpoint и завершает transaction только после проверки Noise authentication и encrypted ServerAck.
+- TURN dataplane отправляет authenticated path-health probe каждые 15 секунд и ожидает соответствующий зашифрованный ACK; отсутствие ACK в течение 45 секунд завершает только соответствующую path runtime. Gateway отвечает на тот же TURN relay tuple после проверки source tuple, session ID, AEAD и replay protection. Это обнаруживает silent UDP blackhole, но автоматическое пересоздание allocation ещё не реализовано.
 - Серверный TurnHandshakeService: bounded active handshakes, per-relay-tuple rate limits, TTL и exact-response replay cache. Cache lookup выполняется до Noise state advancement; ServerResponse/ServerAck кэшируются до отправки. Неверный credential удаляет использованное Noise state.
 - Server TURN gateway интегрирован с UDP receive loop и TUN lifecycle. Он принимает raw UDP peer payloads, обрабатывает handshake, регистрирует session после cache ServerAck и до отправки ответа (чтобы исключить гонку с первым uplink), проверяет relay source tuple, session ID, AEAD/replay и внутренний IPv4 source. Uplink поступает в bounded TUN queue; downlink маршрутизируется по назначенному destination IPv4 на зарегистрированный relay tuple. Клиент отправляет authenticated keepalive каждые 5 минут; idle sessions удаляются после 10 минут без authenticated traffic, адреса возвращаются в bounded virtual-IP allocator.
 - Сервер загружает постоянную Noise keypair из hex-файлов и проверяет совпадение публичной/приватной частей. Добавлена команда ghulakh-server --generate-noise-keypair <private-hex-file> <public-hex-file>; private key создаётся с правами 0600 без перезаписи существующих файлов.
