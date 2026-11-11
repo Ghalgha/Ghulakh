@@ -245,3 +245,8 @@ On initial tunnel startup, Android retries only this 486 condition. Each retry o
 The implementation deliberately retries the complete initial path group rather than assuming that a rejected credential can be reused for the remaining paths. The reviewed worker implementations use credential generations, allocation-attempt accounting, and quota-specific rotation/backoff; those mechanisms support bounded credential rotation but do not establish a universal VK allocation quota or guarantee that one credential can serve a fixed number of independent allocations. The group-wide retry is a conservative first step; per-path credential rotation can be introduced later without changing the tunnel protocol. Physical VK Calls quota behavior remains unverified.
 
 Regression tests cover typed 486 classification through nested Rust error context, rejection of unrelated TURN codes, credential fingerprint deduplication, bounded retry count, and retry delay bounds.
+
+
+## Per-path quota recovery
+
+The JNI recovery entry point now maps the same authenticated TURN Allocate 486 response to the stable quota marker used during initial connection. Android recovery records quota-rejected credential fingerprints independently per path and refuses to attempt another allocation with a repeated credential set. The fingerprint history is capped at 16 entries per path; ordinary recovery failures continue to use the existing bounded exponential retry schedule. Successful path replacement clears that path's retry state. This prevents repeated 486 allocations when the VK Calls credential endpoint returns an unchanged TURN credential set, without affecting unrelated paths.
