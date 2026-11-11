@@ -464,7 +464,7 @@ mod deterministic_property_tests {
 
     #[test]
     fn stun_attribute_payload_lengths_round_trip_with_alignment_padding() {
-        for length in 0..=1024 {
+        for length in 0usize..=1024 {
             let payload: Vec<u8> = (0..length).map(|index| (index.wrapping_mul(31) & 0xff) as u8).collect();
             let message = StunMessage {
                 method: METHOD_ALLOCATE,
