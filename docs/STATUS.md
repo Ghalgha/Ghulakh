@@ -136,3 +136,10 @@ The server no longer exposes a cached successful ServerAck immediately after Noi
 ## Serialized TURN path replacement commit
 
 The gateway now retains the handshake-service mutex from authenticated ClientFinish processing through gateway session registration and ServerAck cache commit. This prevents two concurrent handshakes for the same path slot from reserving generations in one order but installing gateway routes in the opposite order. The lock is released before sending the UDP response; dataplane processing does not use this lock. Registration failure rolls back the reservation while the same transaction lock is held.
+
+
+## TURN control-plane fault coverage
+
+Added deterministic regression coverage for a lost Allocate response: the mock relay intentionally withholds every response, verifies that the client retransmits the exact same request bytes to the same endpoint, and confirms timeout cleanup removes both the pending transaction and provisional allocation state. The protocol transaction tests also assert byte-for-byte identity for each retransmission, preserving the authenticated request and transaction identifier.
+
+Comparative review of the six reference codebases confirms two useful patterns: worker-level recovery should remain bounded and serialized around credential refresh, while maintenance operations should use explicit retry state rather than uncontrolled loops. The implementation keeps its existing bounded transaction policy and serialized supervisor/provider ownership; it does not adopt error-string-based stale-nonce detection. The current added tests cover lost Allocate response and exact retransmission. Allocate server-error, Refresh failure, and authenticated 438 Stale Nonce end-to-end scenarios remain to be added, followed by Android stop-during-recovery lifecycle coverage.
