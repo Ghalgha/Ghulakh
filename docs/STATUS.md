@@ -156,3 +156,8 @@ Added authenticated mock-relay tests for non-challenge TURN server errors. An au
 ## Deterministic protocol property coverage
 
 The STUN codec now has deterministic property-style regression tests covering XOR address round trips across IPv4/IPv6 and boundary ports, transaction-ID masks, aligned attribute payload lengths from 0 through 1024 bytes, and rejection of every strict prefix truncation of a valid message. These are reproducible corpus tests, not coverage-guided fuzzing; a dedicated fuzz target and sustained fuzz runs remain future validation work.
+
+
+### Android startup/shutdown race hardening
+
+The initial VK credential acquisition now checks the service-running flag before native connection setup. Native session handles are published to the service only under the same monitor used by shutdown. If shutdown wins while native connection setup is in progress, the newly returned handle is immediately closed through the local transport instance rather than being published after teardown. This closes the startup counterpart to the existing recovery credential-acquisition guard. The Android build validates compilation; deterministic Android lifecycle instrumentation remains outstanding.
