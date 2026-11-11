@@ -256,6 +256,8 @@ pub enum HandshakeDriverError {
     InvalidCachePolicy,
     #[error("cached transaction key conflicts with different bytes")]
     CacheConflict,
+    #[error("handshake response cache is full")]
+    CacheCapacity,
     #[error("handshake envelope is invalid")]
     InvalidEnvelope,
 }
@@ -489,15 +491,14 @@ impl HandshakeDatagramDriver {
             }
             return Err(HandshakeDriverError::CacheConflict);
         }
-        if self.responses.len() >= self.max_cached_responses {
-            self.responses.pop_front();
-        }
-        if self.responses.iter().filter(|entry| entry.source == source).count()
-            >= self.max_cached_per_peer
+        // Never evict an existing replay record to admit a new handshake:
+        // doing so could invalidate a response that a peer is still retrying.
+        // Fail closed until an entry expires instead.
+        if self.responses.len() >= self.max_cached_responses
+            || self.responses.iter().filter(|entry| entry.source == source).count()
+                >= self.max_cached_per_peer
         {
-            if let Some(index) = self.responses.iter().position(|entry| entry.source == source) {
-                self.responses.remove(index);
-            }
+            return Err(HandshakeDriverError::CacheCapacity);
         }
         self.responses.push_back(CachedHandshakeResponse {
             source,
@@ -736,6 +737,28 @@ mod tests {
         assert_eq!(driver.pending_len(), 1);
         assert!(driver.complete_response(&[8; 16], HandshakePhase::ServerResponse, peer()));
         assert_eq!(driver.pending_len(), 0);
+    }
+
+    #[test]
+    fn response_cache_capacity_does_not_evict_existing_replay_entries() {
+        let now = Instant::now();
+        let mut driver = HandshakeDatagramDriver::new(
+            8, 2, 1, 1, Duration::from_secs(10), HandshakeRetryPolicy::default(),
+        ).unwrap();
+        let first = envelope(HandshakePhase::ClientInit, [0x61; 16], b"first");
+        let first_response = envelope(HandshakePhase::ServerResponse, [0x61; 16], b"reply");
+        let second = envelope(HandshakePhase::ClientInit, [0x62; 16], b"second");
+        let second_response = envelope(HandshakePhase::ServerResponse, [0x62; 16], b"reply");
+        driver.cache_response(&first, first_response.clone(), peer(), now).unwrap();
+        assert_eq!(
+            driver.cache_response(&second, second_response, peer(), now),
+            Err(HandshakeDriverError::CacheCapacity),
+        );
+        assert_eq!(
+            driver.cached_response(&first, peer(), now).unwrap(),
+            Some(first_response.as_slice()),
+        );
+        assert_eq!(driver.cached_response_len(), 1);
     }
 
     #[test]
