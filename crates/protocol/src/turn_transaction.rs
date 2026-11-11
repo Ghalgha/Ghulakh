@@ -347,6 +347,26 @@ mod tests {
     }
 
     #[test]
+    fn retransmissions_preserve_the_exact_authenticated_request_bytes() {
+        let start = Instant::now();
+        let mut manager = TransactionManager::new();
+        let id = [0xA5; 12];
+        let wire = request(id);
+        manager.register(wire.clone(), endpoint(), start, TransactionPolicy {
+            initial_rto: Duration::from_millis(10),
+            max_requests: 3,
+            final_timeout_multiplier: 4,
+        }).unwrap();
+
+        for (attempt, elapsed_ms) in [(2, 10), (3, 30)] {
+            let events = manager.poll(start + Duration::from_millis(elapsed_ms));
+            assert!(matches!(&events[..], [TransactionEvent::Retransmit {
+                request: retransmitted, attempt: actual, ..
+            }] if *actual == attempt && retransmitted == &wire));
+        }
+    }
+
+    #[test]
     fn cancellation_removes_pending_transaction() {
         let now = Instant::now();
         let mut manager = TransactionManager::new();
