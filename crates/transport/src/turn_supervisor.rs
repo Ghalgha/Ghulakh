@@ -1210,3 +1210,120 @@ mod control_response_loss_tests {
         supervisor.close();
     }
 }
+
+
+#[cfg(test)]
+mod stale_nonce_retry_budget_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::stun::{
+        append_message_integrity, encode_xor_address, StunAttribute, StunClass, StunMessage,
+        ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
+        METHOD_ALLOCATE, METHOD_REFRESH,
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    struct Provider {
+        calls: usize,
+    }
+
+    impl TurnAuthProvider for Provider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                self.calls += 1;
+                TurnAuthContext::new(
+                    "nonce-budget-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    vec![0x77; 32],
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    fn challenge(request: &StunMessage, code: u16, nonce: &str) -> StunMessage {
+        StunMessage {
+            method: request.method,
+            class: StunClass::ErrorResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_ERROR_CODE,
+                    value: vec![0, 0, ((code / 100) as u8) & 0x07, (code % 100) as u8],
+                },
+                StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                StunAttribute { kind: ATTR_NONCE, value: nonce.as_bytes().to_vec() },
+            ],
+        }
+    }
+
+    async fn receive(relay: &UdpSocket, buffer: &mut [u8]) -> (StunMessage, SocketAddr) {
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(buffer))
+            .await.unwrap().unwrap();
+        (StunMessage::decode(&buffer[..length]).unwrap(), source)
+    }
+
+    fn allocate_success(request: &StunMessage) -> Vec<u8> {
+        let relayed: SocketAddr = "198.51.100.91:50000".parse().unwrap();
+        let response = StunMessage {
+            method: METHOD_ALLOCATE,
+            class: StunClass::SuccessResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_XOR_RELAYED_ADDRESS,
+                    value: encode_xor_address(relayed, &request.transaction_id),
+                },
+                StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+            ],
+        };
+        append_message_integrity(&response, &[0x77; 32]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn repeated_stale_nonce_responses_stop_at_configured_retry_budget() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401, "nonce-0").encode().unwrap(), client)
+                .await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            for retry in 0..=MAX_CHALLENGE_RETRIES {
+                let (refresh, client) = receive(&relay, &mut buffer).await;
+                assert_eq!(refresh.method, METHOD_REFRESH);
+                let next_nonce = format!("nonce-{}", retry + 1);
+                let stale = challenge(&refresh, 438, &next_nonce);
+                let signed = append_message_integrity(&stale, &[0x77; 32]).unwrap();
+                relay.send_to(&signed, client).await.unwrap();
+            }
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider { calls: 0 },
+        );
+        let before = supervisor.allocate().await.unwrap();
+        let error = supervisor.refresh(600).await.unwrap_err();
+        assert!(error.to_string().contains("stale-nonce retry limit reached"));
+        assert_eq!(supervisor.provider.calls, MAX_CHALLENGE_RETRIES);
+        let after = supervisor.allocation().expect("stale-nonce exhaustion must retain confirmed lease");
+        assert_eq!(after.relayed_address, before.relayed_address);
+        assert_eq!(after.expires_at, before.expires_at);
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+}
