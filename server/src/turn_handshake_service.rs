@@ -680,6 +680,7 @@ mod tests {
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
         assert!(matches!(duplicate_finish, TurnHandshakeOutcome::Cached { response } if response == server_ack));
+    }
 
     #[test]
     fn staged_handshake_expires_and_releases_its_path_lease() {
@@ -702,7 +703,6 @@ mod tests {
         service.prune(now + HANDSHAKE_TTL);
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
         assert_eq!(service.active_handshakes(), 0);
-    }
     }
 
     #[test]
