@@ -140,14 +140,17 @@ impl TurnClientRuntime {
         }
 
         let relay_endpoint = supervisor.relay_endpoint();
-        let (handshake_socket, handshake_inbound) = match supervisor.take_handshake_plane_parts() {
-            Ok(parts) => parts,
-            Err(error) => {
-                return Err(release_failed_turn_setup(
-                    &mut supervisor, error, "take isolated TURN handshake queue",
-                ).await);
-            }
-        };
+        let (handshake_socket, handshake_inbound) =
+            match supervisor.take_handshake_plane_parts() {
+                Some(parts) => parts,
+                None => {
+                    return Err(release_failed_turn_setup(
+                        &mut supervisor,
+                        anyhow::anyhow!("TURN handshake queue is unavailable"),
+                        "take isolated TURN handshake queue",
+                    ).await);
+                }
+            };
         let handshake = match path_context {
             Some(context) => run_turn_client_handshake_with_path_context(
                 handshake_socket,
@@ -177,10 +180,12 @@ impl TurnClientRuntime {
         };
 
         let (data_socket, data_inbound) = match supervisor.take_data_plane_parts() {
-            Ok(parts) => parts,
-            Err(error) => {
+            Some(parts) => parts,
+            None => {
                 return Err(release_failed_turn_setup(
-                    &mut supervisor, error, "take TURN dataplane queue",
+                    &mut supervisor,
+                    anyhow::anyhow!("TURN dataplane queue is unavailable"),
+                    "take TURN dataplane queue",
                 ).await);
             }
         };
@@ -267,7 +272,7 @@ impl Drop for TurnClientRuntime {
 
 /// Release an allocation when path setup fails after Allocate succeeded.
 async fn release_failed_turn_setup(
-    supervisor: &mut TurnSessionSupervisor,
+    supervisor: &mut TurnSessionSupervisor<VkCallsTurnAuthProvider>,
     error: anyhow::Error,
     context: &'static str,
 ) -> anyhow::Error {
