@@ -136,11 +136,12 @@ impl TurnGateway {
             TurnHandshakeOutcome::Cached { response } => (response, None),
             TurnHandshakeOutcome::Response { response, established } => (response, established),
         };
-        // The service has already cached ServerAck. Register the authenticated
-        // session before sending it so the first client packet cannot race the
-        // registration. If UDP send fails, the client retry receives this cache.
+        // Register the authenticated data plane before committing ServerAck.
+        // A duplicate ClientFinish during registration is rejected and can retry;
+        // after commit it receives the exact cached response.
         if let Some(established) = established {
             let client_ipv4 = established.config.virtual_ipv4;
+            let handshake_id = established.handshake_id;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
             let path_context = established.path_context;
@@ -151,7 +152,7 @@ impl TurnGateway {
                 established.relay_peer,
                 opener,
                 sealer,
-                path_context.map(|context| (context, Some(established.handshake_id))),
+                path_context.map(|context| (context, Some(handshake_id))),
             ).await {
                 if let Some(context) = path_context {
                     {
@@ -159,7 +160,7 @@ impl TurnGateway {
                         if let Some(service) = handshake.as_mut() {
                             service.rollback_path_replacement(
                                 context,
-                                established.handshake_id,
+                                handshake_id,
                                 replaced_generation,
                             );
                         }
@@ -167,8 +168,17 @@ impl TurnGateway {
                 } else {
                     self.release_session_lease(client_ipv4, None, None, true).await;
                 }
-                return Err(error).context("register authenticated TURN session after ServerAck cache");
+                return Err(error).context("register authenticated TURN session before ServerAck commit");
             }
+
+            let mut handshake = self.handshake.lock().await;
+            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            service.commit_established_response(
+                payload,
+                &response,
+                relay_peer,
+                std::time::Instant::now(),
+            ).context("commit ServerAck after gateway registration")?;
         }
 
         let sent = self.socket.send_to(&response, relay_peer).await
