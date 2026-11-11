@@ -1239,12 +1239,19 @@ mod tests {
         assert_eq!(config.mtu, 1100);
 
         let session_id = keys.session_id();
-        let (mut client_tx, _) = keys.into_client_codecs();
+        let (mut client_tx, mut client_rx) = keys.into_client_codecs();
         let session = gateway.sessions.read().await.get(&session_id).cloned();
         let session = session.unwrap();
         let previous_activity = *session.last_activity.lock().unwrap();
-        let keepalive = client_tx.seal(ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD).unwrap();
+        let nonce = 0x0102_0304_0506_0708;
+        let keepalive = client_tx.seal(&ghulakh_protocol::secure_frame::keepalive_request(nonce)).unwrap();
         relay.send_to(&keepalive, gateway_addr).await.unwrap();
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
+        assert_eq!(source, gateway_addr);
+        assert_eq!(
+            client_rx.open(&buffer[..length]).unwrap(),
+            ghulakh_protocol::secure_frame::keepalive_ack(nonce),
+        );
         tokio::time::sleep(Duration::from_millis(25)).await;
         assert!(*session.last_activity.lock().unwrap() > previous_activity);
         assert!(tun_rx.try_recv().is_err());
