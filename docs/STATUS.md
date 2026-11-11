@@ -266,3 +266,6 @@ When the credential response advertises multiple UDP TURN endpoints, a DNS failu
 - A timed-out Allocate aborts provisional allocation state and does not publish a lease. A timed-out Refresh preserves the last confirmed allocation lease and its expiry metadata; the client does not assume that an unacknowledged refresh succeeded.
 - These tests exercise transaction timeout/retransmission and local state rollback. They do not prove whether a relay applied a request whose response was lost; recovery must continue to treat that remote state as uncertain and rely on bounded retry/reallocation policy.
 - CI #711 passed Rust tests, Clippy, both fuzz targets, Android JVM unit tests, native Android transport build, and debug APK assembly.
+
+- Added a repeated authenticated 438 Stale Nonce scenario. The supervisor stops after the configured three challenge retries, does not loop indefinitely, and retains the last confirmed allocation lease when refresh cannot complete.
+- CI #715 passed Rust tests, Clippy, both fuzz targets, Android JVM unit tests, native Android transport build, and debug APK assembly.
