@@ -367,9 +367,31 @@ impl TurnGateway {
                 return;
             }
         };
-        if plaintext.as_slice() == ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD {
+        if plaintext.len() == 12
+            && plaintext[..4] == *ghulakh_protocol::secure_frame::SESSION_KEEPALIVE_PAYLOAD
+        {
             if let Ok(mut last_activity) = session.last_activity.lock() {
                 *last_activity = Instant::now();
+            }
+            let nonce = u64::from_be_bytes(plaintext[4..12].try_into().expect("validated keepalive length"));
+            let response = {
+                let mut crypto = match session.crypto.lock() {
+                    Ok(crypto) => crypto,
+                    Err(_) => {
+                        self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                };
+                match crypto.sealer.seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce)) {
+                    Ok(response) => response,
+                    Err(_) => {
+                        self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            };
+            if self.socket.send_to(&response, source).await.is_err() {
+                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
