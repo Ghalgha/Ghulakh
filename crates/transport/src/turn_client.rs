@@ -432,6 +432,131 @@ mod path_group_tests {
         assert_eq!(receiver.recv().await.unwrap(), first);
     }
 
+    fn mock_path(
+        path_id: u16,
+        group_id: [u8; 16],
+    ) -> (
+        TurnClientRuntime,
+        mpsc::Receiver<DataDatagram>,
+        mpsc::Sender<DataDatagram>,
+    ) {
+        let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
+        let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
+        let pending_dataplane = tokio::spawn(async {
+            std::future::pending::<Result<TurnDataPlaneStats>>().await
+        });
+        let pending_maintenance = tokio::spawn(async {
+            std::future::pending::<Result<()>>().await
+        });
+        (
+            TurnClientRuntime {
+                config: ghulakh_protocol::session_handshake::TurnSessionConfig {
+                    virtual_ipv4: "10.77.0.2".parse().unwrap(),
+                    mtu: 1100,
+                },
+                path_context: Some(TurnPathContext {
+                    group_id,
+                    path_id,
+                    path_count: 2,
+                }),
+                uplink,
+                downlink: tokio::sync::Mutex::new(downlink),
+                dataplane_task: pending_dataplane,
+                maintenance_task: pending_maintenance,
+            },
+            uplink_rx,
+            downlink_tx,
+        )
+    }
+
+    #[tokio::test]
+    async fn path_group_dispatches_merges_downlink_and_degrades_after_path_loss() {
+        let group_id = [0x5a; 16];
+        let (path_a, mut uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, mut uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        assert_eq!(group.active_paths(), 2);
+
+        // Uplink flow affinity must keep a flow on one path while distinct
+        // flows can be distributed across the independent path queues.
+        let mut selected_flows = [None, None];
+        for source_port in 10000..10100 {
+            let bytes = packet(source_port);
+            let path = select_path_index(&bytes, &[true, true]).unwrap();
+            if selected_flows[path].is_none() {
+                selected_flows[path] = Some((path, bytes));
+            }
+            if selected_flows.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let selected_flows = selected_flows.map(Option::unwrap);
+        for (expected_path, bytes) in selected_flows {
+            let datagram = DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: bytes.clone(),
+            };
+            group.send_packet(datagram.clone()).await.unwrap();
+            let received = if expected_path == 0 {
+                uplink_a.recv().await.unwrap()
+            } else {
+                uplink_b.recv().await.unwrap()
+            };
+            assert_eq!(received, datagram);
+            let other = if expected_path == 0 { &mut uplink_b } else { &mut uplink_a };
+            assert!(other.try_recv().is_err());
+        }
+
+        // The downlink fan-in accepts packets from either independent path.
+        let down_a = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12001),
+        };
+        let down_b = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12002),
+        };
+        downlink_a.send(down_a.clone()).await.unwrap();
+        downlink_b.send(down_b.clone()).await.unwrap();
+        let mut merged = vec![
+            group.receive_packet().await.unwrap(),
+            group.receive_packet().await.unwrap(),
+        ];
+        merged.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        assert_eq!(merged, vec![down_a, down_b]);
+
+        // Closing one path's downlink makes the group unhealthy for that
+        // path; subsequent flows are assigned to the surviving path.
+        drop(downlink_a);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            async {
+                while group.active_paths() != 1 {
+                    tokio::task::yield_now().await;
+                }
+            },
+        ).await.unwrap();
+
+        let mut failed_path_flow = None;
+        for source_port in 20000..20100 {
+            let bytes = packet(source_port);
+            if select_path_index(&bytes, &[true, true]) == Some(0) {
+                failed_path_flow = Some(bytes);
+                break;
+            }
+        }
+        let bytes = failed_path_flow.expect("a flow assigned to path zero exists");
+        let datagram = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: bytes,
+        };
+        group.send_packet(datagram.clone()).await.unwrap();
+        assert_eq!(uplink_b.recv().await.unwrap(), datagram);
+        assert!(uplink_a.try_recv().is_err());
+
+        group.close();
+    }
+
     #[test]
     fn different_flows_can_select_different_paths() {
         let healthy = [true, true, true, true];
