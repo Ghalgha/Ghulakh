@@ -126,3 +126,8 @@ A path-replacement race was found during review: an old downlink forwarder could
 ## Transactional server path replacement
 
 Path-slot reservation now records the generation displaced by a replacement handshake. If Noise completion or gateway registration fails before the replacement is installed, rollback restores the previous generation instead of dropping the still-active lease. A regression test verifies that the previous generation remains releasable and the shared virtual IPv4 is not prematurely returned to the allocator. The handshake acknowledgement cache still needs a separate registration-commit design: a failed gateway registration can leave a cached acknowledgement, so this failure path is not yet considered fully closed.
+
+
+## Handshake acknowledgement commit ordering
+
+The server no longer exposes a cached successful ServerAck immediately after Noise authentication. The gateway first installs the authenticated session and its relay route; only then does the handshake service commit the exact response bytes to the replay cache. A duplicate ClientFinish arriving during registration is rejected and can be retried; after commit it receives the cached acknowledgement without advancing Noise state. Failed gateway registration rolls back the path generation and leaves no successful acknowledgement in the cache. UDP send failure after commit remains safely retryable.
