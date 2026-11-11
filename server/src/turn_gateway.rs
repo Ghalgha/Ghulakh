@@ -159,15 +159,9 @@ impl TurnGateway {
                 relay_peer,
                 std::time::Instant::now(),
             ) {
-                if let Some(context) = path_context {
-                    service.rollback_path_replacement(
-                        context,
-                        handshake_id,
-                        replaced_generation,
-                    );
-                } else {
-                    service.release_virtual_ipv4(client_ipv4);
-                }
+                // Keep the staged authenticated handshake and its address/path lease.
+                // A retransmitted ClientFinish can retry gateway registration without
+                // attempting to advance the completed Noise state again.
                 return Err(error).context("commit ServerAck replay protection before gateway registration");
             }
 
@@ -181,18 +175,17 @@ impl TurnGateway {
             ).await {
                 let service = handshake.as_mut().context("TURN handshake service is not installed")?;
                 let cache_rollback = service.remove_cached_response(payload, relay_peer);
-                if let Some(context) = path_context {
-                    service.rollback_path_replacement(
-                        context,
-                        handshake_id,
-                        replaced_generation,
-                    );
-                } else {
-                    service.release_virtual_ipv4(client_ipv4);
-                }
+                // Keep the staged keys and path lease for a retry of this exact
+                // ClientFinish. Only the replay-cache entry is rolled back because
+                // the gateway has not installed the route yet.
                 cache_rollback.context("rollback ServerAck replay cache after gateway registration failure")?;
                 return Err(error).context("register authenticated TURN session after ServerAck cache reservation");
             }
+            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            ensure!(
+                service.finalize_established_response(handshake_id, relay_peer),
+                "completed handshake staging entry disappeared after gateway registration",
+            );
         }
 
         drop(handshake);
