@@ -510,6 +510,32 @@ impl HandshakeDatagramDriver {
         Ok(())
     }
 
+    /// Remove a response cache entry when the corresponding server-side
+    /// session transaction fails before it becomes externally usable.
+    /// The request digest must match so a conflicting datagram cannot evict
+    /// another handshake's replay protection.
+    pub fn remove_cached_response(
+        &mut self,
+        request_datagram: &[u8],
+        source: SocketAddr,
+    ) -> Result<bool, HandshakeDriverError> {
+        let request = HandshakeEnvelope::decode(request_datagram)
+            .map_err(|_| HandshakeDriverError::InvalidEnvelope)?;
+        let digest: [u8; 32] = Sha256::digest(request_datagram).into();
+        let Some(index) = self.responses.iter().position(|entry| {
+            entry.source == source
+                && entry.handshake_id == request.handshake_id
+                && entry.request_phase == request.phase
+        }) else {
+            return Ok(false);
+        };
+        if self.responses[index].request_digest != digest {
+            return Err(HandshakeDriverError::CacheConflict);
+        }
+        self.responses.remove(index);
+        Ok(true)
+    }
+
     pub fn cached_response(
         &mut self,
         request_datagram: &[u8],
