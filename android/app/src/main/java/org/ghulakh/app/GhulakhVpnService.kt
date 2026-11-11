@@ -61,8 +61,8 @@ class GhulakhVpnService : VpnService() {
                 ?: throw IllegalStateException("Профиль соединения не настроен")
             val callsSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
             vkSessions.add(callsSession)
+            if (!running.get()) return
             val transport = NativeTransport()
-            nativeTransport = transport
 
             val handle = transport.nativeTurnConnect(
                 this,
@@ -73,7 +73,19 @@ class GhulakhVpnService : VpnService() {
                 profile.credential,
                 DEFAULT_TURN_PATHS,
             )
-            sessionHandle = handle
+            val retained = synchronized(this) {
+                if (running.get()) {
+                    nativeTransport = transport
+                    sessionHandle = handle
+                    true
+                } else {
+                    false
+                }
+            }
+            if (!retained) {
+                transport.nativeTurnClose(handle)
+                return
+            }
 
             val clientAddress = transport.nativeTurnClientIpv4(handle)
             val mtu = transport.nativeTurnMtu(handle)
