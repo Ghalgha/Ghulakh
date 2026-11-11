@@ -250,3 +250,7 @@ Regression tests cover typed 486 classification through nested Rust error contex
 ## Per-path quota recovery
 
 The JNI recovery entry point now maps the same authenticated TURN Allocate 486 response to the stable quota marker used during initial connection. Android recovery records quota-rejected credential fingerprints independently per path and refuses to attempt another allocation with a repeated credential set. The fingerprint history is capped at 16 entries per path; ordinary recovery failures continue to use the existing bounded exponential retry schedule. Successful path replacement clears that path's retry state. This prevents repeated 486 allocations when the VK Calls credential endpoint returns an unchanged TURN credential set, without affecting unrelated paths.
+
+## TURN relay endpoint distribution
+
+The VK Calls credential parser retains all advertised TURN URLs. Each path now selects a UDP endpoint deterministically by its authenticated path ID. Duplicate URI entries with the same case-insensitive host and port count as one endpoint; TCP/TLS alternatives are excluded from UDP relay selection. Recovery reuses the same path ID and therefore selects the same advertised UDP endpoint. If only one UDP endpoint is advertised, all paths continue to use it. This is endpoint distribution, not proof that distinct hostnames map to independent quota buckets: DNS aliases, shared relay backends, and VK quota scope still require live validation. The default remains five paths; no unverified per-credential or per-relay allocation cap has been introduced.
