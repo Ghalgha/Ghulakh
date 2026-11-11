@@ -262,6 +262,7 @@ class GhulakhVpnService : VpnService() {
                     callsSession = null
                     failures.remove(pathId)
                     nextAttemptAt.remove(pathId)
+                    rejectedCredentialsByPath.remove(pathId)
                     updateNotification("VPN активен · TURN-путь $pathId восстановлен")
                 } catch (error: Throwable) {
                     if (error.message == "TURN_ALLOCATION_QUOTA_486" && callsSession != null) {
