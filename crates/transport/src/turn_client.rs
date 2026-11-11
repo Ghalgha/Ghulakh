@@ -342,6 +342,22 @@ impl TurnClientPathGroup {
         self.healthy.iter().filter(|path| path.load(Ordering::Acquire)).count()
     }
 
+    /// Authenticated metadata for a path slot, including a failed slot.
+    pub fn path_context(&self, path_id: u16) -> Option<TurnPathContext> {
+        self.paths.read().ok()?.iter().find_map(|path| {
+            path.path_context().filter(|context| context.path_id == path_id)
+        })
+    }
+
+    /// Path identifiers whose dataplane or allocation maintenance has stopped.
+    pub fn failed_path_ids(&self) -> Vec<u16> {
+        let Ok(paths) = self.paths.read() else { return Vec::new() };
+        paths.iter().enumerate().filter_map(|(index, path)| {
+            (!self.healthy.get(index)?.load(Ordering::Acquire))
+                .then(|| path.path_context().map(|context| context.path_id)).flatten()
+        }).collect()
+    }
+
     /// Atomically replace one failed path after a fresh authenticated TURN handshake.
     pub fn replace_path(&self, replacement: TurnClientRuntime) -> Result<()> {
         anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4 or MTU");
