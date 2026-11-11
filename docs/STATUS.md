@@ -258,3 +258,11 @@ The VK Calls credential parser retains all advertised TURN URLs. Each path now s
 ## TURN DNS endpoint resilience
 
 When the credential response advertises multiple UDP TURN endpoints, a DNS failure for one endpoint no longer aborts path startup if another endpoint resolves successfully. Resolved addresses are still filtered to the protected socket's IP family and deduplicated before deterministic path-ID selection. Startup fails only when no compatible UDP address can be resolved. A regression test covers a failed candidate followed by a valid IPv4/IPv6 result; this does not establish live VK endpoint or quota independence.
+
+
+## TURN control response-loss coverage
+
+- Added deterministic mock-relay tests for a lost authenticated Allocate success response and a lost Refresh success response. Both cases verify byte-identical retransmission with the same transaction ID.
+- A timed-out Allocate aborts provisional allocation state and does not publish a lease. A timed-out Refresh preserves the last confirmed allocation lease and its expiry metadata; the client does not assume that an unacknowledged refresh succeeded.
+- These tests exercise transaction timeout/retransmission and local state rollback. They do not prove whether a relay applied a request whose response was lost; recovery must continue to treat that remote state as uncertain and rely on bounded retry/reallocation policy.
+- CI #711 passed Rust tests, Clippy, both fuzz targets, Android JVM unit tests, native Android transport build, and debug APK assembly.
