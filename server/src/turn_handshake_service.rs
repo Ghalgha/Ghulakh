@@ -61,6 +61,8 @@ pub struct EstablishedTurnSession {
     pub config: TurnSessionConfig,
     pub frame_keys: SessionFrameKeys,
     pub path_context: Option<TurnPathContext>,
+    /// Generation displaced while reserving this path, if this handshake replaces it.
+    pub replaced_generation: Option<[u8; 16]>,
 }
 
 struct PathGroupLease {
@@ -168,6 +170,7 @@ impl TurnHandshakeService {
                     .context("no active handshake for ClientFinish")?;
                 let verifier = Arc::clone(&self.verify_credential);
                 let mut reserved_path = None;
+                let mut replaced_generation = None;
                 let mut reserved_legacy_ip = None;
                 let finish_result = pending.server.receive_client_finish_with_path_context_builder(
                     datagram,
@@ -175,8 +178,10 @@ impl TurnHandshakeService {
                     |path_context| {
                         let virtual_ipv4 = if let Some(context) = path_context {
                             reserved_path = Some(context);
-                            self.reserve_path(context, envelope.handshake_id)
-                                .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?
+                            let (address, previous) = self.reserve_path_transactional(context, envelope.handshake_id)
+                                .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
+                            replaced_generation = previous;
+                            address
                         } else {
                             let address = self.allocate_virtual_ipv4()
                                 .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
@@ -195,7 +200,7 @@ impl TurnHandshakeService {
                     Ok(result) => result,
                     Err(error) => {
                         if let Some(context) = reserved_path {
-                            self.rollback_path(context, envelope.handshake_id);
+                            self.rollback_path_replacement(context, envelope.handshake_id, replaced_generation);
                         }
                         if let Some(address) = reserved_legacy_ip {
                             self.allocated_ips.remove(&address);
@@ -241,6 +246,7 @@ impl TurnHandshakeService {
                         config,
                         frame_keys,
                         path_context,
+                        replaced_generation,
                     }),
                 })
             }
@@ -304,6 +310,63 @@ impl TurnHandshakeService {
             active_paths,
         });
         Ok(virtual_ipv4)
+    }
+
+    fn reserve_path_transactional(
+        &mut self,
+        context: TurnPathContext,
+        generation: [u8; 16],
+    ) -> Result<(Ipv4Addr, Option<[u8; 16]>)> {
+        context.validate().context("validate authenticated TURN path context")?;
+        if let Some(group) = self.path_groups.get_mut(&context.group_id) {
+            ensure!(group.path_count == context.path_count, "TURN path group count mismatch");
+            ensure!(
+                group.active_paths.contains_key(&context.path_id)
+                    || group.active_paths.len() < usize::from(group.path_count),
+                "TURN path group is already full"
+            );
+            let previous = group.active_paths.insert(context.path_id, generation);
+            return Ok((group.virtual_ipv4, previous));
+        }
+
+        let virtual_ipv4 = self.allocate_virtual_ipv4()?;
+        self.allocated_ips.insert(virtual_ipv4);
+        let mut active_paths = HashMap::new();
+        active_paths.insert(context.path_id, generation);
+        self.path_groups.insert(context.group_id, PathGroupLease {
+            virtual_ipv4,
+            path_count: context.path_count,
+            active_paths,
+        });
+        Ok((virtual_ipv4, None))
+    }
+
+    /// Undo a reservation if gateway registration fails, restoring the displaced
+    /// generation so the still-registered old gateway session remains valid.
+    pub fn rollback_path_replacement(
+        &mut self,
+        context: TurnPathContext,
+        generation: [u8; 16],
+        previous: Option<[u8; 16]>,
+    ) -> bool {
+        let Some(group) = self.path_groups.get_mut(&context.group_id) else {
+            return false;
+        };
+        if group.active_paths.get(&context.path_id) != Some(&generation) {
+            return false;
+        }
+        if let Some(previous_generation) = previous {
+            group.active_paths.insert(context.path_id, previous_generation);
+            true
+        } else {
+            group.active_paths.remove(&context.path_id);
+            if group.active_paths.is_empty() {
+                let address = group.virtual_ipv4;
+                self.path_groups.remove(&context.group_id);
+                self.allocated_ips.remove(&address);
+            }
+            true
+        }
     }
 
     fn rollback_path(&mut self, context: TurnPathContext, generation: [u8; 16]) -> bool {
