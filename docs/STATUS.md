@@ -151,3 +151,8 @@ Android recovery shutdown now checks the service-running flag immediately after 
 ## TURN server-error state regression coverage
 
 Added authenticated mock-relay tests for non-challenge TURN server errors. An authenticated Allocate error verifies MESSAGE-INTEGRITY and confirms the provisional allocation is aborted. An authenticated Refresh error verifies integrity and confirms the existing allocation lease remains available after the failed refresh transition. Both tests assert that only the initial 401 causes credential-provider invocation; ordinary server errors are not misclassified as authentication challenges.
+
+
+## Deterministic protocol property coverage
+
+The STUN codec now has deterministic property-style regression tests covering XOR address round trips across IPv4/IPv6 and boundary ports, transaction-ID masks, aligned attribute payload lengths from 0 through 1024 bytes, and rejection of every strict prefix truncation of a valid message. These are reproducible corpus tests, not coverage-guided fuzzing; a dedicated fuzz target and sustained fuzz runs remain future validation work.
