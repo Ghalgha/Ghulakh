@@ -834,8 +834,10 @@ mod path_group_tests {
         let pending_dataplane = tokio::spawn(async {
             std::future::pending::<Result<TurnDataPlaneStats>>().await
         });
-        let pending_maintenance = tokio::spawn(async {
-            std::future::pending::<Result<()>>().await
+        let (shutdown_signal, mut shutdown_rx) = watch::channel(false);
+        let pending_maintenance = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+            Ok(())
         });
         (
             TurnClientRuntime {
@@ -852,6 +854,7 @@ mod path_group_tests {
                 downlink: tokio::sync::Mutex::new(downlink),
                 dataplane_task: pending_dataplane,
                 maintenance_task: pending_maintenance,
+                shutdown_signal,
             },
             uplink_rx,
             downlink_tx,
