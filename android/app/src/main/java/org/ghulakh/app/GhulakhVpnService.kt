@@ -228,7 +228,7 @@ class GhulakhVpnService : VpnService() {
                 } catch (error: Throwable) {
                     runCatching { callsSession?.finish() }
                     val count = failures[pathId] ?: 0
-                    val delaySeconds = (1L shl count.coerceAtMost(5)).coerceAtMost(30L)
+                    val delaySeconds = TurnRecoveryBackoffPolicy.delaySeconds(count)
                     failures[pathId] = count + 1
                     nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delaySeconds * 1_000L
                     if (running.get()) {
