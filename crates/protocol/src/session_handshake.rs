@@ -460,6 +460,18 @@ impl SessionFrameKeys {
         self.session_id
     }
 
+    /// Duplicate the derived directional keys for a bounded handshake commit retry.
+    /// The copies remain zeroizing and are discarded when the pending commit expires.
+    pub fn duplicate(&self) -> Self {
+        Self {
+            client_to_server_key: Zeroizing::new(*self.client_to_server_key),
+            client_to_server_prefix: Zeroizing::new(*self.client_to_server_prefix),
+            server_to_client_key: Zeroizing::new(*self.server_to_client_key),
+            server_to_client_prefix: Zeroizing::new(*self.server_to_client_prefix),
+            session_id: self.session_id,
+        }
+    }
+
     pub fn into_client_codecs(self) -> (FrameSealer, FrameOpener) {
         let sender = FrameSealer::new(
             *self.client_to_server_key,
