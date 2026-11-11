@@ -1,0 +1,58 @@
+name: Temporary failed CI cleanup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_run:
+    workflows: ["Build and test"]
+    types: [completed]
+
+permissions:
+  actions: write
+
+concurrency:
+  group: failed-ci-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    name: Keep five most recent failed CI runs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete older failed Build and test runs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const workflowName = "Build and test";
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRunsForRepo,
+              { owner, repo, per_page: 100 }
+            );
+
+            const failed = runs
+              .filter(run =>
+                run.name === workflowName &&
+                run.status === "completed" &&
+                run.conclusion === "failure"
+              )
+              .sort((a, b) =>
+                new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+              );
+
+            const obsolete = failed.slice(5);
+            core.info(`Found ${failed.length} failed "${workflowName}" runs.`);
+            core.info(`Keeping the five newest; deleting ${obsolete.length} older runs.`);
+
+            for (const run of obsolete) {
+              core.info(`Deleting run #${run.run_number} (ID ${run.id}, created ${run.created_at}).`);
+              await github.rest.actions.deleteWorkflowRun({
+                owner,
+                repo,
+                run_id: run.id
+              });
+            }
+
+            core.info("Cleanup completed. Successful and in-progress runs were not modified.");
