@@ -33,9 +33,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-fuzz
+      - name: Install cargo-fuzz for the native runner
+        run: cargo +nightly install cargo-fuzz --locked
       - name: Fuzz STUN decoder
         run: cargo +nightly fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
