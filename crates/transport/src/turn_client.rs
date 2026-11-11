@@ -8,7 +8,7 @@ use std::{
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock, Mutex as StdMutex,
     },
 };
 
@@ -227,10 +227,11 @@ impl Drop for TurnClientRuntime {
 /// throughput across concurrent flows and avoiding packet reordering.
 pub struct TurnClientPathGroup {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
-    paths: Vec<Arc<TurnClientRuntime>>,
+    paths: RwLock<Vec<Arc<TurnClientRuntime>>>,
     healthy: Vec<Arc<AtomicBool>>,
     downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
-    forwarders: Vec<JoinHandle<()>>,
+    downlink_senders: StdMutex<mpsc::Sender<DataDatagram>>,
+    forwarders: StdMutex<Vec<JoinHandle<()>>>,
     uplink_queue_drops: AtomicU64,
 }
 
@@ -281,14 +282,16 @@ impl TurnClientPathGroup {
                 path_health.store(false, Ordering::Release);
             }));
         }
+        let downlink_tx_for_group = downlink_tx.clone();
         drop(downlink_tx);
 
         Ok(Self {
             config,
-            paths,
+            paths: RwLock::new(paths),
             healthy,
             downlink: tokio::sync::Mutex::new(downlink),
-            forwarders,
+            downlink_senders: StdMutex::new(downlink_tx_for_group),
+            forwarders: StdMutex::new(forwarders),
             uplink_queue_drops: AtomicU64::new(0),
         })
     }
@@ -299,6 +302,49 @@ impl TurnClientPathGroup {
 
     pub fn active_paths(&self) -> usize {
         self.healthy.iter().filter(|path| path.load(Ordering::Acquire)).count()
+    }
+
+    /// Atomically replace one failed path after a fresh authenticated TURN handshake.
+    pub fn replace_path(&self, replacement: TurnClientRuntime) -> Result<()> {
+        anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4 or MTU");
+        let context = replacement.path_context()
+            .context("replacement TURN path has no authenticated path context")?;
+        context.validate().context("validate replacement TURN path context")?;
+        let mut paths = self.paths.write()
+            .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
+        let first = paths.first().context("TURN path group is empty")?
+            .path_context().context("existing TURN path has no path context")?;
+        anyhow::ensure!(
+            context.group_id == first.group_id && context.path_count == first.path_count,
+            "replacement TURN path belongs to a different tunnel group"
+        );
+        let index = paths.iter().position(|path| {
+            path.path_context().is_some_and(|existing| existing.path_id == context.path_id)
+        }).context("replacement TURN path identifier is not part of this group")?;
+        anyhow::ensure!(
+            !self.healthy[index].load(Ordering::Acquire),
+            "cannot replace a healthy TURN path"
+        );
+        let replacement = Arc::new(replacement);
+        let old = std::mem::replace(&mut paths[index], Arc::clone(&replacement));
+        old.close();
+        self.healthy[index].store(true, Ordering::Release);
+        let path_health = Arc::clone(&self.healthy[index]);
+        let downlink_sender = self.downlink_senders.lock()
+            .map_err(|_| anyhow::anyhow!("TURN downlink sender registry is poisoned"))?
+            .clone();
+        let forwarder = tokio::spawn(async move {
+            while let Ok(packet) = replacement.receive_packet().await {
+                if downlink_sender.send(packet).await.is_err() {
+                    break;
+                }
+            }
+            path_health.store(false, Ordering::Release);
+        });
+        self.forwarders.lock()
+            .map_err(|_| anyhow::anyhow!("TURN path forwarder registry is poisoned"))?
+            .push(forwarder);
+        Ok(())
     }
 
     /// Number of uplink IP packets dropped because their flow-affine path queue was full.
@@ -312,13 +358,15 @@ impl TurnClientPathGroup {
             .collect();
         let start = select_path_index(&packet.packet, &health)
             .context("TURN path group has no healthy paths")?;
-        for offset in 0..self.paths.len() {
-            let index = (start + offset) % self.paths.len();
+        let paths = self.paths.read()
+            .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
+        for offset in 0..paths.len() {
+            let index = (start + offset) % paths.len();
             if !self.healthy[index].load(Ordering::Acquire) {
                 continue;
             }
             match enqueue_uplink_packet(
-                &self.paths[index].uplink,
+                &paths[index].uplink,
                 packet.clone(),
                 &self.uplink_queue_drops,
             ) {
@@ -340,22 +388,22 @@ impl TurnClientPathGroup {
     }
 
     pub fn close(&self) {
-        for task in &self.forwarders {
-            task.abort();
+        if let Ok(tasks) = self.forwarders.lock() {
+            for task in tasks.iter() { task.abort(); }
         }
-        for path in &self.paths {
-            path.close();
+        if let Ok(paths) = self.paths.read() {
+            for path in paths.iter() { path.close(); }
         }
     }
 }
 
 impl Drop for TurnClientPathGroup {
     fn drop(&mut self) {
-        for task in &self.forwarders {
-            task.abort();
+        if let Ok(tasks) = self.forwarders.get_mut() {
+            for task in tasks.iter() { task.abort(); }
         }
-        for path in &self.paths {
-            path.close();
+        if let Ok(paths) = self.paths.get_mut() {
+            for path in paths.iter() { path.close(); }
         }
     }
 }
