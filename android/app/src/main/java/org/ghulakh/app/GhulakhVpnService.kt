@@ -192,7 +192,14 @@ class GhulakhVpnService : VpnService() {
                         profile.credential,
                         pathId,
                     )) { "Native TURN path replacement was rejected" }
-                    synchronized(vkSessions) { vkSessions.add(callsSession) }
+                    synchronized(vkSessions) {
+                        if (running.get()) {
+                            vkSessions.add(callsSession)
+                        } else {
+                            callsSession.finish()
+                            return
+                        }
+                    }
                     failures.remove(pathId)
                     nextAttemptAt.remove(pathId)
                     updateNotification("VPN активен · TURN-путь $pathId восстановлен")
