@@ -139,6 +139,22 @@ mod tests {
     }
 
     #[test]
+    fn decodes_authenticated_keepalive_ack_as_control_payload() {
+        let key = [0x42; 32];
+        let prefix = [0x31; 4];
+        let session = [0x77; 8];
+        let nonce = 0x0102_0304_0506_0708;
+        let mut server = FrameSealer::new(key, prefix, session, FrameDirection::ServerToClient);
+        let protected = server.seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce)).unwrap();
+        let encoded = encode_channel_data(0x4001, &protected).unwrap();
+        let mut client = TurnDataReceiver::new(
+            0x4001,
+            FrameOpener::new(key, prefix, session, FrameDirection::ServerToClient),
+        );
+        assert_eq!(client.decode_payload(&encoded).unwrap(), TurnDataPayload::KeepaliveAck(nonce));
+    }
+
+    #[test]
     fn rejects_wrong_channel_before_decryption() {
         let (mut sender, _) = pair();
         let mut encoded = sender.encode_packet(&ipv4_packet()).unwrap();
