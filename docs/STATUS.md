@@ -272,7 +272,7 @@ When the credential response advertises multiple UDP TURN endpoints, a DNS failu
 
 ## TURN path shutdown and recovery race protection
 
-The client path group now has an explicit, one-way closed state and a watch signal. Closing the group wakes a blocked downlink receive and cancels a blocked uplink enqueue, so Android's TUN writer/reader JNI calls do not remain parked on a queue after native session shutdown. The close signal is published before path teardown.
+The client path group now has an explicit, one-way closed state and a watch signal. Closing the group wakes a blocked downlink receive and rejects new uplink sends after closure, so Android's TUN writer JNI call does not remain parked on the downlink queue after native session shutdown. The close signal is published before path teardown.
 
 Path replacement checks the closed state while holding the path registry write lock. This closes the race in which a recovery operation could finish its authenticated TURN allocation after the session handle had been removed and then install a new path into an already closed group. JNI recovery also selects the replacement handshake against the group close signal; stopping the session cancels the in-flight recovery future. The replacement is not committed unless the group remains open.
 
