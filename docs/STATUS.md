@@ -161,3 +161,10 @@ The STUN codec now has deterministic property-style regression tests covering XO
 ### Android startup/shutdown race hardening
 
 The initial VK credential acquisition now checks the service-running flag before native connection setup. Native session handles are published to the service only under the same monitor used by shutdown. If shutdown wins while native connection setup is in progress, the newly returned handle is immediately closed through the local transport instance rather than being published after teardown. This closes the startup counterpart to the existing recovery credential-acquisition guard. The Android build validates compilation; deterministic Android lifecycle instrumentation remains outstanding.
+
+
+## Bounded parser fuzzing
+
+Added a separate cargo-fuzz package, excluded from the main Cargo workspace, with independent targets for the STUN message decoder and handshake datagram envelope decoder. CI runs each target for a bounded 15-second campaign with per-input timeout and RSS limits. Successful decodes are checked for encode/decode round-trip invariants. This is an initial smoke-fuzz gate, not a substitute for longer scheduled fuzz campaigns or corpus retention across releases.
+
+Comparative implementation review: worker recovery variants use bounded retry delays and worker-start pacing; scheduler variants distribute packet classes across workers. Ghulakh retains per-path exponential recovery backoff and flow affinity. Worker-start pacing may be added if physical evidence shows TURN allocation bursts or credential throttling; packet striping is still deferred because packet ordering and reassembly requirements are not yet validated.
