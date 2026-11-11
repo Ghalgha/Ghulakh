@@ -268,3 +268,150 @@ mod tests {
         assert_eq!(MAX_CHALLENGE_RETRIES, 3);
     }
 }
+
+
+
+#[cfg(test)]
+mod authenticated_stale_nonce_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::stun::{
+        append_message_integrity, encode_xor_address, StunAttribute, StunClass, StunMessage,
+        ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
+        METHOD_ALLOCATE, METHOD_REFRESH,
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    struct TestProvider {
+        challenges: Vec<(u16, String)>,
+    }
+
+    impl TurnAuthProvider for TestProvider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                self.challenges.push((challenge.code, challenge.nonce.clone()));
+                let key = if challenge.nonce == "nonce-1" { vec![0x11; 32] } else { vec![0x22; 32] };
+                TurnAuthContext::new(
+                    "test-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    key,
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    fn error_response(request: &StunMessage, code: u16, nonce: &str) -> StunMessage {
+        StunMessage {
+            method: request.method,
+            class: StunClass::ErrorResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_ERROR_CODE,
+                    value: vec![0, 0, ((code / 100) as u8) & 0x07, (code % 100) as u8],
+                },
+                StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                StunAttribute { kind: ATTR_NONCE, value: nonce.as_bytes().to_vec() },
+            ],
+        }
+    }
+
+    async fn receive_request(relay: &UdpSocket, buffer: &mut [u8]) -> (StunMessage, SocketAddr) {
+        let (length, source) = timeout(Duration::from_secs(3), relay.recv_from(buffer))
+            .await.unwrap().unwrap();
+        (StunMessage::decode(&buffer[..length]).unwrap(), source)
+    }
+
+    #[tokio::test]
+    async fn verified_stale_nonce_reauthenticates_and_retries_refresh() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+
+            // Initial unauthenticated Allocate receives the 401 challenge.
+            let (allocate_1, client) = receive_request(&relay, &mut buffer).await;
+            assert_eq!(allocate_1.method, METHOD_ALLOCATE);
+            let challenge_401 = error_response(&allocate_1, 401, "nonce-1").encode().unwrap();
+            relay.send_to(&challenge_401, client).await.unwrap();
+
+            // The authenticated Allocate uses the first nonce and key.
+            let (allocate_2, client) = receive_request(&relay, &mut buffer).await;
+            assert_eq!(
+                allocate_2.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value,
+                b"nonce-1",
+            );
+            let relayed: SocketAddr = "198.51.100.10:50000".parse().unwrap();
+            let allocate_success = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::SuccessResponse,
+                transaction_id: allocate_2.transaction_id,
+                attributes: vec![
+                    StunAttribute {
+                        kind: ATTR_XOR_RELAYED_ADDRESS,
+                        value: encode_xor_address(relayed, &allocate_2.transaction_id),
+                    },
+                    StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+                ],
+            };
+            let signed_allocate = append_message_integrity(&allocate_success, &[0x11; 32]).unwrap();
+            relay.send_to(&signed_allocate, client).await.unwrap();
+
+            // Refresh with the old nonce gets an authenticated 438 Stale Nonce.
+            let (refresh_1, client) = receive_request(&relay, &mut buffer).await;
+            assert_eq!(refresh_1.method, METHOD_REFRESH);
+            assert_eq!(
+                refresh_1.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value,
+                b"nonce-1",
+            );
+            let stale_nonce = error_response(&refresh_1, 438, "nonce-2");
+            let signed_stale = append_message_integrity(&stale_nonce, &[0x11; 32]).unwrap();
+            relay.send_to(&signed_stale, client).await.unwrap();
+
+            // Retry must carry the new nonce and use the new integrity key.
+            let (refresh_2, client) = receive_request(&relay, &mut buffer).await;
+            assert_eq!(refresh_2.method, METHOD_REFRESH);
+            assert_eq!(
+                refresh_2.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value,
+                b"nonce-2",
+            );
+            let refresh_success = StunMessage {
+                method: METHOD_REFRESH,
+                class: StunClass::SuccessResponse,
+                transaction_id: refresh_2.transaction_id,
+                attributes: vec![StunAttribute {
+                    kind: ATTR_LIFETIME,
+                    value: 600u32.to_be_bytes().to_vec(),
+                }],
+            };
+            let signed_refresh = append_message_integrity(&refresh_success, &[0x22; 32]).unwrap();
+            relay.send_to(&signed_refresh, client).await.unwrap();
+        });
+
+        let provider = TestProvider { challenges: Vec::new() };
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            provider,
+        );
+        let lease = supervisor.allocate().await.unwrap();
+        assert_eq!(lease.relayed_address, "198.51.100.10:50000".parse().unwrap());
+        let refreshed = supervisor.refresh(600).await.unwrap().unwrap();
+        assert_eq!(refreshed.lifetime_seconds, 600);
+        assert_eq!(
+            supervisor.provider.challenges,
+            vec![(401, "nonce-1".into()), (438, "nonce-2".into())],
+        );
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+}
