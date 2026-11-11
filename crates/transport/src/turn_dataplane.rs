@@ -75,9 +75,9 @@ impl TurnDataPlane {
                 inbound = self.inbound.recv() => Event::Inbound(inbound),
                 packet = uplink.recv() => Event::Uplink(packet),
                 _ = keepalive.tick() => Event::Keepalive,
-                _ = tokio::time::sleep_until(tokio::time::Instant::from_std(
+                _ = tokio::time::sleep_until(
                     pending_keepalive.map(|(_, sent)| sent + KEEPALIVE_TIMEOUT).unwrap_or_else(|| Instant::now() + Duration::from_secs(24 * 60 * 60))
-                )) => Event::KeepaliveTimeout,
+                ) => Event::KeepaliveTimeout,
             };
             match event {
                 Event::Inbound(inbound) => {
