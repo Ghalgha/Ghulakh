@@ -225,3 +225,12 @@ The change relies on the existing single serialized handshake-service lock in `T
 ## TURN path startup pacing
 
 Independent TURN path allocations now start with a 200 ms interval between task launches. The paths still establish concurrently after launch and remain independent in the data plane; only the initial allocation/handshake burst is staggered. The interval follows the worker-start pacing pattern observed in the reviewed implementations, but it is a conservative implementation choice rather than a measured VK Calls quota or throughput optimum. Live allocation limits and credential reuse behavior remain subject to later physical validation.
+
+
+## Handshake commit retry and replay-cache saturation
+
+Completed authenticated ClientFinish processing is now staged (with zeroizing duplicate key material) until the gateway confirms session registration. If registration fails, the exact ClientFinish can be retried and the server reuses the same authenticated acknowledgement/session keys without advancing Noise a second time. Staged entries are bounded by the active-handshake limit and expire after the handshake TTL; expiry releases the associated path-generation or legacy IPv4 reservation. Successful gateway registration finalizes and drops the staged key material.
+
+The handshake datagram response cache now fails closed when its global or per-peer capacity is reached instead of evicting an older live replay record. This preserves exact-response replay for existing in-flight handshakes; new handshakes must wait for cache expiry when saturated. The older standalone response-cache primitive remains separately bounded and retains its documented FIFO behavior; the live datagram driver uses the non-evicting policy.
+
+Regression coverage verifies duplicate ClientFinish retry from staged authenticated state, staged path-lease expiry, and that response-cache saturation does not evict a prior replay record. CI validation is pending for these changes.
