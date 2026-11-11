@@ -341,9 +341,15 @@ fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result
         let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
         addresses.find(SocketAddr::is_ipv4).context("TURN gateway host did not resolve to IPv4")
     })?;
-    let replacement = session.runtime.block_on(TurnClientRuntime::connect_with_path_context(
-        socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
-    )).context("establish replacement TURN allocation")?;
+    let replacement = session.runtime.block_on(async {
+        tokio::select! {
+            biased;
+            _ = session.client.closed() => anyhow::bail!("native TURN session closed during path recovery"),
+            result = TurnClientRuntime::connect_with_path_context(
+                socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
+            ) => result.context("establish replacement TURN allocation"),
+        }
+    })?;
     session.client.replace_path(replacement).context("install replacement TURN path")
 }
 
