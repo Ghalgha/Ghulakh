@@ -38,6 +38,25 @@ struct PendingHandshake {
     expires_at: Instant,
 }
 
+struct CompletedHandshake {
+    established: EstablishedTurnSession,
+    response: Vec<u8>,
+    expires_at: Instant,
+}
+
+impl EstablishedTurnSession {
+    fn duplicate(&self) -> Self {
+        Self {
+            handshake_id: self.handshake_id,
+            relay_peer: self.relay_peer,
+            config: self.config,
+            frame_keys: self.frame_keys.duplicate(),
+            path_context: self.path_context,
+            replaced_generation: self.replaced_generation,
+        }
+    }
+}
+
 struct PeerRate {
     window_started: Instant,
     requests: u32,
@@ -76,6 +95,7 @@ pub struct TurnHandshakeService {
     verify_credential: Arc<CredentialVerifier>,
     delivery: HandshakeDatagramDriver,
     pending: HashMap<(SocketAddr, [u8; 16]), PendingHandshake>,
+    completed: HashMap<(SocketAddr, [u8; 16]), CompletedHandshake>,
     peer_rates: HashMap<SocketAddr, PeerRate>,
     next_client_host: u32,
     allocated_ips: HashSet<Ipv4Addr>,
@@ -99,6 +119,7 @@ impl TurnHandshakeService {
                 HandshakeRetryPolicy::default(),
             ).context("initialize bounded handshake delivery cache")?,
             pending: HashMap::with_capacity(MAX_ACTIVE_HANDSHAKES),
+            completed: HashMap::with_capacity(MAX_ACTIVE_HANDSHAKES),
             peer_rates: HashMap::with_capacity(MAX_RATE_PEERS),
             next_client_host: 2,
             allocated_ips: HashSet::new(),
@@ -131,11 +152,20 @@ impl TurnHandshakeService {
         let envelope = ghulakh_protocol::handshake_datagram::HandshakeEnvelope::decode(datagram)
             .context("decode client handshake envelope")?;
         let key = (relay_peer, envelope.handshake_id);
+        if envelope.phase == HandshakePhase::ClientFinish {
+            if let Some(completed) = self.completed.get(&key) {
+                ensure!(completed.expires_at > now, "completed handshake commit expired");
+                return Ok(TurnHandshakeOutcome::Response {
+                    response: completed.response.clone(),
+                    established: Some(completed.established.duplicate()),
+                });
+            }
+        }
 
         match envelope.phase {
             HandshakePhase::ClientInit => {
                 ensure!(
-                    self.pending.len() < MAX_ACTIVE_HANDSHAKES,
+                    self.pending.len() + self.completed.len() < MAX_ACTIVE_HANDSHAKES,
                     "server handshake capacity reached"
                 );
                 ensure!(
@@ -224,16 +254,22 @@ impl TurnHandshakeService {
 
                 // ServerAck is cached only after the gateway commits this session.
                 // Until then, duplicate ClientFinish datagrams cannot receive success.
+                let established = EstablishedTurnSession {
+                    handshake_id: envelope.handshake_id,
+                    relay_peer,
+                    config,
+                    frame_keys,
+                    path_context,
+                    replaced_generation,
+                };
+                self.completed.insert(key, CompletedHandshake {
+                    established: established.duplicate(),
+                    response: response.clone(),
+                    expires_at: now + HANDSHAKE_TTL,
+                });
                 Ok(TurnHandshakeOutcome::Response {
                     response,
-                    established: Some(EstablishedTurnSession {
-                        handshake_id: envelope.handshake_id,
-                        relay_peer,
-                        config,
-                        frame_keys,
-                        path_context,
-                        replaced_generation,
-                    }),
+                    established: Some(established),
                 })
             }
             _ => bail!("unexpected client handshake phase"),
@@ -268,6 +304,23 @@ impl TurnHandshakeService {
     fn prune(&mut self, now: Instant) {
         self.delivery.prune_expired(now);
         self.pending.retain(|_, handshake| handshake.expires_at > now);
+        let expired: Vec<_> = self.completed.iter()
+            .filter_map(|(key, handshake)| (handshake.expires_at <= now).then_some(*key))
+            .collect();
+        for key in expired {
+            if let Some(completed) = self.completed.remove(&key) {
+                let established = completed.established;
+                if let Some(context) = established.path_context {
+                    self.rollback_path_replacement(
+                        context,
+                        established.handshake_id,
+                        established.replaced_generation,
+                    );
+                } else {
+                    self.release_virtual_ipv4(established.config.virtual_ipv4);
+                }
+            }
+        }
         self.peer_rates.retain(|_, rate| {
             now.saturating_duration_since(rate.window_started) < RATE_WINDOW
         });
@@ -376,7 +429,16 @@ impl TurnHandshakeService {
     }
 
     pub fn active_handshakes(&self) -> usize {
-        self.pending.len()
+        self.pending.len() + self.completed.len()
+    }
+
+    /// Release staged key material after the gateway has registered the session.
+    pub fn finalize_established_response(
+        &mut self,
+        handshake_id: [u8; 16],
+        relay_peer: SocketAddr,
+    ) -> bool {
+        self.completed.remove(&(relay_peer, handshake_id)).is_some()
     }
 
     /// Commit the exact ServerAck only after the gateway has installed the
