@@ -295,11 +295,23 @@ fn failed_turn_paths_impl(handle: jlong) -> Result<Vec<jint>> {
     Ok(turn_session(handle)?.client.failed_path_ids().into_iter().map(jint::from).collect())
 }
 
-fn recover_turn_path_impl(
-    env: &mut JNIEnv, vpn_service: JObject, handle: jlong,
-    gateway_host: JString, gateway_port: jint, turn_credentials_json: JString,
-    pinned_server_key: JByteArray, credential: JString, path_id: jint,
-) -> Result<()> {
+
+struct TurnRecoverArgs<'local> {
+    vpn_service: JObject<'local>,
+    handle: jlong,
+    gateway_host: JString<'local>,
+    gateway_port: jint,
+    turn_credentials_json: JString<'local>,
+    pinned_server_key: JByteArray<'local>,
+    credential: JString<'local>,
+    path_id: jint,
+}
+
+fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result<()> {
+    let TurnRecoverArgs {
+        vpn_service, handle, gateway_host, gateway_port, turn_credentials_json,
+        pinned_server_key, credential, path_id,
+    } = args;
     let host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
     let credentials_json = env.get_string(&turn_credentials_json)?.to_string_lossy().into_owned();
     let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
@@ -474,7 +486,11 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnRecoverPat
     host: JString, port: jint, credentials: JString, pinned_key: JByteArray,
     credential: JString, path_id: jint,
 ) -> jboolean {
-    match recover_turn_path_impl(&mut env, service, handle, host, port, credentials, pinned_key, credential, path_id) {
+    match recover_turn_path_impl(&mut env, TurnRecoverArgs {
+        vpn_service: service, handle, gateway_host: host, gateway_port: port,
+        turn_credentials_json: credentials, pinned_server_key: pinned_key,
+        credential, path_id,
+    }) {
         Ok(()) => 1,
         Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); 0 }
     }
