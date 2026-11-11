@@ -25,6 +25,7 @@ pub struct TurnDataPlaneStats {
     pub rejected_frames: u64,
     pub rejected_sources: u64,
     pub keepalives_sent: u64,
+    pub keepalive_acks_received: u64,
 }
 
 /// Runs the client-side IP packet pump for one authenticated TURN channel.
