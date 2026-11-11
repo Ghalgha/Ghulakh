@@ -754,6 +754,25 @@ mod tests {
     }
 
     #[test]
+    fn response_cache_can_rollback_only_the_exact_committed_request() {
+        let now = Instant::now();
+        let request = envelope(HandshakePhase::ClientFinish, [0x31; 16], b"finish");
+        let altered = envelope(HandshakePhase::ClientFinish, [0x31; 16], b"altered");
+        let response = envelope(HandshakePhase::ServerAck, [0x31; 16], b"ack");
+        let mut driver = driver();
+        driver.cache_response(&request, response, peer(), now).unwrap();
+
+        assert_eq!(
+            driver.remove_cached_response(&altered, peer()),
+            Err(HandshakeDriverError::CacheConflict)
+        );
+        assert_eq!(driver.cached_response(&request, peer(), now).unwrap().is_some(), true);
+        assert!(driver.remove_cached_response(&request, peer()).unwrap());
+        assert_eq!(driver.cached_response(&request, peer(), now).unwrap(), None);
+        assert!(!driver.remove_cached_response(&request, peer()).unwrap());
+    }
+
+    #[test]
     fn response_cache_rejects_transaction_reuse_with_different_request() {
         let now = Instant::now();
         let request = envelope(HandshakePhase::ClientInit, [5; 16], b"first");
