@@ -455,9 +455,9 @@ mod deterministic_property_tests {
         ].into_iter().map(|value| value.parse().unwrap()).collect();
 
         for address in addresses {
-            for transaction_id in ids {
-                let encoded = encode_xor_address(address, &transaction_id);
-                assert_eq!(decode_xor_address(&encoded, &transaction_id).unwrap(), address);
+            for transaction_id in &ids {
+                let encoded = encode_xor_address(address, transaction_id);
+                assert_eq!(decode_xor_address(&encoded, transaction_id).unwrap(), address);
             }
         }
     }
