@@ -148,6 +148,29 @@ impl TurnGateway {
             let (opener, sealer) = established.frame_keys.into_server_codecs();
             let path_context = established.path_context;
             let replaced_generation = established.replaced_generation;
+            // Commit replay protection before mutating the gateway route.
+            // The handshake-service mutex serializes duplicate ClientFinish
+            // processing, so no peer can observe the cached ServerAck until
+            // this transaction releases the lock.
+            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            if let Err(error) = service.commit_established_response(
+                payload,
+                &response,
+                relay_peer,
+                std::time::Instant::now(),
+            ) {
+                if let Some(context) = path_context {
+                    service.rollback_path_replacement(
+                        context,
+                        handshake_id,
+                        replaced_generation,
+                    );
+                } else {
+                    service.release_virtual_ipv4(client_ipv4);
+                }
+                return Err(error).context("commit ServerAck replay protection before gateway registration");
+            }
+
             if let Err(error) = self.register_session_with_path_generation(
                 session_id,
                 client_ipv4,
@@ -156,27 +179,20 @@ impl TurnGateway {
                 sealer,
                 path_context.map(|context| (context, Some(handshake_id))),
             ).await {
+                let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+                let cache_rollback = service.remove_cached_response(payload, relay_peer);
                 if let Some(context) = path_context {
-                    if let Some(service) = handshake.as_mut() {
-                        service.rollback_path_replacement(
-                            context,
-                            handshake_id,
-                            replaced_generation,
-                        );
-                    }
-                } else if let Some(service) = handshake.as_mut() {
+                    service.rollback_path_replacement(
+                        context,
+                        handshake_id,
+                        replaced_generation,
+                    );
+                } else {
                     service.release_virtual_ipv4(client_ipv4);
                 }
-                return Err(error).context("register authenticated TURN session before ServerAck commit");
+                cache_rollback.context("rollback ServerAck replay cache after gateway registration failure")?;
+                return Err(error).context("register authenticated TURN session after ServerAck cache reservation");
             }
-
-            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
-            service.commit_established_response(
-                payload,
-                &response,
-                relay_peer,
-                std::time::Instant::now(),
-            ).context("commit ServerAck after gateway registration")?;
         }
 
         drop(handshake);
