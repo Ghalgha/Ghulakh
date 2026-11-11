@@ -117,3 +117,8 @@ The Android service now monitors failed path slots while the VPN remains active.
 Recovery retries use bounded exponential delays (1, 2, 4, 8, 16, then at most 30 seconds). Successful VK Calls conversations are retained until the VPN service stops; failed attempts are explicitly finished. When all paths are unavailable, outbound packets are dropped and counted rather than terminating the TUN reader, allowing the recovery worker to restore service. Packet loss during a full outage is expected; continuity is not claimed.
 
 Automated CI and mock-path recovery tests are required before considering this complete. Physical Android/VPS validation remains deferred until the system is otherwise ready. Multiple simultaneous VK Calls TURN allocations and credential lifetime behavior still require physical validation.
+
+
+### Recovery race hardening
+
+A path-replacement race was found during review: an old downlink forwarder could finish after its path slot had been replaced and mark the new path unhealthy. Replacement now aborts the prior slot's forwarder before publishing the new slot as healthy, reuses the stable per-slot forwarder entry, and acquires registry locks before mutating state. The server's legacy virtual-address release path also refuses to release an address still owned by active generation-bound multipath leases. Regression coverage was added for both cases.
