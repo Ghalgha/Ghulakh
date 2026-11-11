@@ -66,7 +66,7 @@ pub struct EstablishedTurnSession {
 struct PathGroupLease {
     virtual_ipv4: Ipv4Addr,
     path_count: u16,
-    active_paths: HashSet<u16>,
+    active_paths: HashMap<u16, [u8; 16]>,
 }
 
 pub struct TurnHandshakeService {
@@ -175,7 +175,7 @@ impl TurnHandshakeService {
                     |path_context| {
                         let virtual_ipv4 = if let Some(context) = path_context {
                             reserved_path = Some(context);
-                            self.reserve_path(context)
+                            self.reserve_path(context, envelope.handshake_id)
                                 .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?
                         } else {
                             let address = self.allocate_virtual_ipv4()
@@ -281,25 +281,23 @@ impl TurnHandshakeService {
         });
     }
 
-    fn reserve_path(&mut self, context: TurnPathContext) -> Result<Ipv4Addr> {
+    fn reserve_path(&mut self, context: TurnPathContext, generation: [u8; 16]) -> Result<Ipv4Addr> {
         context.validate().context("validate authenticated TURN path context")?;
         if let Some(group) = self.path_groups.get_mut(&context.group_id) {
             ensure!(group.path_count == context.path_count, "TURN path group count mismatch");
             ensure!(
-                group.active_paths.len() < usize::from(group.path_count),
+                group.active_paths.contains_key(&context.path_id)
+                    || group.active_paths.len() < usize::from(group.path_count),
                 "TURN path group is already full"
             );
-            ensure!(
-                group.active_paths.insert(context.path_id),
-                "TURN path identifier is already registered"
-            );
+            group.active_paths.insert(context.path_id, generation);
             return Ok(group.virtual_ipv4);
         }
 
         let virtual_ipv4 = self.allocate_virtual_ipv4()?;
         self.allocated_ips.insert(virtual_ipv4);
-        let mut active_paths = HashSet::new();
-        active_paths.insert(context.path_id);
+        let mut active_paths = HashMap::new();
+        active_paths.insert(context.path_id, generation);
         self.path_groups.insert(context.group_id, PathGroupLease {
             virtual_ipv4,
             path_count: context.path_count,
@@ -308,13 +306,14 @@ impl TurnHandshakeService {
         Ok(virtual_ipv4)
     }
 
-    fn rollback_path(&mut self, context: TurnPathContext) -> bool {
+    fn rollback_path(&mut self, context: TurnPathContext, generation: [u8; 16]) -> bool {
         let Some(group) = self.path_groups.get_mut(&context.group_id) else {
             return false;
         };
-        if !group.active_paths.remove(&context.path_id) {
+        if group.active_paths.get(&context.path_id) != Some(&generation) {
             return false;
         }
+        group.active_paths.remove(&context.path_id);
         if group.active_paths.is_empty() {
             let address = group.virtual_ipv4;
             self.path_groups.remove(&context.group_id);
@@ -323,8 +322,8 @@ impl TurnHandshakeService {
         true
     }
 
-    pub fn release_path(&mut self, context: TurnPathContext) -> bool {
-        self.rollback_path(context)
+    pub fn release_path(&mut self, context: TurnPathContext, generation: [u8; 16]) -> bool {
+        self.rollback_path(context, generation)
     }
 
     fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
@@ -391,15 +390,17 @@ mod tests {
             path_id: 1,
             ..first
         };
-        let address_a = service.reserve_path(first).unwrap();
-        let address_b = service.reserve_path(second).unwrap();
+        let address_a = service.reserve_path(first, [1; 16]).unwrap();
+        let address_b = service.reserve_path(second, [2; 16]).unwrap();
         assert_eq!(address_a, address_b);
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
-        assert!(service.reserve_path(first).is_err());
+        assert_eq!(service.reserve_path(first, [3; 16]).unwrap(), address_a);
+        assert!(!service.release_path(first, [1; 16]));
+        assert!(service.release_path(first, [3; 16]));
 
-        assert!(service.release_path(first));
+        assert!(!service.release_path(first, [1; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
-        assert!(service.release_path(second));
+        assert!(service.release_path(second, [2; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
     }
 
