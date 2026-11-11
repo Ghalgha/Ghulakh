@@ -367,7 +367,7 @@ fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result
             socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
         )
     ).context("establish replacement TURN allocation")?;
-    if session.client.closed().now_or_never().is_some() {
+    if session.client.is_closed() {
         replacement.close();
         anyhow::bail!("native TURN session closed during path recovery");
     }
