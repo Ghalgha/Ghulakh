@@ -108,3 +108,12 @@ Android пока требует вручную предоставить поль
 ## Серверная замена отказавшего TURN path
 
 Каждый слот `path_id` привязан к generation token — 128-битному идентификатору аутентифицированного Noise handshake. Повторная регистрация слота заменяет его generation, сохраняя общий виртуальный IPv4. Очистка сессии освобождает слот только при совпадении generation token, поэтому запоздалое завершение старой сессии не удаляет новую регистрацию. Gateway при замене удаляет старую сессию из маршрутизации до добавления новой. Это серверная основа восстановления пути; создание новой Android TURN allocation и повторный handshake из JNI остаются отдельной незавершённой задачей.
+
+
+## Android TURN path recovery
+
+The Android service now monitors failed path slots while the VPN remains active. For each failed slot it obtains fresh temporary VK Calls TURN credentials, creates a new Android-protected UDP socket, establishes a new TURN allocation and authenticated Noise session, then replaces only that slot in the existing multipath group. The virtual IPv4 address, MTU, TUN descriptor, and surviving paths remain unchanged.
+
+Recovery retries use bounded exponential delays (1, 2, 4, 8, 16, then at most 30 seconds). Successful VK Calls conversations are retained until the VPN service stops; failed attempts are explicitly finished. When all paths are unavailable, outbound packets are dropped and counted rather than terminating the TUN reader, allowing the recovery worker to restore service. Packet loss during a full outage is expected; continuity is not claimed.
+
+Automated CI and mock-path recovery tests are required before considering this complete. Physical Android/VPS validation remains deferred until the system is otherwise ready. Multiple simultaneous VK Calls TURN allocations and credential lifetime behavior still require physical validation.
