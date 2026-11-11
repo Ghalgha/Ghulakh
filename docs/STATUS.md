@@ -254,3 +254,7 @@ The JNI recovery entry point now maps the same authenticated TURN Allocate 486 r
 ## TURN relay endpoint distribution
 
 The VK Calls credential parser retains all advertised TURN URLs. Each path now selects a resolved UDP relay socket address deterministically by its authenticated path ID. Duplicate URI authorities and duplicate resolved socket addresses are removed; TCP/TLS alternatives are excluded. When one hostname resolves to several addresses, paths are distributed across the sorted unique results. Recovery reuses the same path ID and, for an unchanged DNS answer set, selects the same address. If only one UDP address is available, all paths continue to use it. Distinct socket addresses are not proof of independent quota buckets: shared relay backends and VK quota scope still require live validation. The default remains five paths; no unverified per-credential or per-relay allocation cap has been introduced.
+
+## TURN DNS endpoint resilience
+
+When the credential response advertises multiple UDP TURN endpoints, a DNS failure for one endpoint no longer aborts path startup if another endpoint resolves successfully. Resolved addresses are still filtered to the protected socket's IP family and deduplicated before deterministic path-ID selection. Startup fails only when no compatible UDP address can be resolved. A regression test covers a failed candidate followed by a valid IPv4/IPv6 result; this does not establish live VK endpoint or quota independence.
