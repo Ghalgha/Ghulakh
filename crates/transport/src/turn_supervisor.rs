@@ -570,4 +570,96 @@ mod server_error_state_tests {
         relay_task.await.unwrap();
         supervisor.close();
     }
+
+    #[tokio::test]
+    async fn authenticated_create_permission_error_does_not_install_local_permission() {
+        use ghulakh_protocol::stun::METHOD_CREATE_PERMISSION;
+
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+        let peer: SocketAddr = "203.0.113.30:443".parse().unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            let (permission, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(permission.method, METHOD_CREATE_PERMISSION);
+            let denied = challenge(&permission, 403);
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider { calls: 0 },
+        );
+        supervisor.allocate().await.unwrap();
+        let error = supervisor.create_permission(&[peer]).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::ServerError { code: 403 })
+        ));
+        let registry = supervisor.driver.peer_registry().unwrap();
+        assert_eq!(registry.permission_count(), 0);
+        assert_eq!(registry.permission_expires_at(peer.ip()), None);
+        assert_eq!(supervisor.provider.calls, 1);
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
+    async fn authenticated_channel_bind_error_does_not_install_local_binding() {
+        use ghulakh_protocol::stun::METHOD_CHANNEL_BIND;
+
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+        let peer: SocketAddr = "203.0.113.31:443".parse().unwrap();
+        let channel = 0x4001;
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            let (binding, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(binding.method, METHOD_CHANNEL_BIND);
+            let denied = challenge(&binding, 403);
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider { calls: 0 },
+        );
+        supervisor.allocate().await.unwrap();
+        let error = supervisor.channel_bind(channel, peer).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::ServerError { code: 403 })
+        ));
+        let registry = supervisor.driver.peer_registry().unwrap();
+        assert_eq!(registry.permission_count(), 0);
+        assert_eq!(registry.channel_count(), 0);
+        assert_eq!(registry.permission_expires_at(peer.ip()), None);
+        assert_eq!(registry.channel_expires_at(channel), None);
+        assert_eq!(supervisor.provider.calls, 1);
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
 }
