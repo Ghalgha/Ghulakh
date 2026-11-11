@@ -424,4 +424,38 @@ mod socket_actor_integration_tests {
         relay_task.await.unwrap();
         driver.close();
     }
+
+    #[tokio::test]
+    async fn lost_allocate_response_retransmits_identical_request_and_aborts_state() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
+            .await.unwrap();
+        let policy = TransactionPolicy {
+            initial_rto: Duration::from_millis(20),
+            max_requests: 2,
+            final_timeout_multiplier: 2,
+        };
+        let mut driver = TurnClientDriver::new(socket).with_transaction_policy(policy);
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 1024];
+            let (first_len, first_source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let first = buffer[..first_len].to_vec();
+            let (second_len, second_source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let second = buffer[..second_len].to_vec();
+            assert_eq!(first_source, second_source);
+            assert_eq!(first, second, "retransmission must preserve exact request bytes");
+        });
+
+        let error = timeout(Duration::from_secs(2), driver.allocate(None))
+            .await.unwrap().unwrap_err();
+        assert!(matches!(error.downcast_ref::<TurnDriverError>(), Some(TurnDriverError::Timeout)));
+        assert!(driver.allocation().is_none(), "failed Allocate must leave no active lease");
+        assert_eq!(driver.transactions.len(), 0, "timed-out transaction must be removed");
+        relay_task.await.unwrap();
+        driver.close();
+    }
 }
