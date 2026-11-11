@@ -150,8 +150,7 @@ impl TurnGateway {
                 established.relay_peer,
                 opener,
                 sealer,
-                path_context,
-                Some(established.handshake_id),
+                path_context.map(|context| (context, Some(established.handshake_id))),
             ).await {
                 self.release_session_lease(client_ipv4, path_context, Some(established.handshake_id), true).await;
                 return Err(error).context("register authenticated TURN session after ServerAck cache");
@@ -189,7 +188,7 @@ impl TurnGateway {
         path_context: Option<TurnPathContext>,
     ) -> Result<()> {
         self.register_session_with_path_generation(
-            session_id, client_ipv4, relay_peer, opener, sealer, path_context, None,
+            session_id, client_ipv4, relay_peer, opener, sealer, path_context.map(|context| (context, None)),
         ).await
     }
 
@@ -200,9 +199,10 @@ impl TurnGateway {
         relay_peer: SocketAddr,
         opener: FrameOpener,
         sealer: FrameSealer,
-        path_context: Option<TurnPathContext>,
-        lease_generation: Option<[u8; 16]>,
+        path_lease: Option<(TurnPathContext, Option<[u8; 16]>)>,
     ) -> Result<()> {
+        let path_context = path_lease.map(|(context, _)| context);
+        let lease_generation = path_lease.and_then(|(_, generation)| generation);
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
         ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
