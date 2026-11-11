@@ -128,15 +128,26 @@ impl TurnClientRuntime {
         let mut supervisor = TurnSessionSupervisor::new(driver, provider);
 
         supervisor.allocate().await.context("create VK Calls TURN allocation")?;
-        supervisor.create_permission(&[gateway_peer]).await
-            .context("create TURN permission for VPN gateway")?;
-        supervisor.channel_bind(DEFAULT_TURN_CHANNEL, gateway_peer).await
-            .context("bind TURN channel to VPN gateway")?;
+        if let Err(error) = supervisor.create_permission(&[gateway_peer]).await {
+            return Err(release_failed_turn_setup(
+                &mut supervisor, error, "create TURN permission for VPN gateway",
+            ).await);
+        }
+        if let Err(error) = supervisor.channel_bind(DEFAULT_TURN_CHANNEL, gateway_peer).await {
+            return Err(release_failed_turn_setup(
+                &mut supervisor, error, "bind TURN channel to VPN gateway",
+            ).await);
+        }
 
         let relay_endpoint = supervisor.relay_endpoint();
-        let (handshake_socket, handshake_inbound) = supervisor
-            .take_handshake_plane_parts()
-            .context("take isolated TURN handshake queue")?;
+        let (handshake_socket, handshake_inbound) = match supervisor.take_handshake_plane_parts() {
+            Ok(parts) => parts,
+            Err(error) => {
+                return Err(release_failed_turn_setup(
+                    &mut supervisor, error, "take isolated TURN handshake queue",
+                ).await);
+            }
+        };
         let handshake = match path_context {
             Some(context) => run_turn_client_handshake_with_path_context(
                 handshake_socket,
@@ -156,12 +167,23 @@ impl TurnClientRuntime {
                 tunnel_credential,
             ).await,
         };
-        let TurnClientSession { frame_keys, config } =
-            handshake.context("authenticate VPN session over TURN")?;
+        let TurnClientSession { frame_keys, config } = match handshake {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(release_failed_turn_setup(
+                    &mut supervisor, error, "authenticate VPN session over TURN",
+                ).await);
+            }
+        };
 
-        let (data_socket, data_inbound) = supervisor
-            .take_data_plane_parts()
-            .context("take TURN dataplane queue")?;
+        let (data_socket, data_inbound) = match supervisor.take_data_plane_parts() {
+            Ok(parts) => parts,
+            Err(error) => {
+                return Err(release_failed_turn_setup(
+                    &mut supervisor, error, "take TURN dataplane queue",
+                ).await);
+            }
+        };
         let (uplink_sealer, downlink_opener) = frame_keys.into_client_codecs();
         let plane = TurnDataPlane::new(
             data_socket,
@@ -242,6 +264,20 @@ impl Drop for TurnClientRuntime {
     }
 }
 
+
+/// Release an allocation when path setup fails after Allocate succeeded.
+async fn release_failed_turn_setup(
+    supervisor: &mut TurnSessionSupervisor,
+    error: anyhow::Error,
+    context: &'static str,
+) -> anyhow::Error {
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        supervisor.deallocate(),
+    ).await;
+    supervisor.close();
+    error.context(context)
+}
 
 /// Bounded retry policy for recreating one failed TURN allocation.
 #[derive(Clone, Debug)]
