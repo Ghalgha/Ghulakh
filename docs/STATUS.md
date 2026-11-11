@@ -125,7 +125,7 @@ A path-replacement race was found during review: an old downlink forwarder could
 
 ## Transactional server path replacement
 
-Path-slot reservation now records the generation displaced by a replacement handshake. If Noise completion or gateway registration fails before the replacement is installed, rollback restores the previous generation instead of dropping the still-active lease. A regression test verifies that the previous generation remains releasable and the shared virtual IPv4 is not prematurely returned to the allocator. The handshake acknowledgement cache still needs a separate registration-commit design: a failed gateway registration can leave a cached acknowledgement, so this failure path is not yet considered fully closed.
+Path-slot reservation now records the generation displaced by a replacement handshake. If Noise completion or gateway registration fails before the replacement is installed, rollback restores the previous generation instead of dropping the still-active lease. A regression test verifies that the previous generation remains releasable and the shared virtual IPv4 is not prematurely returned to the allocator. The handshake acknowledgement cache now commits only after successful gateway registration. Failed registration rolls back the path generation and does not leave a replayable successful acknowledgement.
 
 
 ## Handshake acknowledgement commit ordering
