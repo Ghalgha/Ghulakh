@@ -558,7 +558,7 @@ mod path_group_tests {
         );
         append_resolved_relay_addresses(
             &mut candidates,
-            Ok(vec![
+            Ok::<Vec<SocketAddr>, std::io::Error>(vec![
                 "192.0.2.10:3478".parse().unwrap(),
                 "[2001:db8::10]:3478".parse().unwrap(),
             ]),
