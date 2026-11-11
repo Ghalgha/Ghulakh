@@ -173,3 +173,6 @@ Comparative implementation review: worker recovery variants use bounded retry de
 ## Fuzz CI toolchain selection
 
 CI run #635 confirmed that installing the Nightly toolchain did not change the default compiler selected by the `cargo` proxy for `cargo fuzz`; the fuzz build therefore invoked stable rustc and rejected the required sanitizer `-Z` option. The workflow now invokes both fuzz targets explicitly through `cargo +nightly`. This correction is pending CI validation in run #636; no successful fuzz execution is claimed yet.
+
+
+The first explicit Nightly invocation exposed a second CI environment issue: the prebuilt cargo-fuzz binary installed through the fallback installer targets `x86_64-unknown-linux-musl`. Its fuzz build consequently selects the Musl target, where AddressSanitizer is incompatible with static libc. CI now builds cargo-fuzz from source using `cargo +nightly install cargo-fuzz --locked`, so the tool is compiled for the native GNU runner target. This change is pending validation; fuzzing is not yet confirmed green.
