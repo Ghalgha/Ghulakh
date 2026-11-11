@@ -962,3 +962,93 @@ mod stale_nonce_retry_budget_tests {
         supervisor.close();
     }
 }
+
+
+#[cfg(test)]
+mod authenticated_allocation_quota_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::stun::{
+        append_message_integrity, StunAttribute, StunClass, StunMessage,
+        ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, METHOD_ALLOCATE,
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    struct QuotaTestProvider;
+
+    impl TurnAuthProvider for QuotaTestProvider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                TurnAuthContext::new(
+                    "quota-test-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    vec![0x44; 32],
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticated_allocate_quota_error_is_preserved_as_typed_486() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (length, client) = timeout(Duration::from_secs(3), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let initial = StunMessage::decode(&buffer[..length]).unwrap();
+            assert_eq!(initial.method, METHOD_ALLOCATE);
+            let challenge = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::ErrorResponse,
+                transaction_id: initial.transaction_id,
+                attributes: vec![
+                    StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                    StunAttribute { kind: ATTR_REALM, value: b"turn.quota.test".to_vec() },
+                    StunAttribute { kind: ATTR_NONCE, value: b"quota-nonce".to_vec() },
+                ],
+            };
+            relay.send_to(&challenge.encode().unwrap(), client).await.unwrap();
+
+            let (length, client) = timeout(Duration::from_secs(3), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let authenticated = StunMessage::decode(&buffer[..length]).unwrap();
+            assert_eq!(authenticated.method, METHOD_ALLOCATE);
+            let denied = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::ErrorResponse,
+                transaction_id: authenticated.transaction_id,
+                attributes: vec![
+                    StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 86] },
+                    StunAttribute { kind: ATTR_REALM, value: b"turn.quota.test".to_vec() },
+                    StunAttribute { kind: ATTR_NONCE, value: b"quota-nonce".to_vec() },
+                ],
+            };
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            QuotaTestProvider,
+        );
+        let error = supervisor.allocate().await.unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::ServerError { code: 486 })
+        )));
+        assert!(supervisor.allocation().is_none());
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+}
