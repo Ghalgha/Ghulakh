@@ -488,6 +488,13 @@ impl TurnClientPathGroup {
         }
     }
 
+    pub async fn closed(&self) {
+        let mut signal = self.closed_signal.subscribe();
+        if !self.closed.load(Ordering::Acquire) && !*signal.borrow() {
+            let _ = signal.changed().await;
+        }
+    }
+
     pub fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.closed_signal.send_replace(true);
