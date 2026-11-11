@@ -40,6 +40,7 @@ struct PendingHandshake {
 
 struct CompletedHandshake {
     established: EstablishedTurnSession,
+    request_datagram: Vec<u8>,
     response: Vec<u8>,
     expires_at: Instant,
 }
@@ -155,6 +156,10 @@ impl TurnHandshakeService {
         if envelope.phase == HandshakePhase::ClientFinish {
             if let Some(completed) = self.completed.get(&key) {
                 ensure!(completed.expires_at > now, "completed handshake commit expired");
+                ensure!(
+                    completed.request_datagram.as_slice() == datagram,
+                    "completed handshake identifier was reused with different ClientFinish bytes",
+                );
                 return Ok(TurnHandshakeOutcome::Response {
                     response: completed.response.clone(),
                     established: Some(completed.established.duplicate()),
@@ -264,6 +269,7 @@ impl TurnHandshakeService {
                 };
                 self.completed.insert(key, CompletedHandshake {
                     established: established.duplicate(),
+                    request_datagram: datagram.to_vec(),
                     response: response.clone(),
                     expires_at: now + HANDSHAKE_TTL,
                 });
@@ -457,6 +463,12 @@ impl TurnHandshakeService {
         ensure!(request.phase == HandshakePhase::ClientFinish, "only ClientFinish may commit an established response");
         ensure!(response.phase == HandshakePhase::ServerAck, "established response must be ServerAck");
         ensure!(request.handshake_id == response.handshake_id, "ServerAck handshake identifier mismatch");
+        let staged = self.completed.get(&(relay_peer, request.handshake_id))
+            .context("no staged authenticated handshake to commit")?;
+        ensure!(staged.request_datagram.as_slice() == request_datagram,
+            "committed ClientFinish differs from staged authenticated request");
+        ensure!(staged.response == response_datagram,
+            "committed ServerAck differs from staged authenticated response");
         self.delivery.cache_response(
             request_datagram,
             response_datagram.to_vec(),
@@ -667,6 +679,11 @@ mod tests {
             _ => panic!("expected staged authenticated session on retry"),
         };
         assert_eq!(retry_session.frame_keys.session_id(), established.frame_keys.session_id());
+        let mut altered_envelope = ghulakh_protocol::handshake_datagram::HandshakeEnvelope::decode(&finish).unwrap();
+        altered_envelope.payload[0] ^= 1;
+        let altered_finish = altered_envelope.encode().unwrap();
+        assert!(service.process(&altered_finish, peer, now).is_err());
+        assert!(service.commit_established_response(&altered_finish, &server_ack, peer, now).is_err());
         service.commit_established_response(&finish, &server_ack, peer, now).unwrap();
         assert_eq!(service.cached_responses(), 2);
         assert!(service.finalize_established_response(handshake_id, peer));
