@@ -287,31 +287,6 @@ impl TurnHandshakeService {
         });
     }
 
-    fn reserve_path(&mut self, context: TurnPathContext, generation: [u8; 16]) -> Result<Ipv4Addr> {
-        context.validate().context("validate authenticated TURN path context")?;
-        if let Some(group) = self.path_groups.get_mut(&context.group_id) {
-            ensure!(group.path_count == context.path_count, "TURN path group count mismatch");
-            ensure!(
-                group.active_paths.contains_key(&context.path_id)
-                    || group.active_paths.len() < usize::from(group.path_count),
-                "TURN path group is already full"
-            );
-            group.active_paths.insert(context.path_id, generation);
-            return Ok(group.virtual_ipv4);
-        }
-
-        let virtual_ipv4 = self.allocate_virtual_ipv4()?;
-        self.allocated_ips.insert(virtual_ipv4);
-        let mut active_paths = HashMap::new();
-        active_paths.insert(context.path_id, generation);
-        self.path_groups.insert(context.group_id, PathGroupLease {
-            virtual_ipv4,
-            path_count: context.path_count,
-            active_paths,
-        });
-        Ok(virtual_ipv4)
-    }
-
     fn reserve_path_transactional(
         &mut self,
         context: TurnPathContext,
