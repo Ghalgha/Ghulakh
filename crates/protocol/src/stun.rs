@@ -433,3 +433,69 @@ mod tests {
         assert_eq!(decode_xor_address(&v,&id).unwrap(),a);
     }
 }
+
+
+
+#[cfg(test)]
+mod deterministic_property_tests {
+    use super::*;
+
+    #[test]
+    fn xor_address_round_trips_for_ipv4_ipv6_and_boundary_ports() {
+        let ids = [[0u8; 12], [0x5a; 12], core::array::from_fn(|i| (i * 17) as u8)];
+        let addresses: Vec<SocketAddr> = [
+            "0.0.0.0:0",
+            "255.255.255.255:65535",
+            "192.0.2.1:3478",
+            "198.51.100.255:5349",
+            "[::]:0",
+            "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535",
+            "[2001:db8::1]:3478",
+            "[2001:db8:ffff::abcd]:5349",
+        ].into_iter().map(|value| value.parse().unwrap()).collect();
+
+        for address in addresses {
+            for transaction_id in ids {
+                let encoded = encode_xor_address(address, &transaction_id);
+                assert_eq!(decode_xor_address(&encoded, &transaction_id).unwrap(), address);
+            }
+        }
+    }
+
+    #[test]
+    fn stun_attribute_payload_lengths_round_trip_with_alignment_padding() {
+        for length in 0..=1024 {
+            let payload: Vec<u8> = (0..length).map(|index| (index.wrapping_mul(31) & 0xff) as u8).collect();
+            let message = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::Request,
+                transaction_id: [length as u8; 12],
+                attributes: vec![StunAttribute { kind: 0xC123, value: payload }],
+            };
+            let encoded = message.encode().unwrap();
+            let decoded = StunMessage::decode(&encoded).unwrap();
+            assert_eq!(decoded, message, "attribute payload length {length}");
+        }
+    }
+
+    #[test]
+    fn message_decoder_rejects_every_truncation_of_a_valid_encoded_message() {
+        let message = StunMessage {
+            method: METHOD_CHANNEL_BIND,
+            class: StunClass::Request,
+            transaction_id: [0xA7; 12],
+            attributes: vec![
+                StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+                StunAttribute { kind: 0xC123, value: vec![0x5a; 17] },
+            ],
+        };
+        let encoded = message.encode().unwrap();
+        for end in 0..encoded.len() {
+            assert!(
+                StunMessage::decode(&encoded[..end]).is_err(),
+                "truncated message unexpectedly decoded at length {end}"
+            );
+        }
+        assert_eq!(StunMessage::decode(&encoded).unwrap(), message);
+    }
+}
