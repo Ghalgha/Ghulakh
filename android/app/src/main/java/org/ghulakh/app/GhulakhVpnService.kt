@@ -63,7 +63,8 @@ class GhulakhVpnService : VpnService() {
             val rejectedCredentialFingerprints = mutableSetOf<String>()
             var connectAttempt = 0
             var callsSession: VkCallsSession? = null
-            val handle = while (true) {
+            var handle = 0L
+            while (true) {
                 if (!running.get()) return
                 val candidate = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
                 try {
@@ -76,8 +77,9 @@ class GhulakhVpnService : VpnService() {
                         profile.credential,
                         DEFAULT_TURN_PATHS,
                     )
+                    handle = connectedHandle
                     callsSession = candidate
-                    break connectedHandle
+                    break
                 } catch (error: Throwable) {
                     candidate.finish()
                     val fingerprint = TurnQuotaRetryPolicy.fingerprint(candidate.turnCredentialsJson)
