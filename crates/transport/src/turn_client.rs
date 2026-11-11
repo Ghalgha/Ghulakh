@@ -553,7 +553,7 @@ mod path_group_tests {
         let mut candidates = Vec::new();
         append_resolved_relay_addresses(
             &mut candidates,
-            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "DNS failure")),
+            Err::<Vec<SocketAddr>, _>(std::io::Error::new(std::io::ErrorKind::NotFound, "DNS failure")),
             true,
         );
         append_resolved_relay_addresses(
