@@ -1050,3 +1050,163 @@ mod authenticated_allocation_quota_tests {
         supervisor.close();
     }
 }
+
+
+#[cfg(test)]
+mod control_response_loss_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::{
+        stun::{
+            append_message_integrity, encode_xor_address, StunAttribute, StunClass, StunMessage,
+            ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
+            METHOD_ALLOCATE, METHOD_REFRESH,
+        },
+        turn_transaction::TransactionPolicy,
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    struct Provider;
+
+    impl TurnAuthProvider for Provider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                TurnAuthContext::new(
+                    "loss-test-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    vec![0x66; 32],
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    fn test_challenge(request: &StunMessage) -> StunMessage {
+        StunMessage {
+            method: request.method,
+            class: StunClass::ErrorResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_ERROR_CODE,
+                    value: vec![0, 0, 4, 1],
+                },
+                StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                StunAttribute { kind: ATTR_NONCE, value: b"loss-test-nonce".to_vec() },
+            ],
+        }
+    }
+
+    fn signed_allocate_success(request: &StunMessage) -> Vec<u8> {
+        let relayed: SocketAddr = "198.51.100.90:50000".parse().unwrap();
+        let response = StunMessage {
+            method: METHOD_ALLOCATE,
+            class: StunClass::SuccessResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_XOR_RELAYED_ADDRESS,
+                    value: encode_xor_address(relayed, &request.transaction_id),
+                },
+                StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+            ],
+        };
+        append_message_integrity(&response, &[0x66; 32]).unwrap()
+    }
+
+    async fn receive(relay: &UdpSocket, buffer: &mut [u8]) -> (StunMessage, SocketAddr, Vec<u8>) {
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(buffer))
+            .await.unwrap().unwrap();
+        let wire = buffer[..length].to_vec();
+        (StunMessage::decode(&wire).unwrap(), source, wire)
+    }
+
+    fn short_policy() -> TransactionPolicy {
+        TransactionPolicy {
+            initial_rto: Duration::from_millis(20),
+            max_requests: 2,
+            final_timeout_multiplier: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn lost_authenticated_allocate_response_aborts_provisional_allocation() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client, _) = receive(&relay, &mut buffer).await;
+            assert_eq!(initial.method, METHOD_ALLOCATE);
+            relay.send_to(&test_challenge(&initial).encode().unwrap(), client).await.unwrap();
+
+            let (authenticated, client, first_wire) = receive(&relay, &mut buffer).await;
+            assert_eq!(authenticated.method, METHOD_ALLOCATE);
+            let (retry, retry_client, retry_wire) = receive(&relay, &mut buffer).await;
+            assert_eq!(retry_client, client);
+            assert_eq!(retry.transaction_id, authenticated.transaction_id);
+            assert_eq!(retry_wire, first_wire, "TURN retransmission must preserve exact request bytes");
+        });
+
+        let driver = crate::turn_driver::TurnClientDriver::new(socket)
+            .with_transaction_policy(short_policy());
+        let mut supervisor = TurnSessionSupervisor::new(driver, Provider);
+        let error = supervisor.allocate().await.unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::Timeout)
+        )));
+        assert!(supervisor.allocation().is_none(), "timed-out Allocate must not publish a lease");
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
+    async fn lost_refresh_response_preserves_existing_allocation_lease() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client, _) = receive(&relay, &mut buffer).await;
+            relay.send_to(&test_challenge(&initial).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client, _) = receive(&relay, &mut buffer).await;
+            relay.send_to(&signed_allocate_success(&allocate), client).await.unwrap();
+
+            let (refresh, client, first_wire) = receive(&relay, &mut buffer).await;
+            assert_eq!(refresh.method, METHOD_REFRESH);
+            let (retry, retry_client, retry_wire) = receive(&relay, &mut buffer).await;
+            assert_eq!(retry_client, client);
+            assert_eq!(retry.transaction_id, refresh.transaction_id);
+            assert_eq!(retry_wire, first_wire, "TURN retransmission must preserve exact request bytes");
+        });
+
+        let driver = crate::turn_driver::TurnClientDriver::new(socket)
+            .with_transaction_policy(short_policy());
+        let mut supervisor = TurnSessionSupervisor::new(driver, Provider);
+        let before = supervisor.allocate().await.unwrap();
+        let error = supervisor.refresh(600).await.unwrap_err();
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::Timeout)
+        )));
+        let after = supervisor.allocation().expect("lost Refresh response must retain the last confirmed lease");
+        assert_eq!(after.relayed_address, before.relayed_address);
+        assert_eq!(after.lifetime_seconds, before.lifetime_seconds);
+        assert_eq!(after.expires_at, before.expires_at);
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+}
