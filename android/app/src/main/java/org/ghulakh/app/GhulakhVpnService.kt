@@ -181,25 +181,31 @@ class GhulakhVpnService : VpnService() {
                 if (now < (nextAttemptAt[pathId] ?: 0L)) continue
                 var callsSession: VkCallsSession? = null
                 try {
-                    callsSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+                    val establishedSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+                    callsSession = establishedSession
                     check(transport.nativeTurnRecoverPath(
                         this,
                         handle,
                         profile.host,
                         profile.port,
-                        callsSession.turnCredentialsJson,
+                        establishedSession.turnCredentialsJson,
                         decodeHexKey(profile.pinnedServerPublicKeyHex),
                         profile.credential,
                         pathId,
                     )) { "Native TURN path replacement was rejected" }
-                    synchronized(vkSessions) {
+                    val retained = synchronized(vkSessions) {
                         if (running.get()) {
-                            vkSessions.add(callsSession)
+                            vkSessions.add(establishedSession)
+                            true
                         } else {
-                            callsSession.finish()
-                            return
+                            false
                         }
                     }
+                    if (!retained) {
+                        establishedSession.finish()
+                        return
+                    }
+                    callsSession = null
                     failures.remove(pathId)
                     nextAttemptAt.remove(pathId)
                     updateNotification("VPN активен · TURN-путь $pathId восстановлен")
