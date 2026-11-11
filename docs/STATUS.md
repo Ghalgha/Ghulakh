@@ -146,3 +146,8 @@ Comparative review of the six reference codebases confirms two useful patterns: 
 
 
 Android recovery shutdown now checks the service-running flag immediately after VK credential acquisition and before entering JNI path replacement. If shutdown occurred while credential acquisition was in progress, the newly created Calls session is finished and no replacement is attempted. The existing post-replacement retention check remains in place for shutdown racing with an already-running native operation. Shutdown remains non-blocking; native session closure removes the registry handle while outstanding JNI work retains its own Arc lifetime.
+
+
+## TURN server-error state regression coverage
+
+Added authenticated mock-relay tests for non-challenge TURN server errors. An authenticated Allocate error verifies MESSAGE-INTEGRITY and confirms the provisional allocation is aborted. An authenticated Refresh error verifies integrity and confirms the existing allocation lease remains available after the failed refresh transition. Both tests assert that only the initial 401 causes credential-provider invocation; ordinary server errors are not misclassified as authentication challenges.
