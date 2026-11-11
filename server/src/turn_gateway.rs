@@ -144,6 +144,7 @@ impl TurnGateway {
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
             let path_context = established.path_context;
+            let replaced_generation = established.replaced_generation;
             if let Err(error) = self.register_session_with_path_generation(
                 session_id,
                 client_ipv4,
@@ -152,7 +153,15 @@ impl TurnGateway {
                 sealer,
                 path_context.map(|context| (context, Some(established.handshake_id))),
             ).await {
-                self.release_session_lease(client_ipv4, path_context, Some(established.handshake_id), true).await;
+                if let (Some(context), Some(service)) = (path_context, self.handshake.lock().await.as_mut()) {
+                    service.rollback_path_replacement(
+                        context,
+                        established.handshake_id,
+                        replaced_generation,
+                    );
+                } else if path_context.is_none() {
+                    self.release_session_lease(client_ipv4, None, None, true).await;
+                }
                 return Err(error).context("register authenticated TURN session after ServerAck cache");
             }
         }
