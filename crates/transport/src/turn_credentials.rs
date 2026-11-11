@@ -394,7 +394,17 @@ mod tests {
 
     #[test]
     fn udp_endpoint_selection_falls_back_to_one_relay() {
-        let credentials = TurnCredentials::from_vk_response_json(RESPONSE).unwrap();
+        let single_relay = r#"{
+            "turn_server": {
+                "username": "u",
+                "credential": "p",
+                "urls": [
+                    "turn:relay.example:3478?transport=udp",
+                    "turns:relay-secure.example:5349?transport=tcp"
+                ]
+            }
+        }"#;
+        let credentials = TurnCredentials::from_vk_response_json(single_relay).unwrap();
         for path_id in 0..10 {
             assert_eq!(credentials.udp_endpoint_for_path(path_id).unwrap().host, "relay.example");
         }
