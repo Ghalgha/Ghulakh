@@ -269,3 +269,11 @@ When the credential response advertises multiple UDP TURN endpoints, a DNS failu
 
 - Added a repeated authenticated 438 Stale Nonce scenario. The supervisor stops after the configured three challenge retries, does not loop indefinitely, and retains the last confirmed allocation lease when refresh cannot complete.
 - CI #715 passed Rust tests, Clippy, both fuzz targets, Android JVM unit tests, native Android transport build, and debug APK assembly.
+
+## TURN path shutdown and recovery race protection
+
+The client path group now has an explicit, one-way closed state and a watch signal. Closing the group wakes a blocked downlink receive and cancels a blocked uplink enqueue, so Android's TUN writer/reader JNI calls do not remain parked on a queue after native session shutdown. The close signal is published before path teardown.
+
+Path replacement checks the closed state while holding the path registry write lock. This closes the race in which a recovery operation could finish its authenticated TURN allocation after the session handle had been removed and then install a new path into an already closed group. JNI recovery also selects the replacement handshake against the group close signal; stopping the session cancels the in-flight recovery future. The replacement is not committed unless the group remains open.
+
+Mock tests cover waking a blocked downlink receive on close and rejecting a late path replacement. These are deterministic lifecycle tests; they do not replace eventual physical Android/VK Calls validation.
