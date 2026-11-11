@@ -1213,7 +1213,7 @@ mod control_response_loss_tests {
 
 
 #[cfg(test)]
-mod stale_nonce_retry_budget_tests {
+mod stale_nonce_retry_limit_tests {
     use super::*;
     use crate::turn_auth::TurnIntegrityAlgorithm;
     use ghulakh_protocol::stun::{
