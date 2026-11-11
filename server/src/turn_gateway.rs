@@ -1090,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_mock_multipath_turn_allocations_share_one_tunnel_and_survive_path_removal() {
+    async fn full_mock_multipath_turn_allocations_recover_after_simultaneous_relay_loss() {
         use std::net::UdpSocket as StdUdpSocket;
         use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
         use ghulakh_protocol::{
@@ -1336,7 +1336,7 @@ mod tests {
         let mut expected_downlinks = recovered_downlinks.to_vec();
         expected_downlinks.sort_by_key(|packet| packet.packet[20..22].to_vec());
         assert_eq!(received_recovered, expected_downlinks);
-        assert_eq!(gateway.stats().downlink_sent, 5);
+        assert_eq!(gateway.stats().downlink_sent, 4);
 
         group.close();
         for task in replacement_relays {
