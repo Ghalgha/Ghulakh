@@ -410,8 +410,13 @@ impl TurnClientPathGroup {
         let health: Vec<bool> = self.healthy.iter()
             .map(|path| path.load(Ordering::Acquire))
             .collect();
-        let start = select_path_index(&packet.packet, &health)
-            .context("TURN path group has no healthy paths")?;
+        let Some(start) = select_path_index(&packet.packet, &health) else {
+            // Keep the TUN reader alive while the Android recovery worker
+            // recreates failed allocations; packets are dropped, never queued
+            // onto a different path out of order.
+            self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
         let paths = self.paths.read()
             .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
         for offset in 0..paths.len() {
@@ -433,7 +438,10 @@ impl TurnClientPathGroup {
                 }
             }
         }
-        anyhow::bail!("all TURN paths rejected the packet or became unavailable")
+        // All slots failed between the health snapshot and enqueue. Keep
+        // the TUN pump alive so the platform recovery worker can restore them.
+        self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     pub async fn receive_packet(&self) -> Result<DataDatagram> {
