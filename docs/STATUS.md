@@ -213,3 +213,10 @@ The review also confirms that the currently passing automated suite is mock-base
 Comparative scheduler conclusion: packet/chunk round-robin across workers can improve aggregate use but may reorder packets across relay paths; current flow affinity is the safer baseline. The observed start staggering and serialized credential refresh patterns are candidates for adoption. Existing Android full-group recovery policy is less granular than Ghulakh's per-path recovery, so it is not a reason to replace the current recovery design.
 
 These findings are code-review findings, not live-network measurements. CI validates mock relay behavior and Android compilation/unit tests only; live VK TURN quotas, concurrent allocation acceptance, credentials, throughput, battery use, and device lifecycle remain unverified.
+
+
+## Handshake transaction ordering correction — 2026-11-11
+
+The established TURN handshake now commits the exact ClientFinish→ServerAck replay-cache entry before mutating the gateway route, while holding the handshake-service mutex. This prevents a cache-commit failure from leaving a replacement gateway session installed. If gateway registration fails after cache insertion, the exact cache entry is removed using the request digest and the path-generation/IP reservation is rolled back. A conflicting request cannot remove another request's replay entry. Added a protocol regression test for exact rollback and conflict rejection.
+
+The change relies on the existing single serialized handshake-service lock in `TurnGateway::process_handshake`; do not move cache lookup/commit or gateway registration outside that critical section without redesigning the transaction. UDP send occurs after commit and lock release; retransmission receives the cached exact ServerAck, which is intentional.
