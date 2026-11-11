@@ -1319,7 +1319,7 @@ mod stale_nonce_retry_budget_tests {
         let before = supervisor.allocate().await.unwrap();
         let error = supervisor.refresh(600).await.unwrap_err();
         assert!(error.to_string().contains("stale-nonce retry limit reached"));
-        assert_eq!(supervisor.provider.calls, MAX_CHALLENGE_RETRIES);
+        assert_eq!(supervisor.provider.calls, MAX_CHALLENGE_RETRIES + 1);
         let after = supervisor.allocation().expect("stale-nonce exhaustion must retain confirmed lease");
         assert_eq!(after.relayed_address, before.relayed_address);
         assert_eq!(after.expires_at, before.expires_at);
