@@ -663,3 +663,177 @@ mod server_error_state_tests {
     }
 
 }
+
+
+#[cfg(test)]
+mod peer_stale_nonce_retry_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::stun::{
+        append_message_integrity, encode_xor_address, StunAttribute, StunClass, StunMessage,
+        ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
+        METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION,
+    };
+    use std::net::SocketAddr;
+    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+
+    struct Provider {
+        challenges: Vec<(u16, String)>,
+    }
+
+    impl TurnAuthProvider for Provider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                self.challenges.push((challenge.code, challenge.nonce.clone()));
+                let key = if challenge.nonce == "nonce-1" { vec![0x44; 32] } else { vec![0x55; 32] };
+                TurnAuthContext::new(
+                    "test-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    key,
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    async fn receive(relay: &UdpSocket, buffer: &mut [u8]) -> (StunMessage, SocketAddr) {
+        let (length, source) = timeout(Duration::from_secs(3), relay.recv_from(buffer))
+            .await.unwrap().unwrap();
+        (StunMessage::decode(&buffer[..length]).unwrap(), source)
+    }
+
+    fn error(request: &StunMessage, code: u16, nonce: &str) -> StunMessage {
+        StunMessage {
+            method: request.method,
+            class: StunClass::ErrorResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_ERROR_CODE,
+                    value: vec![0, 0, ((code / 100) as u8) & 0x07, (code % 100) as u8],
+                },
+                StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                StunAttribute { kind: ATTR_NONCE, value: nonce.as_bytes().to_vec() },
+            ],
+        }
+    }
+
+    fn allocate_success(request: &StunMessage) -> Vec<u8> {
+        let relayed: SocketAddr = "198.51.100.20:50000".parse().unwrap();
+        let response = StunMessage {
+            method: METHOD_ALLOCATE,
+            class: StunClass::SuccessResponse,
+            transaction_id: request.transaction_id,
+            attributes: vec![
+                StunAttribute {
+                    kind: ATTR_XOR_RELAYED_ADDRESS,
+                    value: encode_xor_address(relayed, &request.transaction_id),
+                },
+                StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+            ],
+        };
+        append_message_integrity(&response, &[0x44; 32]).unwrap()
+    }
+
+    fn peer_success(request: &StunMessage) -> Vec<u8> {
+        let response = StunMessage {
+            method: request.method,
+            class: StunClass::SuccessResponse,
+            transaction_id: request.transaction_id,
+            attributes: Vec::new(),
+        };
+        append_message_integrity(&response, &[0x55; 32]).unwrap()
+    }
+
+    async fn setup(relay: &UdpSocket, buffer: &mut [u8]) -> SocketAddr {
+        let (initial, client) = receive(relay, buffer).await;
+        assert_eq!(initial.method, METHOD_ALLOCATE);
+        relay.send_to(&error(&initial, 401, "nonce-1").encode().unwrap(), client).await.unwrap();
+        let (allocate, client) = receive(relay, buffer).await;
+        relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+        client
+    }
+
+    #[tokio::test]
+    async fn create_permission_reauthenticates_after_verified_stale_nonce() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+        let peer: SocketAddr = "203.0.113.40:443".parse().unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let _client = setup(&relay, &mut buffer).await;
+            let (first, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(first.method, METHOD_CREATE_PERMISSION);
+            assert_eq!(first.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value, b"nonce-1");
+            let stale = append_message_integrity(&error(&first, 438, "nonce-2"), &[0x44; 32]).unwrap();
+            relay.send_to(&stale, client).await.unwrap();
+
+            let (retry, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(retry.method, METHOD_CREATE_PERMISSION);
+            assert_eq!(retry.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value, b"nonce-2");
+            relay.send_to(&peer_success(&retry), client).await.unwrap();
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider { challenges: Vec::new() },
+        );
+        supervisor.allocate().await.unwrap();
+        supervisor.create_permission(&[peer]).await.unwrap();
+        assert_eq!(supervisor.provider.challenges, vec![(401, "nonce-1".into()), (438, "nonce-2".into())]);
+        let registry = supervisor.driver.peer_registry().unwrap();
+        assert_eq!(registry.permission_count(), 1);
+        assert!(registry.permission_expires_at(peer.ip()).is_some());
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
+    async fn channel_bind_reauthenticates_after_verified_stale_nonce() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+        let peer: SocketAddr = "203.0.113.41:443".parse().unwrap();
+        let channel = 0x4002;
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let _client = setup(&relay, &mut buffer).await;
+            let (first, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(first.method, METHOD_CHANNEL_BIND);
+            assert_eq!(first.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value, b"nonce-1");
+            let stale = append_message_integrity(&error(&first, 438, "nonce-2"), &[0x44; 32]).unwrap();
+            relay.send_to(&stale, client).await.unwrap();
+
+            let (retry, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(retry.method, METHOD_CHANNEL_BIND);
+            assert_eq!(retry.attributes.iter().find(|a| a.kind == ATTR_NONCE).unwrap().value, b"nonce-2");
+            relay.send_to(&peer_success(&retry), client).await.unwrap();
+        });
+
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider { challenges: Vec::new() },
+        );
+        supervisor.allocate().await.unwrap();
+        supervisor.channel_bind(channel, peer).await.unwrap();
+        assert_eq!(supervisor.provider.challenges, vec![(401, "nonce-1".into()), (438, "nonce-2".into())]);
+        let registry = supervisor.driver.peer_registry().unwrap();
+        assert_eq!(registry.permission_count(), 1);
+        assert_eq!(registry.channel_count(), 1);
+        assert!(registry.permission_expires_at(peer.ip()).is_some());
+        assert!(registry.channel_expires_at(channel).is_some());
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+}
