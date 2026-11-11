@@ -582,6 +582,59 @@ mod path_group_tests {
 
 
     #[tokio::test]
+    async fn simultaneous_path_failures_can_all_be_replaced_in_place() {
+        let group_id = [0x7d; 16];
+        let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+
+        // Both independent allocations fail before either replacement starts.
+        drop(downlink_a);
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![0, 1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(group.active_paths(), 0);
+
+        let (replacement_a, mut replacement_uplink_a, _replacement_downlink_a) =
+            mock_path(0, group_id);
+        let (replacement_b, mut replacement_uplink_b, _replacement_downlink_b) =
+            mock_path(1, group_id);
+        group.replace_path(replacement_a).unwrap();
+        group.replace_path(replacement_b).unwrap();
+
+        assert_eq!(group.active_paths(), 2);
+        assert!(group.failed_path_ids().is_empty());
+
+        let mut selected = [None, None];
+        for source_port in 10000..10100 {
+            let bytes = packet(source_port);
+            let index = ghulakh_protocol::ip_flow::flow_hash(&bytes) as usize % 2;
+            selected[index].get_or_insert(bytes);
+            if selected.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let selected = selected.map(Option::unwrap);
+        for (index, bytes) in selected.into_iter().enumerate() {
+            let datagram = DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: bytes,
+            };
+            group.send_packet(datagram.clone()).await.unwrap();
+            let received = if index == 0 {
+                replacement_uplink_a.recv().await.unwrap()
+            } else {
+                replacement_uplink_b.recv().await.unwrap()
+            };
+            assert_eq!(received, datagram);
+        }
+        group.close();
+    }
+
+    #[tokio::test]
     async fn all_failed_paths_drop_uplink_without_closing_tun_sender() {
         let group_id = [0x7c; 16];
         let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
