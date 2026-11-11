@@ -183,6 +183,10 @@ class GhulakhVpnService : VpnService() {
                 try {
                     val establishedSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
                     callsSession = establishedSession
+                    if (!running.get()) {
+                        establishedSession.finish()
+                        return
+                    }
                     check(transport.nativeTurnRecoverPath(
                         this,
                         handle,
