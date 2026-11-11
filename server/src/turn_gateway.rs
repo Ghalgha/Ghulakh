@@ -126,11 +126,13 @@ impl TurnGateway {
     ) -> Result<()> {
         use super::turn_handshake_service::TurnHandshakeOutcome;
 
-        let outcome = {
-            let mut service = self.handshake.lock().await;
-            let service = service.as_mut().context("TURN handshake service is not installed")?;
-            service.process(payload, relay_peer, std::time::Instant::now())?
-        };
+        // Keep the handshake-service lock through gateway registration and
+        // acknowledgement commit. This serializes replacement transactions for
+        // a path slot: a newer generation cannot reserve the slot while an older
+        // generation is still being installed in the gateway.
+        let mut handshake = self.handshake.lock().await;
+        let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+        let outcome = service.process(payload, relay_peer, std::time::Instant::now())?;
 
         let (response, established) = match outcome {
             TurnHandshakeOutcome::Cached { response } => (response, None),
@@ -155,23 +157,19 @@ impl TurnGateway {
                 path_context.map(|context| (context, Some(handshake_id))),
             ).await {
                 if let Some(context) = path_context {
-                    {
-                        let mut handshake = self.handshake.lock().await;
-                        if let Some(service) = handshake.as_mut() {
-                            service.rollback_path_replacement(
-                                context,
-                                handshake_id,
-                                replaced_generation,
-                            );
-                        }
+                    if let Some(service) = handshake.as_mut() {
+                        service.rollback_path_replacement(
+                            context,
+                            handshake_id,
+                            replaced_generation,
+                        );
                     }
-                } else {
-                    self.release_session_lease(client_ipv4, None, None, true).await;
+                } else if let Some(service) = handshake.as_mut() {
+                    service.release_virtual_ipv4(client_ipv4);
                 }
                 return Err(error).context("register authenticated TURN session before ServerAck commit");
             }
 
-            let mut handshake = self.handshake.lock().await;
             let service = handshake.as_mut().context("TURN handshake service is not installed")?;
             service.commit_established_response(
                 payload,
@@ -181,6 +179,7 @@ impl TurnGateway {
             ).context("commit ServerAck after gateway registration")?;
         }
 
+        drop(handshake);
         let sent = self.socket.send_to(&response, relay_peer).await
             .context("send raw handshake response through TURN relay")?;
         ensure!(sent == response.len(), "partial TURN handshake response send");
