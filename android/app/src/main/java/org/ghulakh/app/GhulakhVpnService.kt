@@ -206,6 +206,7 @@ class GhulakhVpnService : VpnService() {
     ) {
         val failures = mutableMapOf<Int, Int>()
         val nextAttemptAt = mutableMapOf<Int, Long>()
+        val rejectedCredentialsByPath = mutableMapOf<Int, LinkedHashSet<String>>()
         while (running.get()) {
             val failedPaths = runCatching { transport.nativeTurnFailedPaths(handle).toList() }
                 .getOrElse { error ->
@@ -220,6 +221,18 @@ class GhulakhVpnService : VpnService() {
                 try {
                     val establishedSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
                     callsSession = establishedSession
+                    val credentialFingerprint =
+                        TurnQuotaRetryPolicy.fingerprint(establishedSession.turnCredentialsJson)
+                    if (TurnQuotaRetryPolicy.wasRejectedForPath(
+                            rejectedCredentialsByPath,
+                            pathId,
+                            credentialFingerprint,
+                        )
+                    ) {
+                        establishedSession.finish()
+                        callsSession = null
+                        throw IllegalStateException("VK Calls repeated credentials rejected by TURN quota")
+                    }
                     if (!running.get()) {
                         establishedSession.finish()
                         return
@@ -251,6 +264,13 @@ class GhulakhVpnService : VpnService() {
                     nextAttemptAt.remove(pathId)
                     updateNotification("VPN активен · TURN-путь $pathId восстановлен")
                 } catch (error: Throwable) {
+                    if (error.message == "TURN_ALLOCATION_QUOTA_486" && callsSession != null) {
+                        TurnQuotaRetryPolicy.rememberRejectedFingerprint(
+                            rejectedCredentialsByPath,
+                            pathId,
+                            TurnQuotaRetryPolicy.fingerprint(callsSession!!.turnCredentialsJson),
+                        )
+                    }
                     runCatching { callsSession?.finish() }
                     val count = failures[pathId] ?: 0
                     val delaySeconds = TurnRecoveryBackoffPolicy.delaySeconds(count)
