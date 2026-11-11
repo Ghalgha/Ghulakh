@@ -472,15 +472,9 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
         Ok(handle) => handle,
         Err(error) => {
             let message = if is_turn_allocation_quota_error(&error) {
-                "TURN_ALLOCATION_QUOTA_486"
+                "TURN_ALLOCATION_QUOTA_486".to_owned()
             } else {
-                // Keep the ordinary diagnostic while exposing a stable marker
-                // only for the authenticated TURN allocation-quota response.
-                // Error chains may contain secrets; their text is not logged here.
-                return {
-                    throw_error(&mut env, "java/lang/IllegalStateException", error);
-                    0
-                };
+                error.to_string()
             };
             throw_error(&mut env, "java/lang/IllegalStateException", message);
             0
