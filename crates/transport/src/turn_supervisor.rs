@@ -193,8 +193,11 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                     let Some(challenge) = challenge_from_error(&error) else {
                         return Err(error).context("TURN CreatePermission");
                     };
-                    if challenge.code != 438 || attempt == self.max_challenge_retries {
-                        return Err(error).context("TURN CreatePermission challenge retry limit reached");
+                    if challenge.code != 438 {
+                        return Err(error).context("TURN CreatePermission returned an unexpected authentication challenge");
+                    }
+                    if attempt == self.max_challenge_retries {
+                        return Err(error).context("TURN CreatePermission stale-nonce retry budget exhausted");
                     }
                     self.auth = Some(self.provider.context_for_challenge(challenge).await
                         .context("obtain TURN auth context for CreatePermission stale nonce")?);
@@ -217,8 +220,11 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                     let Some(challenge) = challenge_from_error(&error) else {
                         return Err(error).context("TURN ChannelBind");
                     };
-                    if challenge.code != 438 || attempt == self.max_challenge_retries {
-                        return Err(error).context("TURN ChannelBind challenge retry limit reached");
+                    if challenge.code != 438 {
+                        return Err(error).context("TURN ChannelBind returned an unexpected authentication challenge");
+                    }
+                    if attempt == self.max_challenge_retries {
+                        return Err(error).context("TURN ChannelBind stale-nonce retry budget exhausted");
                     }
                     self.auth = Some(self.provider.context_for_challenge(challenge).await
                         .context("obtain TURN auth context for ChannelBind stale nonce")?);
@@ -253,10 +259,12 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
 }
 
 fn challenge_from_error(error: &anyhow::Error) -> Option<TurnChallenge> {
-    match error.downcast_ref::<TurnDriverError>() {
-        Some(TurnDriverError::Challenge(challenge)) => Some(challenge.clone()),
-        _ => None,
-    }
+    error.chain().find_map(|cause| {
+        match cause.downcast_ref::<TurnDriverError>() {
+            Some(TurnDriverError::Challenge(challenge)) => Some(challenge.clone()),
+            _ => None,
+        }
+    })
 }
 
 #[cfg(test)]
