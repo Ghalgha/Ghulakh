@@ -228,10 +228,22 @@ fn connect_turn_impl(
     anyhow::ensure!(group_id.iter().any(|byte| *byte != 0), "invalid random TURN group ID");
 
     let clients = runtime.block_on(async {
+        // Parse every credential set before starting any allocation. A local
+        // parse failure must not drop a JoinSet containing live startup tasks.
+        let mut credentials = Vec::with_capacity(usize::from(path_count));
+        for _ in 0..path_count {
+            credentials.push(
+                TurnCredentials::from_vk_response_json(&turn_credentials_json)
+                    .context("parse temporary VK Calls TURN credentials")?,
+            );
+        }
+
         let mut tasks = JoinSet::new();
-        for (path_id, protected_socket) in protected_sockets.into_iter().enumerate() {
-            let credentials = TurnCredentials::from_vk_response_json(&turn_credentials_json)
-                .context("parse temporary VK Calls TURN credentials")?;
+        for (path_id, (protected_socket, credentials)) in protected_sockets
+            .into_iter()
+            .zip(credentials)
+            .enumerate()
+        {
             let pinned_key = pinned_server_key.clone();
             let tunnel_credential = credential.as_bytes().to_vec();
             let context = TurnPathContext {
@@ -250,33 +262,38 @@ fn connect_turn_impl(
                 ).await
             });
 
-            // Stagger independent TURN allocations to avoid a synchronized
-            // burst against the relay service. This is startup pacing only;
-            // it does not serialize the established data paths.
+            // Stagger independent allocations; established paths remain concurrent.
             if path_id + 1 < usize::from(path_count) {
                 tokio::time::sleep(Duration::from_millis(200)).await;
             }
         }
 
         let mut clients = Vec::with_capacity(usize::from(path_count));
+        let mut first_error = None;
+        // Drain every startup task instead of aborting siblings. A sibling may
+        // already own an allocation and must finish its cleanup path.
         while let Some(result) = tasks.join_next().await {
             match result {
-                Ok(Ok(client)) => clients.push(client),
+                Ok(Ok(client)) if first_error.is_none() => clients.push(client),
+                Ok(Ok(client)) => client.close(),
                 Ok(Err(error)) => {
-                    tasks.abort_all();
-                    for client in &clients {
-                        client.close();
+                    if first_error.is_none() {
+                        first_error = Some(error.context("establish one of the TURN paths"));
                     }
-                    return Err(error).context("establish one of the TURN paths");
                 }
                 Err(error) => {
-                    tasks.abort_all();
-                    for client in &clients {
-                        client.close();
+                    if first_error.is_none() {
+                        first_error = Some(anyhow::anyhow!(error).context("TURN path task failed"));
                     }
-                    return Err(anyhow::anyhow!(error)).context("TURN path task failed");
                 }
             }
+        }
+
+        if let Some(error) = first_error {
+            for client in &clients {
+                client.close();
+            }
+            return Err(error);
         }
         TurnClientPathGroup::new(clients)
             .context("assemble authenticated TURN path group")
@@ -341,15 +358,19 @@ fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result
         let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
         addresses.find(SocketAddr::is_ipv4).context("TURN gateway host did not resolve to IPv4")
     })?;
-    let replacement = session.runtime.block_on(async {
-        tokio::select! {
-            biased;
-            _ = session.client.closed() => anyhow::bail!("native TURN session closed during path recovery"),
-            result = TurnClientRuntime::connect_with_path_context(
-                socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
-            ) => result.context("establish replacement TURN allocation"),
-        }
-    })?;
+    // Do not cancel path setup when the group closes: cancellation after a
+    // successful Allocate could skip authenticated Refresh(0). Setup has
+    // bounded protocol retries; close the completed replacement if shutdown
+    // won the race before installation.
+    let replacement = session.runtime.block_on(
+        TurnClientRuntime::connect_with_path_context(
+            socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
+        )
+    ).context("establish replacement TURN allocation")?;
+    if session.client.closed().now_or_never().is_some() {
+        replacement.close();
+        anyhow::bail!("native TURN session closed during path recovery");
+    }
     session.client.replace_path(replacement).context("install replacement TURN path")
 }
 
