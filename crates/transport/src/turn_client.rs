@@ -465,6 +465,37 @@ mod path_group_tests {
     }
 
     #[tokio::test]
+    async fn failed_path_can_be_replaced_without_rebuilding_the_group() {
+        let group_id = [0x6b; 16];
+        let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        assert_eq!(group.active_paths(), 2);
+
+        drop(downlink_b);
+        for _ in 0..20 {
+            if group.active_paths() == 1 { break; }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(group.active_paths(), 1);
+
+        let (replacement, mut replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
+        group.replace_path(replacement).unwrap();
+        assert_eq!(group.active_paths(), 2);
+
+        let packet = (10000..10100)
+            .map(packet)
+            .find(|bytes| ghulakh_protocol::ip_flow::flow_hash(bytes) as usize % 2 == 1)
+            .unwrap();
+        group.send_packet(DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet.clone(),
+        }).await.unwrap();
+        assert_eq!(replacement_uplink.recv().await.unwrap().packet, packet);
+        drop(downlink_a);
+    }
+
+    #[tokio::test]
     async fn saturated_flow_queue_drops_newest_without_blocking_or_reassigning() {
         let (sender, mut receiver) = mpsc::channel(1);
         let dropped = AtomicU64::new(0);
