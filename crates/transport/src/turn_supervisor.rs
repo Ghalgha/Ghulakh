@@ -951,9 +951,9 @@ mod stale_nonce_retry_budget_tests {
         assert!(error.chain().any(|cause| {
             matches!(
                 cause.downcast_ref::<TurnDriverError>(),
-                Some(TurnDriverError::ServerError { code: 438 })
+                Some(TurnDriverError::Challenge(challenge)) if challenge.code == 438
             )
-        }), "expected the original authenticated 438 error in the error chain: {error:#}");
+        }), "expected the original authenticated 438 challenge in the error chain: {error:#}");
         assert_eq!(supervisor.provider.calls, 1, "only initial 401 may request credentials");
         let registry = supervisor.driver.peer_registry().unwrap();
         assert_eq!(registry.permission_count(), 0);
