@@ -109,12 +109,12 @@ impl TurnClientRuntime {
             if !seen_endpoints.insert(authority) {
                 continue;
             }
-            let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-                .await
-                .context("resolve VK Calls TURN endpoint")?;
-            relay_addresses.extend(addresses.filter(|address| {
-                address.is_ipv4() == local_address.is_ipv4()
-            }));
+            let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port)).await;
+            append_resolved_relay_addresses(
+                &mut relay_addresses,
+                addresses,
+                local_address.is_ipv4(),
+            );
         }
         let relay_endpoint = select_relay_address(relay_addresses, path_id)
             .context("VK Calls response has no resolvable UDP TURN endpoint for the protected socket family")?;
@@ -487,6 +487,21 @@ impl Drop for TurnClientPathGroup {
 }
 
 
+fn append_resolved_relay_addresses<I, E>(
+    target: &mut Vec<SocketAddr>,
+    resolved: std::result::Result<I, E>,
+    local_is_ipv4: bool,
+)
+where
+    I: IntoIterator<Item = SocketAddr>,
+{
+    if let Ok(addresses) = resolved {
+        target.extend(addresses.into_iter().filter(|address| {
+            address.is_ipv4() == local_is_ipv4
+        }));
+    }
+}
+
 fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<SocketAddr> {
     addresses.sort_unstable();
     addresses.dedup();
@@ -531,6 +546,25 @@ mod path_group_tests {
         assert_eq!(select_relay_address(candidates.clone(), 0), Some(a));
         assert_eq!(select_relay_address(candidates.clone(), 1), Some(b));
         assert_eq!(select_relay_address(candidates, 2), Some(a));
+    }
+
+    #[test]
+    fn relay_dns_failure_does_not_discard_other_valid_endpoints() {
+        let mut candidates = Vec::new();
+        append_resolved_relay_addresses(
+            &mut candidates,
+            Err(std::io::Error::new(std::io::ErrorKind::NotFound, "DNS failure")),
+            true,
+        );
+        append_resolved_relay_addresses(
+            &mut candidates,
+            Ok(vec![
+                "192.0.2.10:3478".parse().unwrap(),
+                "[2001:db8::10]:3478".parse().unwrap(),
+            ]),
+            true,
+        );
+        assert_eq!(candidates, vec!["192.0.2.10:3478".parse().unwrap()]);
     }
 
     #[test]
