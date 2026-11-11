@@ -583,6 +583,10 @@ impl TurnClientPathGroup {
         }
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     pub fn close(&self) {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.closed_signal.send_replace(true);
