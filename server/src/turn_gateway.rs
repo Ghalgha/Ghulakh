@@ -1017,7 +1017,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_mock_multipath_turn_allocations_share_one_tunnel_and_survive_path_removal() {
-        use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+        use std::net::UdpSocket as StdUdpSocket;
         use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
         use ghulakh_protocol::{
             session_handshake::NoiseServerKeyPair,
@@ -1061,7 +1061,7 @@ mod tests {
                 }
             }).to_string();
             let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
-            let pinned_key = keypair.public_key();
+            let pinned_key = keypair.public_key().to_vec();
             let context = TurnPathContext { group_id, path_id, path_count: 2 };
             connect_tasks.push(tokio::spawn(async move {
                 TurnClientRuntime::connect_with_path_context(
