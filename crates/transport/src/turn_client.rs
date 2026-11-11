@@ -5,6 +5,7 @@
 //! bidirectional IP dataplane. VK API credential acquisition remains external.
 
 use std::{
+    collections::HashSet,
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -98,19 +99,25 @@ impl TurnClientRuntime {
         let local_address = protected_socket.local_addr()
             .context("read protected TURN socket address")?;
         let path_id = path_context.as_ref().map_or(0, |context| context.path_id);
-        let endpoint = credentials.udp_endpoint_for_path(path_id)
-            .context("VK Calls response has no UDP TURN endpoint")?
-            .clone();
-        anyhow::ensure!(
-            endpoint.scheme == TurnScheme::Turn && endpoint.transport == TurnWireTransport::Udp,
-            "only plain UDP TURN URIs are currently supported"
-        );
-        let mut addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
-            .await
-            .context("resolve VK Calls TURN endpoint")?;
-        let relay_endpoint = addresses
-            .find(|address| address.is_ipv4() == local_address.is_ipv4())
-            .context("TURN endpoint has no address matching the protected socket family")?;
+        let mut seen_endpoints = HashSet::new();
+        let mut relay_addresses = Vec::new();
+        for endpoint in credentials.endpoints().iter().filter(|endpoint| {
+            endpoint.scheme == TurnScheme::Turn && endpoint.transport == TurnWireTransport::Udp
+        }) {
+            // Multiple URI variants for the same host:port are one candidate.
+            let authority = endpoint.socket_authority().to_ascii_lowercase();
+            if !seen_endpoints.insert(authority) {
+                continue;
+            }
+            let addresses = tokio::net::lookup_host((endpoint.host.as_str(), endpoint.port))
+                .await
+                .context("resolve VK Calls TURN endpoint")?;
+            relay_addresses.extend(addresses.filter(|address| {
+                address.is_ipv4() == local_address.is_ipv4()
+            }));
+        }
+        let relay_endpoint = select_relay_address(relay_addresses, path_id)
+            .context("VK Calls response has no resolvable UDP TURN endpoint for the protected socket family")?;
 
         let socket = TurnUdpSocket::from_protected_socket(protected_socket, relay_endpoint)
             .context("adopt protected VK Calls TURN socket")?;
@@ -479,6 +486,13 @@ impl Drop for TurnClientPathGroup {
     }
 }
 
+
+fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<SocketAddr> {
+    addresses.sort_unstable();
+    addresses.dedup();
+    (!addresses.is_empty()).then(|| addresses[usize::from(path_id) % addresses.len()])
+}
+
 fn enqueue_uplink_packet(
     sender: &mpsc::Sender<DataDatagram>,
     packet: DataDatagram,
@@ -507,6 +521,22 @@ fn select_path_index(packet: &[u8], healthy: &[bool]) -> Option<usize> {
 #[cfg(test)]
 mod path_group_tests {
     use super::*;
+
+
+    #[test]
+    fn relay_address_selection_is_stable_and_deduplicates_dns_answers() {
+        let a = "192.0.2.10:3478".parse().unwrap();
+        let b = "192.0.2.11:3478".parse().unwrap();
+        let candidates = vec![b, a, b, a];
+        assert_eq!(select_relay_address(candidates.clone(), 0), Some(a));
+        assert_eq!(select_relay_address(candidates.clone(), 1), Some(b));
+        assert_eq!(select_relay_address(candidates, 2), Some(a));
+    }
+
+    #[test]
+    fn relay_address_selection_returns_none_for_no_matching_family_candidates() {
+        assert_eq!(select_relay_address(Vec::new(), 0), None);
+    }
 
     fn packet(source_port: u16) -> Vec<u8> {
         let mut packet = vec![0u8; 24];
