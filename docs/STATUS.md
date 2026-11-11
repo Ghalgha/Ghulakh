@@ -220,3 +220,8 @@ These findings are code-review findings, not live-network measurements. CI valid
 The established TURN handshake now commits the exact ClientFinish→ServerAck replay-cache entry before mutating the gateway route, while holding the handshake-service mutex. This prevents a cache-commit failure from leaving a replacement gateway session installed. If gateway registration fails after cache insertion, the exact cache entry is removed using the request digest and the path-generation/IP reservation is rolled back. A conflicting request cannot remove another request's replay entry. Added a protocol regression test for exact rollback and conflict rejection.
 
 The change relies on the existing single serialized handshake-service lock in `TurnGateway::process_handshake`; do not move cache lookup/commit or gateway registration outside that critical section without redesigning the transaction. UDP send occurs after commit and lock release; retransmission receives the cached exact ServerAck, which is intentional.
+
+
+## TURN path startup pacing
+
+Independent TURN path allocations now start with a 200 ms interval between task launches. The paths still establish concurrently after launch and remain independent in the data plane; only the initial allocation/handshake burst is staggered. The interval follows the worker-start pacing pattern observed in the reviewed implementations, but it is a conservative implementation choice rather than a measured VK Calls quota or throughput optimum. Live allocation limits and credential reuse behavior remain subject to later physical validation.
