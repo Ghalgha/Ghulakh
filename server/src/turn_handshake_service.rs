@@ -222,22 +222,8 @@ impl TurnHandshakeService {
                     mtu: SERVER_TUN_MTU,
                 };
 
-                // Cache exact ServerAck before exposing response or session keys.
-                if let Err(error) = self.delivery.cache_response(
-                    datagram,
-                    response.clone(),
-                    relay_peer,
-                    now,
-                ) {
-                    if let Some(context) = reserved_path {
-                        self.rollback_path_replacement(context, envelope.handshake_id, replaced_generation);
-                    }
-                    if let Some(address) = reserved_legacy_ip {
-                        self.allocated_ips.remove(&address);
-                    }
-                    return Err(error).context("cache ServerAck before sending");
-                }
- 
+                // ServerAck is cached only after the gateway commits this session.
+                // Until then, duplicate ClientFinish datagrams cannot receive success.
                 Ok(TurnHandshakeOutcome::Response {
                     response,
                     established: Some(EstablishedTurnSession {
@@ -391,6 +377,30 @@ impl TurnHandshakeService {
 
     pub fn active_handshakes(&self) -> usize {
         self.pending.len()
+    }
+
+    /// Commit the exact ServerAck only after the gateway has installed the
+    /// authenticated data-plane session. Retransmission cannot advance Noise state.
+    pub fn commit_established_response(
+        &mut self,
+        request_datagram: &[u8],
+        response_datagram: &[u8],
+        relay_peer: SocketAddr,
+        now: Instant,
+    ) -> Result<()> {
+        let request = ghulakh_protocol::handshake_datagram::HandshakeEnvelope::decode(request_datagram)
+            .context("decode committed ClientFinish")?;
+        let response = ghulakh_protocol::handshake_datagram::HandshakeEnvelope::decode(response_datagram)
+            .context("decode committed ServerAck")?;
+        ensure!(request.phase == HandshakePhase::ClientFinish, "only ClientFinish may commit an established response");
+        ensure!(response.phase == HandshakePhase::ServerAck, "established response must be ServerAck");
+        ensure!(request.handshake_id == response.handshake_id, "ServerAck handshake identifier mismatch");
+        self.delivery.cache_response(
+            request_datagram,
+            response_datagram.to_vec(),
+            relay_peer,
+            now,
+        ).context("cache committed ServerAck")
     }
 
     pub fn cached_responses(&self) -> usize {
@@ -572,6 +582,10 @@ mod tests {
         assert_eq!(established.handshake_id, handshake_id);
         assert_eq!(established.relay_peer, peer);
         assert_eq!(service.active_handshakes(), 0);
+        // The ServerAck is not replayable until the gateway confirms registration.
+        assert_eq!(service.cached_responses(), 1);
+        assert!(service.process(&finish, peer, now).is_err());
+        service.commit_established_response(&finish, &server_ack, peer, now).unwrap();
         assert_eq!(service.cached_responses(), 2);
         let (client_keys, client_config_payload) =
             client.receive_server_ack_with_payload(&server_ack).unwrap();
