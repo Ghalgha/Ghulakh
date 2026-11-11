@@ -133,8 +133,8 @@ mod tests {
             FrameDirection::ClientToServer,
         );
         assert_eq!(
-            opener.open(channel.data).unwrap().as_slice(),
-            ghulakh_protocol::secure_frame::keepalive_request(0x0102_0304_0506_0708),
+            opener.open(channel.data).unwrap(),
+            ghulakh_protocol::secure_frame::keepalive_request(0x0102_0304_0506_0708).to_vec(),
         );
     }
 
