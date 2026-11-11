@@ -131,3 +131,8 @@ Path-slot reservation now records the generation displaced by a replacement hand
 ## Handshake acknowledgement commit ordering
 
 The server no longer exposes a cached successful ServerAck immediately after Noise authentication. The gateway first installs the authenticated session and its relay route; only then does the handshake service commit the exact response bytes to the replay cache. A duplicate ClientFinish arriving during registration is rejected and can be retried; after commit it receives the cached acknowledgement without advancing Noise state. Failed gateway registration rolls back the path generation and leaves no successful acknowledgement in the cache. UDP send failure after commit remains safely retryable.
+
+
+## Serialized TURN path replacement commit
+
+The gateway now retains the handshake-service mutex from authenticated ClientFinish processing through gateway session registration and ServerAck cache commit. This prevents two concurrent handshakes for the same path slot from reserving generations in one order but installing gateway routes in the opposite order. The lock is released before sending the UDP response; dataplane processing does not use this lock. Registration failure rolls back the reservation while the same transaction lock is held.
