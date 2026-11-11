@@ -59,20 +59,43 @@ class GhulakhVpnService : VpnService() {
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
-            val callsSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
-            vkSessions.add(callsSession)
-            if (!running.get()) return
             val transport = NativeTransport()
-
-            val handle = transport.nativeTurnConnect(
-                this,
-                profile.host,
-                profile.port,
-                callsSession.turnCredentialsJson,
-                decodeHexKey(profile.pinnedServerPublicKeyHex),
-                profile.credential,
-                DEFAULT_TURN_PATHS,
-            )
+            val rejectedCredentialFingerprints = mutableSetOf<String>()
+            var connectAttempt = 0
+            var callsSession: VkCallsSession? = null
+            val handle = while (true) {
+                if (!running.get()) return
+                val candidate = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+                try {
+                    val connectedHandle = transport.nativeTurnConnect(
+                        this,
+                        profile.host,
+                        profile.port,
+                        candidate.turnCredentialsJson,
+                        decodeHexKey(profile.pinnedServerPublicKeyHex),
+                        profile.credential,
+                        DEFAULT_TURN_PATHS,
+                    )
+                    callsSession = candidate
+                    break connectedHandle
+                } catch (error: Throwable) {
+                    candidate.finish()
+                    val fingerprint = TurnQuotaRetryPolicy.fingerprint(candidate.turnCredentialsJson)
+                    if (error.message != "TURN_ALLOCATION_QUOTA_486" ||
+                        !TurnQuotaRetryPolicy.shouldRetry(
+                            connectAttempt,
+                            fingerprint,
+                            rejectedCredentialFingerprints,
+                        )
+                    ) {
+                        throw error
+                    }
+                    connectAttempt++
+                    if (!running.get()) return
+                    Thread.sleep(TurnQuotaRetryPolicy.retryDelayMillis(connectAttempt - 1))
+                }
+            }
+            vkSessions.add(checkNotNull(callsSession))
             val retained = synchronized(this) {
                 if (running.get()) {
                     nativeTransport = transport
