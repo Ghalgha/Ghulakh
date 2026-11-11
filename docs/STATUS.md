@@ -116,7 +116,7 @@ The Android service now monitors failed path slots while the VPN remains active.
 
 Recovery retries use bounded exponential delays (1, 2, 4, 8, 16, then at most 30 seconds). Successful VK Calls conversations are retained until the VPN service stops; failed attempts are explicitly finished. When all paths are unavailable, outbound packets are dropped and counted rather than terminating the TUN reader, allowing the recovery worker to restore service. Packet loss during a full outage is expected; continuity is not claimed.
 
-CI and a full mock relay-loss/reallocation recovery test now cover the Rust recovery path. Android's live VK Calls credential flow and physical Android/VPS validation remain deferred until the rest of the software vertical slice is complete. Multiple simultaneous VK Calls TURN allocations and credential lifetime behavior still require physical validation.
+CI and a full mock relay-loss/reallocation recovery test cover the Rust recovery path. Android recovery is integrated into the service; the live VK Calls credential flow and physical Android/VPS validation remain deferred until the software vertical slice is complete. Multiple simultaneous VK Calls TURN allocations and credential lifetime behavior still require physical validation.
 
 
 ### Recovery race hardening
