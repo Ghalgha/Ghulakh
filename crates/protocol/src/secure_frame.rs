@@ -6,8 +6,31 @@
 
 use zeroize::Zeroize;
 
-/// Authenticated non-IP payload used to keep an otherwise idle VPN session alive.
+/// Prefixes for authenticated bidirectional path-health probes.
 pub const SESSION_KEEPALIVE_PAYLOAD: &[u8; 4] = b"GHKP";
+pub const SESSION_KEEPALIVE_ACK_PAYLOAD: &[u8; 4] = b"GHKA";
+pub const SESSION_KEEPALIVE_NONCE_LEN: usize = 8;
+
+pub fn keepalive_request(nonce: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(SESSION_KEEPALIVE_PAYLOAD);
+    payload[4..].copy_from_slice(&nonce.to_be_bytes());
+    payload
+}
+
+pub fn keepalive_ack(nonce: u64) -> [u8; 12] {
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(SESSION_KEEPALIVE_ACK_PAYLOAD);
+    payload[4..].copy_from_slice(&nonce.to_be_bytes());
+    payload
+}
+
+pub fn parse_keepalive_ack(payload: &[u8]) -> Option<u64> {
+    if payload.len() != 12 || &payload[..4] != SESSION_KEEPALIVE_ACK_PAYLOAD {
+        return None;
+    }
+    Some(u64::from_be_bytes(payload[4..12].try_into().ok()?))
+}
 
 use chacha20poly1305::{
     aead::{AeadInPlace, KeyInit},
