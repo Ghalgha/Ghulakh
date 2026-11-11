@@ -147,7 +147,6 @@ impl TurnGateway {
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
             let path_context = established.path_context;
-            let replaced_generation = established.replaced_generation;
             // Commit replay protection before mutating the gateway route.
             // The handshake-service mutex serializes duplicate ClientFinish
             // processing, so no peer can observe the cached ServerAck until
