@@ -13,6 +13,10 @@ use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
 
+fn keepalive_expired(pending: Option<(u64, Instant)>, now: Instant) -> bool {
+    pending.is_some_and(|(_, sent)| now.saturating_duration_since(sent) >= KEEPALIVE_TIMEOUT)
+}
+
 use crate::{
     turn_data::{TurnDataReceiver, TurnDataSender},
     turn_socket_actor::{TurnInbound, TurnSocketHandle},
@@ -130,7 +134,7 @@ impl TurnDataPlane {
                     }
                 }
                 Event::KeepaliveTimeout => {
-                    if pending_keepalive.is_some_and(|(_, sent)| Instant::now().duration_since(sent) >= KEEPALIVE_TIMEOUT) {
+                    if keepalive_expired(pending_keepalive, Instant::now()) {
                         anyhow::bail!("authenticated TURN path-health probe timed out");
                     }
                 }
@@ -156,6 +160,14 @@ mod tests {
     const SERVER_KEY: [u8; 32] = [0x22; 32];
     const CLIENT_PREFIX: [u8; 4] = [0x41; 4];
     const SERVER_PREFIX: [u8; 4] = [0x52; 4];
+
+    #[test]
+    fn path_is_marked_failed_only_after_keepalive_ack_deadline() {
+        let sent = Instant::now();
+        assert!(!keepalive_expired(Some((7, sent)), sent + KEEPALIVE_TIMEOUT - Duration::from_secs(1)));
+        assert!(keepalive_expired(Some((7, sent)), sent + KEEPALIVE_TIMEOUT));
+        assert!(!keepalive_expired(None, sent + KEEPALIVE_TIMEOUT * 2));
+    }
 
     fn packet() -> DataDatagram {
         let mut bytes = vec![0u8; 20];
