@@ -551,10 +551,13 @@ mod path_group_tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(group.active_paths(), 1);
+        assert_eq!(group.failed_path_ids(), vec![1]);
+        assert_eq!(group.path_context(1).unwrap().group_id, group_id);
 
         let (replacement, mut replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
         group.replace_path(replacement).unwrap();
         assert_eq!(group.active_paths(), 2);
+        assert!(group.failed_path_ids().is_empty());
 
         let packet = (10000..10100)
             .map(packet)
