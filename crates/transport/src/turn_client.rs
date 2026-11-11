@@ -557,6 +557,43 @@ mod path_group_tests {
         group.close();
     }
 
+    #[tokio::test]
+    async fn path_group_queue_saturation_drops_newest_without_reassigning_flow() {
+        let group_id = [0x6b; 16];
+        let (path_a, mut uplink_a, _downlink_a) = mock_path(0, group_id);
+        let (path_b, mut uplink_b, _downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+
+        let packet_bytes = packet(23456);
+        let selected = select_path_index(&packet_bytes, &[true, true]).unwrap();
+        let datagram = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet_bytes,
+        };
+
+        for _ in 0..APP_QUEUE_CAPACITY {
+            group.send_packet(datagram.clone()).await.unwrap();
+        }
+        assert_eq!(group.uplink_queue_drops(), 0);
+
+        // A full flow-affine queue drops the newest packet; it must not move
+        // that flow to another path and overtake packets already queued there.
+        group.send_packet(datagram.clone()).await.unwrap();
+        assert_eq!(group.uplink_queue_drops(), 1);
+
+        let (selected_rx, other_rx) = if selected == 0 {
+            (&mut uplink_a, &mut uplink_b)
+        } else {
+            (&mut uplink_b, &mut uplink_a)
+        };
+        for _ in 0..APP_QUEUE_CAPACITY {
+            assert_eq!(selected_rx.recv().await.unwrap(), datagram);
+        }
+        assert!(selected_rx.try_recv().is_err());
+        assert!(other_rx.try_recv().is_err());
+        group.close();
+    }
+
     #[test]
     fn different_flows_can_select_different_paths() {
         let healthy = [true, true, true, true];
