@@ -176,3 +176,8 @@ CI run #635 confirmed that installing the Nightly toolchain did not change the d
 
 
 The first explicit Nightly invocation exposed a second CI environment issue: the prebuilt cargo-fuzz binary installed through the fallback installer targets `x86_64-unknown-linux-musl`. Its fuzz build consequently selects the Musl target, where AddressSanitizer is incompatible with static libc. CI now builds cargo-fuzz from source using `cargo +nightly install cargo-fuzz --locked`, so the tool is compiled for the native GNU runner target. CI run #638 passed: the native-target cargo-fuzz installation completed, and both bounded fuzz targets (STUN decoder and handshake envelope decoder) ran successfully. Android debug build, Rust formatting, tests, Clippy, and dependency audit also passed in the same run.
+
+
+## Android TURN recovery backoff policy
+
+Сравнение Android worker-recovery реализации в актуальных исходных ветках показало одинаковую модель восстановления здоровой группы после полного обнуления числа активных workers: запоминание максимального размера группы, однократное вооружение восстановления и сброс после возврата целевого количества. Эта модель решает обнаружение потери группы, но не задаёт задержки повторных попыток отдельных TURN allocations. Ghulakh сохраняет собственную path-level exponential backoff (1, 2, 4, 8, 16, затем максимум 30 секунд), поскольку каждый TURN path восстанавливается независимо и не должен сбрасывать счётчик другого пути. Расчёт задержки вынесен в чистую Kotlin policy-функцию; добавлены JVM-тесты граничных значений, включая отрицательные и максимально большие счётчики. CI validation ожидается.
