@@ -283,3 +283,11 @@ Mock tests cover waking a blocked downlink receive on close and rejecting a late
 Normal TURN path shutdown now signals the path-owned maintenance task instead of aborting it. The task stops periodic allocation/permission/channel maintenance, sends an authenticated TURN Refresh request with lifetime zero through the existing transaction manager, and then closes the local supervisor. The relay-side release attempt is bounded to three seconds; on timeout or relay error, local resources are still closed and the allocation is left to expire naturally if the relay did not process the request. The dataplane is stopped immediately and does not wait for relay cleanup.
 
 The supervisor handles a verified 438 Stale Nonce response through the existing bounded challenge-refresh path before retrying Refresh(0). A mock integration test verifies that shutdown sends a signed Refresh(0), uses the current nonce, accepts a signed zero-lifetime success response, and retires local allocation state. Relay response loss is inherently ambiguous: the server may have applied the deletion while its response was lost. No claim is made that every relay allocation is synchronously released. Physical VK Calls behavior remains to be validated near project completion.
+
+
+## TURN allocation cleanup after path setup failure
+
+- After a successful Allocate, failures while creating the gateway permission, binding the data channel, extracting TURN planes, or completing the authenticated Noise handshake now trigger an authenticated Refresh(0) attempt.
+- Cleanup is bounded to three seconds. The supervisor is closed locally whether the relay confirms deallocation or the request times out/fails; uncertain relay state is left to expire naturally.
+- Allocate failures are not treated as established allocations because the client has no confirmed allocation state to refresh.
+- This closes the setup-failure cleanup gap; physical VK Calls relay behavior remains pending late-stage validation.
