@@ -544,6 +544,8 @@ mod tests {
     async fn spawn_mock_turn_allocation(
         client_addr: SocketAddr,
         gateway_addr: SocketAddr,
+        username: &str,
+        password: &str,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         use std::{collections::{HashMap, HashSet}, net::IpAddr};
         use md5::{Digest, Md5};
@@ -560,6 +562,8 @@ mod tests {
         let relay_addr = client_facing.local_addr().unwrap();
         let peer_facing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer_facing.local_addr().unwrap();
+        let username = username.to_owned();
+        let password = password.to_owned();
         let task = tokio::spawn(async move {
             let mut permissions: HashSet<IpAddr> = HashSet::new();
             let mut channels: HashMap<u16, SocketAddr> = HashMap::new();
@@ -593,6 +597,10 @@ mod tests {
                                 client_facing.send_to(&challenge, source).await.unwrap();
                                 continue;
                             }
+                            assert_eq!(
+                                request.attribute(ATTR_USERNAME),
+                                Some(username.as_bytes()),
+                            );
                             let mut attributes = Vec::new();
                             match request.method {
                                 METHOD_ALLOCATE => {
@@ -638,7 +646,7 @@ mod tests {
                                 attributes,
                             };
                             let mut digest = Md5::new();
-                            digest.update(b"temporary-user:turn.mock:temporary-password");
+                            digest.update(format!("{username}:turn.mock:{password}").as_bytes());
                             let response = append_message_integrity(&response, &digest.finalize()).unwrap();
                             client_facing.send_to(&response, source).await.unwrap();
                         }
@@ -1116,7 +1124,12 @@ mod tests {
             protected.set_nonblocking(true).unwrap();
             let client_addr = protected.local_addr().unwrap();
             let (relay_addr, relay_task) =
-                spawn_mock_turn_allocation(client_addr, gateway_addr).await;
+                spawn_mock_turn_allocation(
+                    client_addr,
+                    gateway_addr,
+                    "temporary-user",
+                    "temporary-password",
+                ).await;
             relay_tasks.push(relay_task);
 
             let credentials_json = serde_json::json!({
@@ -1205,35 +1218,128 @@ mod tests {
         assert_eq!(merged, expected_downlinks);
         assert_eq!(gateway.stats().downlink_sent, 2);
 
-        // Remove one authenticated path from the gateway registry. The
-        // surviving allocation remains routable for the same virtual client.
-        let failed_session = {
-            let sessions = gateway.sessions.read().await;
-            sessions.iter()
-                .find_map(|(id, session)| {
-                    session.path_context
-                        .filter(|context| context.path_id == 0)
-                        .map(|_| *id)
-                })
-                .unwrap()
-        };
-        assert!(gateway.unregister_session(failed_session).await);
-        let after_failure = udp_flow(
-            Ipv4Addr::new(203, 0, 113, 7),
-            CLIENT_IP,
-            32123,
+        // Kill both TURN relay allocations. The client must detect the missing
+        // authenticated keepalive acknowledgements, mark both paths failed,
+        // fetch fresh credentials, and establish two new allocations/handshakes.
+        for task in relay_tasks.drain(..) {
+            task.abort();
+        }
+        timeout(Duration::from_secs(55), async {
+            loop {
+                if group.failed_path_ids() == vec![0, 1] {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("both relay failures must be detected by path-health timeout");
+        assert_eq!(group.active_paths(), 0);
+
+        let mut replacement_tasks = Vec::new();
+        let mut replacement_relays = Vec::new();
+        for path_id in 0..2u16 {
+            let protected = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            protected.set_nonblocking(true).unwrap();
+            let client_addr = protected.local_addr().unwrap();
+            let username = format!("recovery-user-{path_id}");
+            let password = format!("recovery-password-{path_id}");
+            let (relay_addr, relay_task) = spawn_mock_turn_allocation(
+                client_addr,
+                gateway_addr,
+                &username,
+                &password,
+            ).await;
+            replacement_relays.push(relay_task);
+
+            // A new credentials response is issued for each replacement
+            // allocation; neither old TURN credentials nor old UDP sockets
+            // are reused.
+            let credentials_json = serde_json::json!({
+                "turn_server": {
+                    "username": username,
+                    "credential": password,
+                    "urls": [format!("turn:{}?transport=udp", relay_addr)]
+                }
+            }).to_string();
+            let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
+            let pinned_key = keypair.public_key().to_vec();
+            let context = TurnPathContext { group_id, path_id, path_count: 2 };
+            replacement_tasks.push(tokio::spawn(async move {
+                TurnClientRuntime::connect_with_path_context(
+                    protected,
+                    credentials,
+                    gateway_addr,
+                    &pinned_key,
+                    b"device-secret",
+                    context,
+                ).await
+            }));
+        }
+
+        let mut replacements = Vec::new();
+        for task in replacement_tasks {
+            replacements.push(task.await.unwrap().unwrap());
+        }
+        for replacement in replacements {
+            group.replace_path(replacement).unwrap();
+        }
+        assert_eq!(group.active_paths(), 2);
+        assert!(group.failed_path_ids().is_empty());
+        assert_eq!(
+            gateway.clients.read().await.get(&CLIENT_IP).unwrap().sessions.len(),
+            2,
+            "gateway must contain exactly the two newly authenticated paths",
         );
-        gateway.send_downlink(&after_failure).await.unwrap();
-        let received_after_failure = timeout(
-            Duration::from_secs(2),
-            group.receive_packet(),
-        ).await.unwrap().unwrap();
-        assert_eq!(received_after_failure, after_failure);
-        assert_eq!(gateway.stats().downlink_sent, 3);
-        assert_eq!(gateway.clients.read().await.get(&CLIENT_IP).unwrap().sessions.len(), 1);
+
+        // Prove both newly allocated paths carry authenticated uplink and
+        // downlink after recovery, while retaining the original tunnel IPv4.
+        let mut recovered_uplinks: [Option<DataDatagram>; 2] = [None, None];
+        for port in 30000..=u16::MAX {
+            let candidate = udp_flow(CLIENT_IP, Ipv4Addr::new(9, 9, 9, 9), port);
+            let path = (flow_hash(&candidate.packet) as usize) % 2;
+            recovered_uplinks[path].get_or_insert(candidate);
+            if recovered_uplinks.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let recovered_uplinks = recovered_uplinks.map(Option::unwrap);
+        for packet in &recovered_uplinks {
+            group.send_packet(packet.clone()).await.unwrap();
+        }
+        let mut recovered_at_gateway = vec![
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+        ];
+        recovered_at_gateway.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        let mut expected_recovered = recovered_uplinks.to_vec();
+        expected_recovered.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        assert_eq!(recovered_at_gateway, expected_recovered);
+        assert_eq!(gateway.stats().accepted, 4);
+
+        let mut recovered_downlinks: [Option<DataDatagram>; 2] = [None, None];
+        for port in 40000..=u16::MAX {
+            let candidate = udp_flow(Ipv4Addr::new(9, 9, 9, 9), CLIENT_IP, port);
+            let path = (flow_hash(&candidate.packet) as usize) % 2;
+            recovered_downlinks[path].get_or_insert(candidate);
+            if recovered_downlinks.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let recovered_downlinks = recovered_downlinks.map(Option::unwrap);
+        for packet in &recovered_downlinks {
+            gateway.send_downlink(packet).await.unwrap();
+        }
+        let mut received_recovered = vec![
+            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+        ];
+        received_recovered.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        let mut expected_downlinks = recovered_downlinks.to_vec();
+        expected_downlinks.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        assert_eq!(received_recovered, expected_downlinks);
+        assert_eq!(gateway.stats().downlink_sent, 5);
 
         group.close();
-        for task in relay_tasks {
+        for task in replacement_relays {
             task.abort();
         }
         gateway_task.abort();
