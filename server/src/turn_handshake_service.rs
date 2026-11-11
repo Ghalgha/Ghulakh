@@ -403,6 +403,18 @@ impl TurnHandshakeService {
         ).context("cache committed ServerAck")
     }
 
+    /// Remove a just-committed ServerAck cache entry when the surrounding
+    /// gateway registration transaction rolls back.
+    pub fn remove_cached_response(
+        &mut self,
+        request_datagram: &[u8],
+        relay_peer: SocketAddr,
+    ) -> Result<bool> {
+        self.delivery
+            .remove_cached_response(request_datagram, relay_peer)
+            .context("remove rolled-back handshake response")
+    }
+
     pub fn cached_responses(&self) -> usize {
         self.delivery.cached_response_len()
     }
