@@ -230,7 +230,7 @@ impl TurnHandshakeService {
                     now,
                 ) {
                     if let Some(context) = reserved_path {
-                        self.rollback_path(context, envelope.handshake_id);
+                        self.rollback_path_replacement(context, envelope.handshake_id, replaced_generation);
                     }
                     if let Some(address) = reserved_legacy_ip {
                         self.allocated_ips.remove(&address);
@@ -466,6 +466,37 @@ mod tests {
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
     }
 
+
+    #[test]
+    fn failed_path_replacement_restores_previous_generation_and_address_lease() {
+        let (mut service, _) = service(b"device-secret");
+        let context = TurnPathContext {
+            group_id: [0x75; 16],
+            path_id: 0,
+            path_count: 2,
+        };
+        let original_generation = [0x11; 16];
+        let replacement_generation = [0x22; 16];
+        let (address, previous) = service
+            .reserve_path_transactional(context, original_generation)
+            .unwrap();
+        assert_eq!(previous, None);
+
+        let (replacement_address, displaced) = service
+            .reserve_path_transactional(context, replacement_generation)
+            .unwrap();
+        assert_eq!(replacement_address, address);
+        assert_eq!(displaced, Some(original_generation));
+
+        assert!(service.rollback_path_replacement(
+            context,
+            replacement_generation,
+            displaced,
+        ));
+        assert!(!service.release_path(context, replacement_generation));
+        assert!(service.release_path(context, original_generation));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+    }
 
     #[test]
     fn legacy_address_release_cannot_bypass_active_path_leases() {
