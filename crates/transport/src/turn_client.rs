@@ -429,8 +429,11 @@ impl TurnClientPathGroup {
     }
 
     pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
-        anyhow::ensure!(!self.closed.load(Ordering::Acquire), "TURN path group is closed");
-        let mut closed = self.closed_signal.subscribe();
+        let closed = self.closed_signal.subscribe();
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire) && !*closed.borrow(),
+            "TURN path group is closed"
+        );
         let health: Vec<bool> = self.healthy.iter()
             .map(|path| path.load(Ordering::Acquire))
             .collect();
@@ -448,17 +451,11 @@ impl TurnClientPathGroup {
             if !self.healthy[index].load(Ordering::Acquire) {
                 continue;
             }
-            let enqueue = tokio::select! {
-                biased;
-                _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
-                result = async {
-                    enqueue_uplink_packet(
-                        &paths[index].uplink,
-                        packet.clone(),
-                        &self.uplink_queue_drops,
-                    )
-                } => result,
-            };
+            let enqueue = enqueue_uplink_packet(
+                &paths[index].uplink,
+                packet.clone(),
+                &self.uplink_queue_drops,
+            );
             match enqueue {
                 Ok(()) => return Ok(()),
                 // Do not move a congested flow to another path: packets already
