@@ -97,7 +97,8 @@ impl TurnClientRuntime {
 
         let local_address = protected_socket.local_addr()
             .context("read protected TURN socket address")?;
-        let endpoint = credentials.first_udp_endpoint()
+        let path_id = path_context.as_ref().map_or(0, |context| context.path_id);
+        let endpoint = credentials.udp_endpoint_for_path(path_id)
             .context("VK Calls response has no UDP TURN endpoint")?
             .clone();
         anyhow::ensure!(
