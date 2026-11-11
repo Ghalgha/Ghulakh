@@ -1,3 +1,4 @@
+# Retrigger Build and test after the stalled queued run was cancelled.
 name: Temporary failed CI cleanup
 
 on:
