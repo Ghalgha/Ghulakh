@@ -475,6 +475,138 @@ mod tests {
         DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
     }
 
+    async fn spawn_mock_turn_allocation(
+        client_addr: SocketAddr,
+        gateway_addr: SocketAddr,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        use std::{collections::{HashMap, HashSet}, net::IpAddr};
+        use md5::{Digest, Md5};
+        use ghulakh_protocol::stun::{
+            append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
+            decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
+            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
+            ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
+            METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
+        };
+        use ghulakh_protocol::turn_channel_data::{decode_channel_data, encode_channel_data};
+
+        let client_facing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = client_facing.local_addr().unwrap();
+        let peer_facing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer_addr = peer_facing.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut permissions: HashSet<IpAddr> = HashSet::new();
+            let mut channels: HashMap<u16, SocketAddr> = HashMap::new();
+            let mut client_buffer = [0u8; 4096];
+            let mut peer_buffer = [0u8; 4096];
+            loop {
+                tokio::select! {
+                    received = client_facing.recv_from(&mut client_buffer) => {
+                        let (length, source) = received.unwrap();
+                        assert_eq!(source, client_addr);
+                        if client_buffer[0] & 0xc0 == 0x40 {
+                            let frame = decode_channel_data(&client_buffer[..length]).unwrap();
+                            let peer = *channels.get(&frame.channel_number).unwrap();
+                            assert!(permissions.contains(&peer.ip()));
+                            peer_facing.send_to(frame.data, peer).await.unwrap();
+                        } else {
+                            let request = StunMessage::decode(&client_buffer[..length]).unwrap();
+                            assert_eq!(request.class, StunClass::Request);
+                            if request.attribute(ATTR_USERNAME).is_none() {
+                                assert_eq!(request.method, METHOD_ALLOCATE);
+                                let challenge = StunMessage {
+                                    method: request.method,
+                                    class: StunClass::ErrorResponse,
+                                    transaction_id: request.transaction_id,
+                                    attributes: vec![
+                                        StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                                        StunAttribute { kind: ATTR_REALM, value: b"turn.mock".to_vec() },
+                                        StunAttribute { kind: ATTR_NONCE, value: b"mock-nonce-1".to_vec() },
+                                    ],
+                                }.encode().unwrap();
+                                client_facing.send_to(&challenge, source).await.unwrap();
+                                continue;
+                            }
+                            let mut attributes = Vec::new();
+                            match request.method {
+                                METHOD_ALLOCATE => {
+                                    assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                    attributes.push(StunAttribute {
+                                        kind: ATTR_XOR_RELAYED_ADDRESS,
+                                        value: encode_xor_address(peer_addr, &request.transaction_id),
+                                    });
+                                    attributes.push(StunAttribute {
+                                        kind: ATTR_LIFETIME,
+                                        value: 600u32.to_be_bytes().to_vec(),
+                                    });
+                                }
+                                METHOD_CREATE_PERMISSION => {
+                                    let peer = request.attributes.iter()
+                                        .find(|attribute| attribute.kind == ATTR_XOR_PEER_ADDRESS)
+                                        .map(|attribute| decode_xor_address(&attribute.value, &request.transaction_id).unwrap())
+                                        .unwrap();
+                                    permissions.insert(peer.ip());
+                                }
+                                METHOD_CHANNEL_BIND => {
+                                    let channel = request.attribute(ATTR_CHANNEL_NUMBER).unwrap();
+                                    let number = u16::from_be_bytes([channel[0], channel[1]]);
+                                    let peer = decode_xor_address(
+                                        request.attribute(ATTR_XOR_PEER_ADDRESS).unwrap(),
+                                        &request.transaction_id,
+                                    ).unwrap();
+                                    assert!(permissions.contains(&peer.ip()));
+                                    channels.insert(number, peer);
+                                }
+                                METHOD_REFRESH => {
+                                    attributes.push(StunAttribute {
+                                        kind: ATTR_LIFETIME,
+                                        value: 600u32.to_be_bytes().to_vec(),
+                                    });
+                                }
+                                _ => panic!("unexpected TURN control method"),
+                            }
+                            let response = StunMessage {
+                                method: request.method,
+                                class: StunClass::SuccessResponse,
+                                transaction_id: request.transaction_id,
+                                attributes,
+                            };
+                            let mut digest = Md5::new();
+                            digest.update(b"temporary-user:turn.mock:temporary-password");
+                            let response = append_message_integrity(&response, &digest.finalize()).unwrap();
+                            client_facing.send_to(&response, source).await.unwrap();
+                        }
+                    }
+                    received = peer_facing.recv_from(&mut peer_buffer) => {
+                        let (length, source) = received.unwrap();
+                        assert_eq!(source, gateway_addr);
+                        let channel = channels.iter()
+                            .find(|(_, peer)| **peer == gateway_addr)
+                            .map(|(number, _)| *number)
+                            .unwrap();
+                        let response = encode_channel_data(channel, &peer_buffer[..length]).unwrap();
+                        client_facing.send_to(&response, client_addr).await.unwrap();
+                    }
+                }
+            }
+        });
+        (relay_addr, task)
+    }
+
+    fn udp_flow(source: Ipv4Addr, destination: Ipv4Addr, source_port: u16) -> DataDatagram {
+        let mut bytes = vec![0u8; 28];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+        bytes[8] = 64;
+        bytes[9] = 17;
+        bytes[12..16].copy_from_slice(&source.octets());
+        bytes[16..20].copy_from_slice(&destination.octets());
+        bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+        bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+        DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+    }
+
 
     #[tokio::test]
     async fn registers_multiple_authenticated_paths_for_one_virtual_client() {
@@ -880,6 +1012,164 @@ mod tests {
         client.close();
         let _ = shutdown_tx.send(());
         relay_task.abort();
+        gateway_task.abort();
+    }
+
+    #[tokio::test]
+    async fn full_mock_multipath_turn_allocations_share_one_tunnel_and_survive_path_removal() {
+        use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
+        use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
+        use ghulakh_protocol::{
+            session_handshake::NoiseServerKeyPair,
+            turn_path_context::TurnPathContext,
+            ip_flow::flow_hash,
+        };
+        use ghulakh_transport::{
+            turn_client::{TurnClientPathGroup, TurnClientRuntime},
+            turn_credentials::TurnCredentials,
+        };
+
+        let (gateway, mut tun_rx) =
+            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
+        let verifier: Arc<CredentialVerifier> =
+            Arc::new(|candidate| candidate == b"device-secret");
+        let service = TurnHandshakeService::new(Arc::clone(&keypair), verifier).unwrap();
+        gateway.install_handshake_service(service).await.unwrap();
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let group_id = [0x9a; 16];
+        let mut relay_tasks = Vec::new();
+        let mut connect_tasks = Vec::new();
+        for path_id in 0..2u16 {
+            let protected = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            protected.set_nonblocking(true).unwrap();
+            let client_addr = protected.local_addr().unwrap();
+            let (relay_addr, relay_task) =
+                spawn_mock_turn_allocation(client_addr, gateway_addr).await;
+            relay_tasks.push(relay_task);
+
+            let credentials_json = serde_json::json!({
+                "turn_server": {
+                    "username": "temporary-user",
+                    "credential": "temporary-password",
+                    "urls": [format!("turn:{}?transport=udp", relay_addr)]
+                }
+            }).to_string();
+            let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
+            let pinned_key = keypair.public_key();
+            let context = TurnPathContext { group_id, path_id, path_count: 2 };
+            connect_tasks.push(tokio::spawn(async move {
+                TurnClientRuntime::connect_with_path_context(
+                    protected,
+                    credentials,
+                    gateway_addr,
+                    &pinned_key,
+                    b"device-secret",
+                    context,
+                ).await
+            }));
+        }
+
+        let mut paths = Vec::new();
+        for task in connect_tasks {
+            paths.push(task.await.unwrap().unwrap());
+        }
+        let group = TurnClientPathGroup::new(paths).unwrap();
+        assert_eq!(group.active_paths(), 2);
+        assert_eq!(group.config().virtual_ipv4, CLIENT_IP);
+        assert_eq!(group.config().mtu, 1100);
+
+        // Generate one authenticated UDP flow for each path. Each allocation
+        // performs its own TURN control exchange and Noise XX handshake.
+        let mut uplinks: [Option<DataDatagram>; 2] = [None, None];
+        for port in 10000..=u16::MAX {
+            let candidate = udp_flow(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1), port);
+            let path = (flow_hash(&candidate.packet) as usize) % 2;
+            if uplinks[path].is_none() {
+                uplinks[path] = Some(candidate);
+            }
+            if uplinks.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let uplinks = uplinks.map(Option::unwrap);
+        for uplink in &uplinks {
+            group.send_packet(uplink.clone()).await.unwrap();
+        }
+
+        let mut received = vec![
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+        ];
+        received.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        let mut expected = uplinks.to_vec();
+        expected.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        assert_eq!(received, expected);
+        assert_eq!(gateway.stats().accepted, 2);
+
+        // Downlink is independently protected on each allocation and merged
+        // by the client group. Verify both paths before simulating path loss.
+        let mut downlinks: [Option<DataDatagram>; 2] = [None, None];
+        for port in 20000..=u16::MAX {
+            let candidate = udp_flow(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP, port);
+            let path = (flow_hash(&candidate.packet) as usize) % 2;
+            if downlinks[path].is_none() {
+                downlinks[path] = Some(candidate);
+            }
+            if downlinks.iter().all(Option::is_some) {
+                break;
+            }
+        }
+        let downlinks = downlinks.map(Option::unwrap);
+        for downlink in &downlinks {
+            gateway.send_downlink(downlink).await.unwrap();
+        }
+        let mut merged = vec![
+            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+        ];
+        merged.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        let mut expected_downlinks = downlinks.to_vec();
+        expected_downlinks.sort_by_key(|packet| packet.packet[20..22].to_vec());
+        assert_eq!(merged, expected_downlinks);
+        assert_eq!(gateway.stats().downlink_sent, 2);
+
+        // Remove one authenticated path from the gateway registry. The
+        // surviving allocation remains routable for the same virtual client.
+        let failed_session = {
+            let sessions = gateway.sessions.read().await;
+            sessions.iter()
+                .find_map(|(id, session)| {
+                    session.path_context
+                        .filter(|context| context.path_id == 0)
+                        .map(|_| *id)
+                })
+                .unwrap()
+        };
+        assert!(gateway.unregister_session(failed_session).await);
+        let after_failure = udp_flow(
+            Ipv4Addr::new(203, 0, 113, 7),
+            CLIENT_IP,
+            32123,
+        );
+        gateway.send_downlink(&after_failure).await.unwrap();
+        let received_after_failure = timeout(
+            Duration::from_secs(2),
+            group.receive_packet(),
+        ).await.unwrap().unwrap();
+        assert_eq!(received_after_failure, after_failure);
+        assert_eq!(gateway.stats().downlink_sent, 3);
+        assert_eq!(gateway.clients.read().await.get(&CLIENT_IP).unwrap().sessions.len(), 1);
+
+        group.close();
+        for task in relay_tasks {
+            task.abort();
+        }
         gateway_task.abort();
     }
 
