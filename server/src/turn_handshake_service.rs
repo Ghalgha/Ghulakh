@@ -339,11 +339,10 @@ impl TurnHandshakeService {
     }
 
     pub fn release_virtual_ipv4(&mut self, address: Ipv4Addr) -> bool {
-        let groups: Vec<[u8; 16]> = self.path_groups.iter()
-            .filter_map(|(id, group)| (group.virtual_ipv4 == address).then_some(*id))
-            .collect();
-        for id in groups {
-            self.path_groups.remove(&id);
+        // Multipath addresses are owned by generation-bound path leases and
+        // may only be released after the final path is removed.
+        if self.path_groups.values().any(|group| group.virtual_ipv4 == address) {
+            return false;
         }
         self.allocated_ips.remove(&address)
     }
@@ -401,6 +400,22 @@ mod tests {
         assert!(!service.release_path(first, [1; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
         assert!(service.release_path(second, [2; 16]));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+    }
+
+
+    #[test]
+    fn legacy_address_release_cannot_bypass_active_path_leases() {
+        let (mut service, _) = service(b"device-secret");
+        let context = TurnPathContext {
+            group_id: [0x73; 16],
+            path_id: 0,
+            path_count: 2,
+        };
+        let address = service.reserve_path(context, [0x31; 16]).unwrap();
+        assert!(!service.release_virtual_ipv4(address));
+        assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert!(service.release_path(context, [0x31; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
     }
 
