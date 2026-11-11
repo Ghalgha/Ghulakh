@@ -188,3 +188,8 @@ Android CI workflow дополнен отдельным `testDebugUnitTest` пе
 ## TURN peer-operation stale-nonce regression coverage
 
 Added mock-relay tests for CreatePermission and ChannelBind receiving a MESSAGE-INTEGRITY-verified 438 Stale Nonce. Each test verifies that the supervisor obtains the new nonce, retries with the refreshed integrity key, and installs local permission/channel state only after the authenticated success response. The reference implementations inspected for this review do not provide equivalent authenticated per-operation stale-nonce coverage; the existing serialized supervisor and bounded challenge retry policy remain the selected implementation. CI validation is pending.
+
+
+## TURN stale-nonce retry-budget regression coverage
+
+Added a mock-relay test proving that a verified 438 response on CreatePermission is not retried when the supervisor retry budget is zero. The test also verifies that no refreshed credentials are requested and no local permission state is installed after the rejected operation. CI validation is pending.
