@@ -222,6 +222,44 @@ impl Drop for TurnClientRuntime {
 }
 
 
+/// Bounded retry policy for recreating one failed TURN allocation.
+#[derive(Clone, Debug)]
+pub struct TurnPathRecoveryPolicy {
+    consecutive_failures: u32,
+    maximum_delay: std::time::Duration,
+}
+
+impl Default for TurnPathRecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            consecutive_failures: 0,
+            maximum_delay: std::time::Duration::from_secs(30),
+        }
+    }
+}
+
+impl TurnPathRecoveryPolicy {
+    pub fn new(maximum_delay: std::time::Duration) -> Result<Self> {
+        anyhow::ensure!(!maximum_delay.is_zero(), "TURN path recovery delay cap must be non-zero");
+        Ok(Self { consecutive_failures: 0, maximum_delay })
+    }
+
+    /// Return capped exponential backoff: 1, 2, 4, 8, 16, then at most 30 seconds.
+    pub fn record_failure(&mut self) -> std::time::Duration {
+        let exponent = self.consecutive_failures.min(5);
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        std::time::Duration::from_secs(1u64 << exponent).min(self.maximum_delay)
+    }
+
+    pub fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+    }
+
+    pub fn consecutive_failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+}
+
 /// One logical VPN tunnel backed by several independent authenticated TURN paths.
 /// Flow affinity keeps each IP flow on one path while preserving aggregate
 /// throughput across concurrent flows and avoiding packet reordering.
@@ -448,6 +486,17 @@ mod path_group_tests {
         packet[20..22].copy_from_slice(&source_port.to_be_bytes());
         packet[22..24].copy_from_slice(&443u16.to_be_bytes());
         packet
+    }
+
+    #[test]
+    fn recovery_backoff_is_bounded_and_resets_after_success() {
+        let mut policy = TurnPathRecoveryPolicy::default();
+        let delays: Vec<_> = (0..8).map(|_| policy.record_failure().as_secs()).collect();
+        assert_eq!(delays, vec![1, 2, 4, 8, 16, 30, 30, 30]);
+        assert_eq!(policy.consecutive_failures(), 8);
+        policy.record_success();
+        assert_eq!(policy.consecutive_failures(), 0);
+        assert_eq!(policy.record_failure().as_secs(), 1);
     }
 
     #[test]
