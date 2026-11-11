@@ -100,7 +100,7 @@ impl TurnDataPlane {
                         }
                         Ok(crate::turn_data::TurnDataPayload::KeepaliveAck(nonce)) => {
                             if nonce < next_keepalive_nonce
-                                && last_acked_nonce.map_or(true, |last| nonce > last)
+                                && last_acked_nonce.is_none_or(|last| nonce > last)
                             {
                                 last_acked_nonce = Some(nonce);
                                 last_keepalive_ack = Instant::now();
