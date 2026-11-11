@@ -934,8 +934,11 @@ mod stale_nonce_retry_budget_tests {
         let mut supervisor = TurnSessionSupervisor::new(
             crate::turn_driver::TurnClientDriver::new(socket),
             Provider { calls: 0 },
-        ).with_max_challenge_retries(0);
+        );
         supervisor.allocate().await.unwrap();
+        // Keep the initial 401 Allocate challenge enabled; disable retries only
+        // for the CreatePermission operation under test.
+        supervisor.max_challenge_retries = 0;
         let error = supervisor.create_permission(&[peer]).await.unwrap_err();
         assert!(matches!(
             error.downcast_ref::<TurnDriverError>(),
