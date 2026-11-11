@@ -195,7 +195,7 @@ impl TurnHandshakeService {
                     Ok(result) => result,
                     Err(error) => {
                         if let Some(context) = reserved_path {
-                            self.rollback_path(context);
+                            self.rollback_path(context, envelope.handshake_id);
                         }
                         if let Some(address) = reserved_legacy_ip {
                             self.allocated_ips.remove(&address);
@@ -225,7 +225,7 @@ impl TurnHandshakeService {
                     now,
                 ) {
                     if let Some(context) = reserved_path {
-                        self.rollback_path(context);
+                        self.rollback_path(context, envelope.handshake_id);
                     }
                     if let Some(address) = reserved_legacy_ip {
                         self.allocated_ips.remove(&address);
