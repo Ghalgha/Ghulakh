@@ -940,10 +940,12 @@ mod stale_nonce_retry_budget_tests {
         // for the CreatePermission operation under test.
         supervisor.max_challenge_retries = 0;
         let error = supervisor.create_permission(&[peer]).await.unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<TurnDriverError>(),
-            Some(TurnDriverError::ServerError { code: 438 })
-        ));
+        assert!(error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<TurnDriverError>(),
+                Some(TurnDriverError::ServerError { code: 438 })
+            )
+        }), "expected the original authenticated 438 error in the error chain: {error:#}");
         assert_eq!(supervisor.provider.calls, 1, "only initial 401 may request credentials");
         let registry = supervisor.driver.peer_registry().unwrap();
         assert_eq!(registry.permission_count(), 0);
