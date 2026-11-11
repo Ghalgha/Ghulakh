@@ -6,6 +6,7 @@ import javax.net.ssl.HttpsURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class VkCallsSession(
     val turnCredentialsJson: String,
@@ -13,12 +14,20 @@ data class VkCallsSession(
     private val sessionKey: String,
     private val conversationId: String,
 ) {
+    private val finished = AtomicBoolean(false)
+
     fun finish() {
-        VkCallsCredentialProvider.finishConversation(
-            apiUrl,
-            sessionKey,
-            conversationId,
-        )
+        finishOnce {
+            VkCallsCredentialProvider.finishConversation(
+                apiUrl,
+                sessionKey,
+                conversationId,
+            )
+        }
+    }
+
+    internal fun finishOnce(action: () -> Unit) {
+        if (finished.compareAndSet(false, true)) action()
     }
 }
 
