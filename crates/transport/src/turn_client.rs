@@ -279,6 +279,8 @@ pub struct TurnClientPathGroup {
     downlink_senders: StdMutex<mpsc::Sender<DataDatagram>>,
     forwarders: StdMutex<Vec<JoinHandle<()>>>,
     uplink_queue_drops: AtomicU64,
+    closed: AtomicBool,
+    closed_signal: watch::Sender<bool>,
 }
 
 impl TurnClientPathGroup {
@@ -315,6 +317,7 @@ impl TurnClientPathGroup {
             .map(|_| Arc::new(AtomicBool::new(true)))
             .collect();
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY * 2);
+        let (closed_signal, _) = watch::channel(false);
         let mut forwarders = Vec::with_capacity(paths.len());
 
         for (path, path_health) in paths.iter().cloned().zip(healthy.iter().cloned()) {
@@ -339,6 +342,8 @@ impl TurnClientPathGroup {
             downlink_senders: StdMutex::new(downlink_tx_for_group),
             forwarders: StdMutex::new(forwarders),
             uplink_queue_drops: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+            closed_signal,
         })
     }
 
@@ -374,6 +379,7 @@ impl TurnClientPathGroup {
         context.validate().context("validate replacement TURN path context")?;
         let mut paths = self.paths.write()
             .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
+        anyhow::ensure!(!self.closed.load(Ordering::Acquire), "TURN path group is closed");
         let first = paths.first().context("TURN path group is empty")?
             .path_context().context("existing TURN path has no path context")?;
         anyhow::ensure!(
@@ -423,6 +429,8 @@ impl TurnClientPathGroup {
     }
 
     pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
+        anyhow::ensure!(!self.closed.load(Ordering::Acquire), "TURN path group is closed");
+        let mut closed = self.closed_signal.subscribe();
         let health: Vec<bool> = self.healthy.iter()
             .map(|path| path.load(Ordering::Acquire))
             .collect();
@@ -440,11 +448,18 @@ impl TurnClientPathGroup {
             if !self.healthy[index].load(Ordering::Acquire) {
                 continue;
             }
-            match enqueue_uplink_packet(
-                &paths[index].uplink,
-                packet.clone(),
-                &self.uplink_queue_drops,
-            ) {
+            let enqueue = tokio::select! {
+                biased;
+                _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+                result = async {
+                    enqueue_uplink_packet(
+                        &paths[index].uplink,
+                        packet.clone(),
+                        &self.uplink_queue_drops,
+                    )
+                } => result,
+            };
+            match enqueue {
                 Ok(()) => return Ok(()),
                 // Do not move a congested flow to another path: packets already
                 // queued there would be overtaken. Drop newest and keep reading TUN.
@@ -461,11 +476,22 @@ impl TurnClientPathGroup {
     }
 
     pub async fn receive_packet(&self) -> Result<DataDatagram> {
-        self.downlink.lock().await.recv().await
-            .context("all TURN path downlink queues are closed")
+        let mut closed = self.closed_signal.subscribe();
+        if self.closed.load(Ordering::Acquire) || *closed.borrow() {
+            anyhow::bail!("TURN path group is closed");
+        }
+        let mut downlink = self.downlink.lock().await;
+        tokio::select! {
+            biased;
+            _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+            packet = downlink.recv() => packet.context("all TURN path downlink queues are closed"),
+        }
     }
 
     pub fn close(&self) {
+        if !self.closed.swap(true, Ordering::AcqRel) {
+            self.closed_signal.send_replace(true);
+        }
         if let Ok(tasks) = self.forwarders.lock() {
             for task in tasks.iter() { task.abort(); }
         }
@@ -477,6 +503,8 @@ impl TurnClientPathGroup {
 
 impl Drop for TurnClientPathGroup {
     fn drop(&mut self) {
+        self.closed.store(true, Ordering::Release);
+        self.closed_signal.send_replace(true);
         if let Ok(tasks) = self.forwarders.get_mut() {
             for task in tasks.iter() { task.abort(); }
         }
@@ -608,6 +636,43 @@ mod path_group_tests {
         let fallback = select_path_index(&packet(12000), &degraded).unwrap();
         assert_ne!(fallback, first);
         assert_eq!(select_path_index(&packet(12000), &[false; 4]), None);
+    }
+
+    #[tokio::test]
+    async fn closing_group_wakes_blocked_downlink_receive() {
+        let group_id = [0x31; 16];
+        let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, _downlink_b) = mock_path(1, group_id);
+        let group = Arc::new(TurnClientPathGroup::new(vec![path_a, path_b]).unwrap());
+        let receiver = {
+            let group = Arc::clone(&group);
+            tokio::spawn(async move { group.receive_packet().await })
+        };
+        tokio::task::yield_now().await;
+        group.close();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), receiver)
+            .await
+            .expect("close must wake a blocked receive")
+            .expect("receive task must not panic");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_group_rejects_late_path_replacement() {
+        let group_id = [0x32; 16];
+        let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        group.close();
+        let (replacement, _replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
+        assert!(group.replace_path(replacement).is_err());
+        drop(downlink_a);
     }
 
     #[tokio::test]
