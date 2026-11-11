@@ -290,6 +290,43 @@ fn connect_turn_impl(
     Ok(handle)
 }
 
+
+fn failed_turn_paths_impl(handle: jlong) -> Result<Vec<jint>> {
+    Ok(turn_session(handle)?.client.failed_path_ids().into_iter().map(jint::from).collect())
+}
+
+fn recover_turn_path_impl(
+    env: &mut JNIEnv, vpn_service: JObject, handle: jlong,
+    gateway_host: JString, gateway_port: jint, turn_credentials_json: JString,
+    pinned_server_key: JByteArray, credential: JString, path_id: jint,
+) -> Result<()> {
+    let host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
+    let credentials_json = env.get_string(&turn_credentials_json)?.to_string_lossy().into_owned();
+    let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
+    let pinned_key = env.convert_byte_array(pinned_server_key)?;
+    anyhow::ensure!(pinned_key.len() == 32, "pinned Noise server key must be 32 bytes");
+    anyhow::ensure!(!credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
+        "tunnel credential length is invalid");
+    let port = u16::try_from(gateway_port).context("TURN gateway port is invalid")?;
+    anyhow::ensure!(port != 0 && !host.trim().is_empty(), "TURN gateway endpoint is invalid");
+    let path_id = u16::try_from(path_id).context("TURN path identifier is invalid")?;
+    let session = turn_session(handle)?;
+    let context = session.client.path_context(path_id).context("unknown TURN path slot")?;
+    anyhow::ensure!(session.client.failed_path_ids().contains(&path_id), "TURN path is still healthy");
+    let socket = make_protected_socket(env, &vpn_service)?
+        .context("Android protected TURN UDP socket is required")?;
+    let credentials = TurnCredentials::from_vk_response_json(&credentials_json)
+        .context("parse refreshed VK Calls TURN credentials")?;
+    let gateway: SocketAddr = session.runtime.block_on(async {
+        let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
+        addresses.find(SocketAddr::is_ipv4).context("TURN gateway host did not resolve to IPv4")
+    })?;
+    let replacement = session.runtime.block_on(TurnClientRuntime::connect_with_path_context(
+        socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
+    )).context("establish replacement TURN allocation")?;
+    session.client.replace_path(replacement).context("install replacement TURN path")
+}
+
 fn send_turn_packet_impl(env: &mut JNIEnv, handle: jlong, packet: JByteArray) -> Result<()> {
     let packet = env.convert_byte_array(packet)?;
     let first_byte = *packet.first().context("IP packet is empty")?;
@@ -408,6 +445,38 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
             throw_error(&mut env, "java/lang/IllegalStateException", error);
             0
         }
+    }
+}
+
+
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnFailedPaths(
+    mut env: JNIEnv, _this: JObject, handle: jlong,
+) -> jni::sys::jintArray {
+    match failed_turn_paths_impl(handle) {
+        Ok(paths) => match env.new_int_array(paths.len() as jint) {
+            Ok(array) => {
+                if let Err(error) = env.set_int_array_region(&array, 0, &paths) {
+                    throw_error(&mut env, "java/lang/IllegalStateException", error);
+                    return std::ptr::null_mut();
+                }
+                array.into_raw()
+            }
+            Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); std::ptr::null_mut() }
+        },
+        Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); std::ptr::null_mut() }
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnRecoverPath(
+    mut env: JNIEnv, _this: JObject, service: JObject, handle: jlong,
+    host: JString, port: jint, credentials: JString, pinned_key: JByteArray,
+    credential: JString, path_id: jint,
+) -> jboolean {
+    match recover_turn_path_impl(&mut env, service, handle, host, port, credentials, pinned_key, credential, path_id) {
+        Ok(()) => 1,
+        Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); 0 }
     }
 }
 
