@@ -263,46 +263,40 @@ object VkCallsCredentialProvider {
         )
         val sessionKey = login.getString("session_key")
         require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
-        try {
-            val parameters = postFormWithRetry(
-                apiUrl,
-                mapOf(
-                    "conversationId" to conversationId,
-                    "method" to "vchat.getConversationParams",
-                    "format" to "JSON",
-                    "application_key" to OK_APPLICATION_KEY,
-                    "session_key" to sessionKey,
-                ),
-            )
-            checkApiError(parameters)
-            val turnServer = parameters.optJSONObject("turn_server")
-                ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
-                ?: throw IllegalStateException("Calls backend response has no turn_server object")
-            require(turnServer.optString("username").isNotBlank()) {
-                "VK Calls returned an empty TURN username"
-            }
-            require(turnServer.optString("credential").isNotBlank()) {
-                "VK Calls returned an empty TURN credential"
-            }
-            val urls = turnServer.optJSONArray("urls")
-                ?: throw IllegalStateException("VK Calls returned no TURN URLs")
-            require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
-            val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
-            // This is an auxiliary account session, not the call owner.
-            // The source broker leaves these sessions alone; only the owner
-            // session performs hangupConversation for the shared conversation.
-            return VkCallsSession(
-                turnCredentialsJson = credentialsJson,
-                apiUrl = apiUrl,
-                sessionKey = sessionKey,
-                conversationId = conversationId,
-                finishAction = {},
-            )
-        } catch (error: Throwable) {
-            // Do not hang up the shared conversation when an auxiliary
-            // credential lookup fails. Its lifecycle belongs to ownerSession.
-            throw error
+        val parameters = postFormWithRetry(
+            apiUrl,
+            mapOf(
+                "conversationId" to conversationId,
+                "method" to "vchat.getConversationParams",
+                "format" to "JSON",
+                "application_key" to OK_APPLICATION_KEY,
+                "session_key" to sessionKey,
+            ),
+        )
+        checkApiError(parameters)
+        val turnServer = parameters.optJSONObject("turn_server")
+            ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
+            ?: throw IllegalStateException("Calls backend response has no turn_server object")
+        require(turnServer.optString("username").isNotBlank()) {
+            "VK Calls returned an empty TURN username"
         }
+        require(turnServer.optString("credential").isNotBlank()) {
+            "VK Calls returned an empty TURN credential"
+        }
+        val urls = turnServer.optJSONArray("urls")
+            ?: throw IllegalStateException("VK Calls returned no TURN URLs")
+        require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
+        val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+        // This is an auxiliary account session, not the call owner.
+        // The source broker leaves these sessions alone; only the owner
+        // session performs hangupConversation for the shared conversation.
+        return VkCallsSession(
+            turnCredentialsJson = credentialsJson,
+            apiUrl = apiUrl,
+            sessionKey = sessionKey,
+            conversationId = conversationId,
+            finishAction = {},
+        )
     }
 
     internal fun finishConversation(
