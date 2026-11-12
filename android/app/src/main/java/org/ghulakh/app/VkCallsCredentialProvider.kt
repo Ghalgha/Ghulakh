@@ -38,7 +38,10 @@ internal data class VkCallsCredentialGroup(
     val ownerSession: VkCallsSession,
     internal val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
 ) {
-    fun finish() = ownerSession.finish()
+    fun finish() {
+        credentialBroker.finish()
+        ownerSession.finish()
+    }
 }
 
 /**
@@ -165,19 +168,41 @@ object VkCallsCredentialProvider {
         private val accessToken: String,
         private val conversationId: String,
         initialCredentialsJson: String,
-        private val credentialFetcher: (() -> String)? = null,
     ) {
+        private val lock = Any()
         private val issuedFingerprints = mutableSetOf(
             TurnQuotaRetryPolicy.fingerprint(initialCredentialsJson),
         )
+        private val sessions = mutableListOf<VkCallsSession>()
+        private var finished = false
 
         fun obtainCredentials(): String {
-            val credentialsJson = credentialFetcher?.invoke()
-                ?: VkCallsCredentialProvider.obtainConversationCredentials(accessToken, conversationId)
-            val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
-            val unique = synchronized(issuedFingerprints) { issuedFingerprints.add(fingerprint) }
-            require(unique) { "VK Calls returned a repeated TURN credential set" }
-            return credentialsJson
+            val session = VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
+            try {
+                val fingerprint = TurnQuotaRetryPolicy.fingerprint(session.turnCredentialsJson)
+                synchronized(lock) {
+                    check(!finished) { "VK Calls credential broker is already finished" }
+                    require(issuedFingerprints.add(fingerprint)) {
+                        "VK Calls returned a repeated TURN credential set"
+                    }
+                    sessions.add(session)
+                }
+                return session.turnCredentialsJson
+            } catch (error: Throwable) {
+                runCatching { session.finish() }
+                throw error
+            }
+        }
+
+        fun finish() {
+            val pending = synchronized(lock) {
+                if (finished) return
+                finished = true
+                sessions.toList().also { sessions.clear() }
+            }
+            pending.forEach { session ->
+                runCatching { session.finish() }
+            }
         }
     }
 
@@ -202,7 +227,7 @@ object VkCallsCredentialProvider {
         }
     }
 
-    private fun obtainConversationCredentials(accessToken: String, conversationId: String): String {
+    private fun obtainConversationSession(accessToken: String, conversationId: String): VkCallsSession {
         val deviceId = UUID.randomUUID().toString()
         val tokenResponse = postFormWithRetry(
             "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
@@ -234,7 +259,8 @@ object VkCallsCredentialProvider {
         )
         val sessionKey = login.getString("session_key")
         require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
-        val parameters = postFormWithRetry(
+        try {
+            val parameters = postFormWithRetry(
             apiUrl,
             mapOf(
                 "conversationId" to conversationId,
@@ -253,7 +279,17 @@ object VkCallsCredentialProvider {
         val urls = turnServer.optJSONArray("urls")
             ?: throw IllegalStateException("VK Calls returned no TURN URLs")
         require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
-        return JSONObject().put("turn_server", turnServer).toString()
+            val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+            return VkCallsSession(
+                turnCredentialsJson = credentialsJson,
+                apiUrl = apiUrl,
+                sessionKey = sessionKey,
+                conversationId = conversationId,
+            )
+        } catch (error: Throwable) {
+            runCatching { finishConversation(apiUrl, sessionKey, conversationId) }
+            throw error
+        }
     }
 
     internal fun finishConversation(
