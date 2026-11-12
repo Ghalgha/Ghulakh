@@ -133,7 +133,7 @@ impl DownlinkScheduler {
             id
         };
         self.refill(selected, now);
-        if let Some(tokens) = self.tokens.get_mut(&selected) { *tokens = (*tokens - len as f64).max(DOWNLINK_MAX_DEFICIT); }
+        if let Some(tokens) = self.tokens.get_mut(&selected) { *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT); }
         selected
     }
 }
