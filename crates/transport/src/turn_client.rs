@@ -1292,7 +1292,8 @@ mod path_group_tests {
             std::time::Duration::from_secs(1),
             replacement_uplink.recv(),
         ).await.unwrap().unwrap();
-        assert_eq!(received.packet, packet);
+        assert_eq!(received.sequence, Some(0));
+        assert_eq!(received.datagram.packet, packet);
     }
 
 
