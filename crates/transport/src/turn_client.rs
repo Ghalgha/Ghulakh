@@ -1107,7 +1107,7 @@ mod path_group_tests {
     #[tokio::test]
     async fn concurrent_path_replacement_and_close_complete_without_deadlock() {
         for attempt in 0..16u8 {
-            let group_id = [attempt; 16];
+            let group_id = [attempt.saturating_add(1); 16];
             let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
             let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
             let group = Arc::new(TurnClientPathGroup::new(vec![path_a, path_b]).unwrap());
