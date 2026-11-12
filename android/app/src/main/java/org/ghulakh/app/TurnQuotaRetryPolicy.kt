@@ -8,25 +8,22 @@ import java.security.MessageDigest
  */
 internal object TurnQuotaRetryPolicy {
     const val MAX_CONNECT_ATTEMPTS = 3
-    const val MAX_REJECTED_FINGERPRINTS_PER_PATH = 16
+    const val MAX_REJECTED_FINGERPRINTS_PER_GROUP = 64
 
     fun rememberRejectedFingerprint(
-        rejectedByPath: MutableMap<Int, LinkedHashSet<String>>,
-        pathId: Int,
+        rejected: LinkedHashSet<String>,
         fingerprint: String,
     ) {
-        val fingerprints = rejectedByPath.getOrPut(pathId) { linkedSetOf() }
-        fingerprints.add(fingerprint)
-        while (fingerprints.size > MAX_REJECTED_FINGERPRINTS_PER_PATH) {
-            fingerprints.remove(fingerprints.first())
+        rejected.add(fingerprint)
+        while (rejected.size > MAX_REJECTED_FINGERPRINTS_PER_GROUP) {
+            rejected.remove(rejected.first())
         }
     }
 
-    fun wasRejectedForPath(
-        rejectedByPath: Map<Int, Set<String>>,
-        pathId: Int,
+    fun wasRejected(
+        rejected: Set<String>,
         fingerprint: String,
-    ): Boolean = rejectedByPath[pathId]?.contains(fingerprint) == true
+    ): Boolean = fingerprint in rejected
 
     fun fingerprint(credentialsJson: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
