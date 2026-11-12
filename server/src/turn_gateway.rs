@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    net::{Ipv4Addr, SocketAddr},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -106,7 +106,7 @@ struct DownlinkScheduler {
     tokens: HashMap<[u8; 8], f64>,
     last_update: HashMap<[u8; 8], Instant>,
     rates: HashMap<[u8; 8], DownlinkRateController>,
-    flows: HashMap<(Ipv4Addr, ghulakh_protocol::ip_flow::IpFlowKey), DownlinkFlowState>,
+    flows: HashMap<(IpAddr, ghulakh_protocol::ip_flow::IpFlowKey), DownlinkFlowState>,
     cursor: usize,
     evict_counter: u32,
 }
@@ -186,7 +186,7 @@ impl DownlinkScheduler {
         &mut self,
         active: &[[u8; 8]],
         sendable: &[bool],
-        client_ipv4: Ipv4Addr,
+        client_ip: impl Into<IpAddr>,
         packet: &[u8],
         now: Instant,
     ) -> Option<[u8; 8]> {
@@ -213,7 +213,7 @@ impl DownlinkScheduler {
             }
             return Some(id);
         };
-        let key = (client_ipv4, flow);
+        let key = (client_ip.into(), flow);
         let small_udp = flow.protocol() == 17 && packet.len() <= SMALL_UDP_MAX_LEN;
         let selected = if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
@@ -298,8 +298,15 @@ struct SessionCrypto {
     sealer: FrameSealer,
 }
 
+fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
+    let octets = address.octets();
+    let host = (u16::from(octets[2]) << 8) | u16::from(octets[3]);
+    Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
+}
+
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
+    client_ipv6: Ipv6Addr,
     relay_peer: SocketAddr,
     path_context: Option<TurnPathContext>,
     lease_generation: Option<[u8; 16]>,
@@ -353,7 +360,7 @@ pub struct TurnGatewayStats {
 pub struct TurnGateway {
     socket: Arc<UdpSocket>,
     sessions: RwLock<HashMap<[u8; 8], Arc<GatewaySession>>>,
-    clients: RwLock<HashMap<Ipv4Addr, ClientRoute>>,
+    clients: RwLock<HashMap<IpAddr, ClientRoute>>,
     tun_ingress: mpsc::Sender<DataDatagram>,
     handshake: AsyncMutex<Option<super::turn_handshake_service::TurnHandshakeService>>,
     counters: Counters,
@@ -421,6 +428,7 @@ impl TurnGateway {
         // after commit it receives the exact cached response.
         if let Some(established) = established {
             let client_ipv4 = established.config.virtual_ipv4;
+            let client_ipv6 = established.config.virtual_ipv6;
             let handshake_id = established.handshake_id;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
@@ -445,6 +453,7 @@ impl TurnGateway {
             if let Err(error) = self.register_session_with_path_generation(
                 session_id,
                 client_ipv4,
+                client_ipv6,
                 established.relay_peer,
                 opener,
                 sealer,
@@ -483,7 +492,7 @@ impl TurnGateway {
         sealer: FrameSealer,
     ) -> Result<()> {
         self.register_session_with_path(
-            session_id, client_ipv4, relay_peer, opener, sealer, None,
+            session_id, client_ipv4, ipv6_for_virtual_ipv4(client_ipv4), relay_peer, opener, sealer, None,
         ).await
     }
 
@@ -497,7 +506,7 @@ impl TurnGateway {
         path_context: Option<TurnPathContext>,
     ) -> Result<()> {
         self.register_session_with_path_generation(
-            session_id, client_ipv4, relay_peer, opener, sealer, path_context.map(|context| (context, None)),
+            session_id, client_ipv4, ipv6_for_virtual_ipv4(client_ipv4), relay_peer, opener, sealer, path_context.map(|context| (context, None)),
         ).await
     }
 
@@ -505,6 +514,7 @@ impl TurnGateway {
         &self,
         session_id: [u8; 8],
         client_ipv4: Ipv4Addr,
+        client_ipv6: Ipv6Addr,
         relay_peer: SocketAddr,
         opener: FrameOpener,
         sealer: FrameSealer,
@@ -514,6 +524,7 @@ impl TurnGateway {
         let lease_generation = path_lease.and_then(|(_, generation)| generation);
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
         ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
+        ensure!(!client_ipv6.is_unspecified() && !client_ipv6.is_multicast(), "client IPv6 address is invalid");
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
         ensure!(opener.session_id() == session_id, "opener session identifier mismatch");
         ensure!(sealer.session_id() == session_id, "sealer session identifier mismatch");
@@ -526,27 +537,35 @@ impl TurnGateway {
         ensure!(!sessions.contains_key(&session_id), "TURN session already exists");
         let group_id = path_context.map(|context| context.group_id);
         let mut replaced_sessions = Vec::new();
-        if let Some(route) = clients.get_mut(&client_ipv4) {
-            ensure!(group_id.is_some() && route.group_id == group_id,
+        let ipv4_key = IpAddr::V4(client_ipv4);
+        let ipv6_key = IpAddr::V6(client_ipv6);
+        if clients.contains_key(&ipv4_key) {
+            ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == group_id,
                 "client IPv4 address is already owned by another tunnel group");
-            ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
-            let context = path_context.context("multipath route requires path context")?;
-            let replaced: Vec<[u8; 8]> = route.sessions.iter().copied().filter(|id| {
-                sessions.get(id).and_then(|entry| entry.path_context)
-                    .is_some_and(|existing| existing.path_id == context.path_id)
-            }).collect();
-            for old_id in replaced {
-                sessions.remove(&old_id);
-                route.sessions.retain(|id| *id != old_id);
-                replaced_sessions.push(old_id);
-            }
-            route.sessions.push(session_id);
+            ensure!(clients.get(&ipv6_key).is_some_and(|route| route.group_id == group_id),
+                "client IPv6 address is already owned by another tunnel group");
+            let updated_route = {
+                let route = clients.get_mut(&ipv4_key).expect("checked IPv4 route");
+                ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
+                let context = path_context.context("multipath route requires path context")?;
+                let replaced: Vec<[u8; 8]> = route.sessions.iter().copied().filter(|id| {
+                    sessions.get(id).and_then(|entry| entry.path_context)
+                        .is_some_and(|existing| existing.path_id == context.path_id)
+                }).collect();
+                for old_id in replaced {
+                    sessions.remove(&old_id);
+                    route.sessions.retain(|id| *id != old_id);
+                    replaced_sessions.push(old_id);
+                }
+                route.sessions.push(session_id);
+                route.clone()
+            };
+            clients.insert(ipv6_key, updated_route);
         } else {
-            clients.insert(client_ipv4, ClientRoute {
-                group_id,
-                sessions: vec![session_id],
-                next_downlink_sequence: Arc::new(AtomicU64::new(0)),
-            });
+            ensure!(!clients.contains_key(&ipv6_key), "client IPv6 address is already assigned");
+            let route = ClientRoute { group_id, sessions: vec![session_id], next_downlink_sequence: Arc::new(AtomicU64::new(0)) };
+            clients.insert(ipv4_key, route.clone());
+            clients.insert(ipv6_key, route);
         }
         let (downlink_sender, mut downlink_receiver) =
             mpsc::channel::<Vec<u8>>(DOWNLINK_QUEUE_CAPACITY);
@@ -569,6 +588,7 @@ impl TurnGateway {
         });
         let session = Arc::new(GatewaySession {
             client_ipv4,
+            client_ipv6,
             relay_peer,
             path_context,
             lease_generation,
@@ -597,13 +617,15 @@ impl TurnGateway {
             let mut clients = self.clients.write().await;
             if let Some(session) = sessions.remove(&session_id) {
                 let mut group_empty = false;
-                if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                let ipv4_key = IpAddr::V4(session.client_ipv4);
+                let ipv6_key = IpAddr::V6(session.client_ipv6);
+                let updated = if let Some(route) = clients.get_mut(&ipv4_key) {
                     route.sessions.retain(|id| *id != session_id);
                     group_empty = route.sessions.is_empty();
-                }
-                if group_empty {
-                    clients.remove(&session.client_ipv4);
-                }
+                    (!group_empty).then(|| route.clone())
+                } else { None };
+                if let Some(route) = updated { clients.insert(ipv6_key, route); }
+                if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
                 Some((session.client_ipv4, session.path_context, session.lease_generation, group_empty))
             } else {
                 None
@@ -636,13 +658,15 @@ impl TurnGateway {
             for session_id in expired_ids {
                 if let Some(session) = sessions.remove(&session_id) {
                     let mut group_empty = false;
-                    if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                    let ipv4_key = IpAddr::V4(session.client_ipv4);
+                    let ipv6_key = IpAddr::V6(session.client_ipv6);
+                    let updated = if let Some(route) = clients.get_mut(&ipv4_key) {
                         route.sessions.retain(|id| *id != session_id);
                         group_empty = route.sessions.is_empty();
-                    }
-                    if group_empty {
-                        clients.remove(&session.client_ipv4);
-                    }
+                        (!group_empty).then(|| route.clone())
+                    } else { None };
+                    if let Some(route) = updated { clients.insert(ipv6_key, route); }
+                    if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
                     leases.push((session_id, session.client_ipv4, session.path_context, session.lease_generation, group_empty));
                 }
             }
@@ -795,20 +819,19 @@ impl TurnGateway {
             return;
         }
         let packet = match DataDatagram::decode(&plaintext) {
-            Ok(packet) if packet.kind == IpPacketKind::Ipv4 => packet,
-            _ => {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+            Ok(packet) => packet,
+            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
         };
         if let Ok(mut last_activity) = session.last_activity.lock() {
             *last_activity = Instant::now();
         }
         session.downlink_failed.store(false, Ordering::Release);
-        if packet.packet.len() < 20
-            || Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])
-                != session.client_ipv4
-        {
+        let source_ip = match packet.kind {
+            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])),
+            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet.packet[8..24]).expect("validated IPv6 source length"))),
+            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
+        };
+        if source_ip != IpAddr::V4(session.client_ipv4) && source_ip != IpAddr::V6(session.client_ipv6) {
             self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -825,11 +848,12 @@ impl TurnGateway {
     /// Route a packet read from server TUN to the registered client whose
     /// virtual IPv4 address is the packet destination.
     pub async fn send_downlink(&self, packet: &DataDatagram) -> Result<()> {
-        ensure!(packet.kind == IpPacketKind::Ipv4, "TURN gateway currently supports IPv4 only");
-        ensure!(packet.packet.len() >= 20, "IPv4 packet is truncated");
-        let destination = Ipv4Addr::new(
-            packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19],
-        );
+        let destination = match packet.kind {
+            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19])),
+            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet.packet[24..40]).expect("validated IPv6 destination length"))),
+            IpPacketKind::Ipv4 => anyhow::bail!("IPv4 packet is truncated"),
+            IpPacketKind::Ipv6 => anyhow::bail!("IPv6 packet is truncated"),
+        };
         let route = self.clients.read().await.get(&destination).cloned()
             .context("no active TURN session group for packet destination")?;
         let now = Instant::now();
@@ -1137,7 +1161,7 @@ mod tests {
             Some(context_b),
         ).await.unwrap();
 
-        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
         assert_eq!(route.group_id, Some(group_id));
         assert_eq!(route.sessions.len(), 2);
 
@@ -1146,7 +1170,7 @@ mod tests {
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
-        assert!(!gateway.clients.read().await.contains_key(&CLIENT_IP));
+        assert!(!gateway.clients.read().await.contains_key(&IpAddr::V4(CLIENT_IP)));
     }
 
     #[tokio::test]
