@@ -36,7 +36,7 @@ pub type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
 fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
     let octets = address.octets();
     let host = (u16::from(octets[2]) << 8) | u16::from(octets[3]);
-    Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
+    Ipv6Addr::new(0xfd77, 0, 0, 0, 0, 0, 0, host)
 }
 
 struct PendingHandshake {
@@ -579,6 +579,7 @@ mod tests {
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
         assert!(service.release_path(second, [2; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 0);
     }
 
 
@@ -612,6 +613,7 @@ mod tests {
         assert!(!service.release_path(context, replacement_generation));
         assert!(service.release_path(context, original_generation));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 0);
     }
 
     #[test]
@@ -733,7 +735,7 @@ mod tests {
         let client_config = TurnSessionConfig::decode(&client_config_payload).unwrap();
         assert_eq!(client_config, established.config);
         assert_eq!(client_config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
-        assert_eq!(client_config.virtual_ipv6, Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, 2));
+        assert_eq!(client_config.virtual_ipv6, Ipv6Addr::new(0xfd77, 0, 0, 0, 0, 0, 0, 2));
         assert_eq!(client_keys.session_id(), established.frame_keys.session_id());
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
