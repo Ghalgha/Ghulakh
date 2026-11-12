@@ -63,7 +63,7 @@ class TurnQuotaRetryPolicyTest {
         val rejected = mutableSetOf<String>()
         assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(0, group, rejected))
         assertFalse(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$first]", rejected))
-        assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third]", rejected).not())
+        assertFalse(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$second]", rejected))
     }
 
     @Test
