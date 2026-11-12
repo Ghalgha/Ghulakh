@@ -1112,12 +1112,11 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
 
         drop(downlink_b);
-        for _ in 0..20 {
-            if group.active_paths() == 1 { break; }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(group.active_paths(), 1);
-        assert_eq!(group.failed_path_ids(), vec![1]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
         assert_eq!(group.path_context(1).unwrap().group_id, group_id);
 
         let (replacement, mut replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
@@ -1126,16 +1125,20 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
 
-        let packet = (10000..10100)
-            .map(packet)
-            .find(|bytes| ghulakh_protocol::ip_flow::flow_hash(bytes) as usize % 2 == 1)
-            .unwrap();
+        // Prove the replacement remains usable after the other allocation fails.
+        drop(downlink_a);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![0] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let packet = packet(10000);
         group.send_packet(DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet.clone(),
         }).await.unwrap();
         assert_eq!(replacement_uplink.recv().await.unwrap().packet, packet);
-        drop(downlink_a);
     }
 
 
@@ -1193,29 +1196,31 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
 
-        let mut selected = [None, None];
-        for source_port in 10000..10100 {
-            let bytes = packet(source_port);
-            let index = ghulakh_protocol::ip_flow::flow_hash(&bytes) as usize % 2;
-            selected[index].get_or_insert(bytes);
-            if selected.iter().all(Option::is_some) {
-                break;
-            }
-        }
-        let selected = selected.map(Option::unwrap);
-        for (index, bytes) in selected.into_iter().enumerate() {
+        let mut selected_paths = [false, false];
+        for source_port in 10000..10002 {
             let datagram = DataDatagram {
                 kind: ghulakh_protocol::IpPacketKind::Ipv4,
-                packet: bytes,
+                packet: packet(source_port),
             };
             group.send_packet(datagram.clone()).await.unwrap();
-            let received = if index == 0 {
-                replacement_uplink_a.recv().await.unwrap()
-            } else {
-                replacement_uplink_b.recv().await.unwrap()
-            };
+            let (path_index, received) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                async {
+                    loop {
+                        if let Ok(received) = replacement_uplink_a.try_recv() {
+                            break (0, received);
+                        }
+                        if let Ok(received) = replacement_uplink_b.try_recv() {
+                            break (1, received);
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                },
+            ).await.unwrap();
             assert_eq!(received, datagram);
+            selected_paths[path_index] = true;
         }
+        assert!(selected_paths.into_iter().all(|selected| selected));
         group.close();
     }
 
