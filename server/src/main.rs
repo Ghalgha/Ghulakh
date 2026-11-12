@@ -32,6 +32,11 @@ const TUN_MTU: u16 = 1100;
 const TUN_QUEUE_CAPACITY: usize = 512;
 const TUN_SERVER_IPV4: &str = "10.77.0.1";
 type SessionMap = Arc<RwLock<HashMap<Ipv4Addr, Connection>>>;
+type TunTaskHandles = (
+    mpsc::Sender<Vec<u8>>,
+    tokio::task::JoinHandle<Result<()>>,
+    tokio::task::JoinHandle<Result<()>>,
+);
 
 #[allow(dead_code)]
 #[derive(Default)]
@@ -74,11 +79,7 @@ fn start_tun(
     name: &str,
     sessions: SessionMap,
     turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,
-) -> Result<(
-    mpsc::Sender<Vec<u8>>,
-    tokio::task::JoinHandle<Result<()>>,
-    tokio::task::JoinHandle<Result<()>>,
-)> {
+) -> Result<TunTaskHandles> {
     let device = Arc::new(
         DeviceBuilder::new()
             .name(name)
