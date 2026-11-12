@@ -167,7 +167,7 @@ class GhulakhVpnService : VpnService() {
                 descriptor.close()
                 return
             }
-            updateNotification("VPN активен · IPv4/IPv6 через TURN-реле VK Calls")
+            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 пока без маршрутизации")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
