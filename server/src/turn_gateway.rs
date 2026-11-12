@@ -2019,7 +2019,7 @@ mod tests {
         scheduler.tokens.insert(active[1], 1.0);
         scheduler.tokens.insert(active[2], 1.0);
 
-        assert_eq!(scheduler.choose(&active, Instant::now(), 100), active[0]);
+        assert_eq!(scheduler.choose(&active, &[true, true, true], Instant::now(), 100), Some(active[0]));
     }
 
     #[test]
@@ -2230,7 +2230,7 @@ mod tests {
     fn downlink_scheduler_excludes_unavailable_and_backpressured_paths() {
         let mut scheduler = DownlinkScheduler::new();
         let active = [[1u8; 8], [2u8; 8]];
-        let packet = ipv4_packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 8), 17, 12000, 443);
+        let packet = scheduler_udp_flow(12000, 120);
         let now = Instant::now();
 
         assert_eq!(
@@ -2247,7 +2247,7 @@ mod tests {
     fn downlink_scheduler_moves_a_pinned_flow_off_a_backpressured_path() {
         let mut scheduler = DownlinkScheduler::new();
         let active = [[3u8; 8], [4u8; 8]];
-        let packet = ipv4_packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 9), 17, 12001, 443);
+        let packet = scheduler_udp_flow(12001, 120);
         let now = Instant::now();
         let first = scheduler.select_sendable(&active, &[true, true], CLIENT_IP, &packet, now).unwrap();
         let next = scheduler.select_sendable(
