@@ -502,7 +502,7 @@ impl TurnGateway {
         sealer: FrameSealer,
     ) -> Result<()> {
         self.register_session_with_path(
-            session_id, client_ipv4, ipv6_for_virtual_ipv4(client_ipv4), relay_peer, opener, sealer, None,
+            session_id, client_ipv4, relay_peer, opener, sealer, None,
         ).await
     }
 
@@ -550,7 +550,7 @@ impl TurnGateway {
         let ipv4_key = IpAddr::V4(client_ipv4);
         let ipv6_key = IpAddr::V6(client_ipv6);
         if clients.contains_key(&ipv4_key) {
-            ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == group_id,
+            ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == Some(group_id),
                 "client IPv4 address is already owned by another tunnel group");
             ensure!(clients.get(&ipv6_key).is_some_and(|route| route.group_id == group_id),
                 "client IPv6 address is already owned by another tunnel group");
@@ -1174,7 +1174,7 @@ mod tests {
 
         gateway.register_session_with_path(
             session_a,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_a.local_addr().unwrap(),
             FrameOpener::new([0x11; 32], [0x31; 4], session_a, FrameDirection::ClientToServer),
             FrameSealer::new([0x22; 32], [0x42; 4], session_a, FrameDirection::ServerToClient),
@@ -1182,7 +1182,7 @@ mod tests {
         ).await.unwrap();
         gateway.register_session_with_path(
             session_b,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_b.local_addr().unwrap(),
             FrameOpener::new([0x12; 32], [0x32; 4], session_b, FrameDirection::ClientToServer),
             FrameSealer::new([0x23; 32], [0x43; 4], session_b, FrameDirection::ServerToClient),
@@ -1194,7 +1194,7 @@ mod tests {
         assert_eq!(route.sessions.len(), 2);
 
         assert!(gateway.unregister_session(session_a).await);
-        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
@@ -1217,7 +1217,7 @@ mod tests {
             let context = TurnPathContext { group_id, path_id, path_count: 2 };
             gateway.register_session_with_path(
                 session_id,
-                CLIENT_IP,
+                IpAddr::V4(CLIENT_IP),
                 relay.local_addr().unwrap(),
                 FrameOpener::new(key, [0x61; 4], session_id, FrameDirection::ClientToServer),
                 FrameSealer::new(key, [0x71; 4], session_id, FrameDirection::ServerToClient),
@@ -1263,7 +1263,7 @@ mod tests {
         ] {
             gateway.register_session_with_path(
                 session_id,
-                CLIENT_IP,
+                IpAddr::V4(CLIENT_IP),
                 relay.local_addr().unwrap(),
                 FrameOpener::new(
                     client_key,
@@ -1764,7 +1764,7 @@ mod tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
         assert_eq!(
-            gateway.clients.read().await.get(&CLIENT_IP).unwrap().sessions.len(),
+            gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).unwrap().sessions.len(),
             2,
             "gateway must contain exactly the two newly authenticated paths",
         );
@@ -1903,7 +1903,7 @@ mod tests {
         let gateway_addr = gateway.local_addr().unwrap();
         gateway.register_session(
             SESSION,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -1985,7 +1985,7 @@ mod tests {
         let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -2035,7 +2035,7 @@ mod tests {
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -2153,7 +2153,7 @@ mod tests {
         scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
         let expired_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
         scheduler.select(&[surviving], CLIENT_IP, &scheduler_udp_flow(16_001, 1200), expired_at);
-        let key = (CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap());
+        let key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap());
         assert!(!scheduler.flows.contains_key(&key));
     }
 
@@ -2214,7 +2214,7 @@ mod tests {
         let overflow = scheduler_udp_flow(30_000, 1200);
         let selected = scheduler.select(
             &active,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             &overflow,
             start + Duration::from_micros(FLOW_TABLE_MAX as u64),
         );
@@ -2222,7 +2222,7 @@ mod tests {
         assert!(active.contains(&selected));
         assert_eq!(scheduler.flows.len(), 1);
         assert!(scheduler.flows.contains_key(&(
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             ghulakh_protocol::ip_flow::ip_flow_key(&overflow).unwrap(),
         )));
     }
@@ -2237,7 +2237,7 @@ mod tests {
             let flow = scheduler_udp_flow(port, 1200);
             scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
         }
-        let expired_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
+        let expired_key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
         let sweep_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
         for (key, state) in &mut scheduler.flows {
             state.last_seen = if *key == expired_key { start } else { sweep_at };
@@ -2334,7 +2334,7 @@ mod tests {
         let next = scheduler.select_sendable(
             &active,
             &[first != active[0], first != active[1]],
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             &packet,
             now + Duration::from_millis(1),
         ).unwrap();
@@ -2367,7 +2367,7 @@ mod tests {
 
         gateway.register_session(
             SESSION,
-            CLIENT_IP,
+            IpAddr::V4(CLIENT_IP),
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
