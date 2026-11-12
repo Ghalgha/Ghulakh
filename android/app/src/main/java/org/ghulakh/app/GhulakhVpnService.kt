@@ -80,6 +80,14 @@ class GhulakhVpnService : VpnService() {
             while (true) {
                 if (!isCurrent(generation)) return
                 val candidate = VkCallsCredentialProvider.obtainGroup(profile.vkAccessToken, DEFAULT_TURN_PATHS)
+                // Credential acquisition performs blocking HTTPS requests. The VPN may be
+                // stopped while they are in flight, so do not create a native TURN session
+                // for a lifecycle generation that no longer owns the service.
+                if (!isCurrent(generation)) {
+                    runCatching { candidate.finish() }
+                        .onFailure { error -> Log.w(TAG, "Failed to finish stale VK Calls credential group", error) }
+                    return
+                }
                 try {
                     val connectedHandle = transport.nativeTurnConnect(
                         this,
