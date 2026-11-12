@@ -73,6 +73,11 @@ impl DownlinkScheduler {
         Self { tokens: HashMap::new(), last_update: HashMap::new(), flows: HashMap::new(), cursor: 0, evict_counter: 0 }
     }
 
+    fn remove_session(&mut self, session_id: [u8; 8]) {
+        self.tokens.remove(&session_id);
+        self.last_update.remove(&session_id);
+    }
+
     fn refill(&mut self, id: [u8; 8], now: Instant) {
         let previous = self.last_update.insert(id, now).unwrap_or(now);
         let elapsed = now.saturating_duration_since(previous).as_secs_f64();
@@ -103,8 +108,6 @@ impl DownlinkScheduler {
 
     fn select(&mut self, active: &[[u8; 8]], client_ipv4: Ipv4Addr, packet: &[u8], now: Instant) -> [u8; 8] {
         debug_assert!(!active.is_empty());
-        self.tokens.retain(|id, _| active.contains(id));
-        self.last_update.retain(|id, _| active.contains(id));
         self.evict_counter = self.evict_counter.wrapping_add(1);
         if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX {
             self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
@@ -411,6 +414,7 @@ impl TurnGateway {
         let mut clients = self.clients.write().await;
         ensure!(!sessions.contains_key(&session_id), "TURN session already exists");
         let group_id = path_context.map(|context| context.group_id);
+        let mut replaced_sessions = Vec::new();
         if let Some(route) = clients.get_mut(&client_ipv4) {
             ensure!(group_id.is_some() && route.group_id == group_id,
                 "client IPv4 address is already owned by another tunnel group");
@@ -423,6 +427,7 @@ impl TurnGateway {
             for old_id in replaced {
                 sessions.remove(&old_id);
                 route.sessions.retain(|id| *id != old_id);
+                replaced_sessions.push(old_id);
             }
             route.sessions.push(session_id);
         } else {
@@ -440,6 +445,15 @@ impl TurnGateway {
             last_activity: Mutex::new(Instant::now()),
         });
         sessions.insert(session_id, session);
+        drop(clients);
+        drop(sessions);
+        if !replaced_sessions.is_empty() {
+            let mut scheduler = self.downlink_scheduler.lock()
+                .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?;
+            for old_id in replaced_sessions {
+                scheduler.remove_session(old_id);
+            }
+        }
         Ok(())
     }
 
@@ -462,6 +476,9 @@ impl TurnGateway {
             }
         };
         if let Some((address, path_context, generation, group_empty)) = removed {
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                scheduler.remove_session(session_id);
+            }
             self.release_session_lease(address, path_context, generation, group_empty).await;
             true
         } else {
@@ -492,13 +509,16 @@ impl TurnGateway {
                     if group_empty {
                         clients.remove(&session.client_ipv4);
                     }
-                    leases.push((session.client_ipv4, session.path_context, session.lease_generation, group_empty));
+                    leases.push((session_id, session.client_ipv4, session.path_context, session.lease_generation, group_empty));
                 }
             }
             leases
         };
         let mut released = Vec::new();
-        for (address, path_context, generation, group_empty) in expired {
+        for (session_id, address, path_context, generation, group_empty) in expired {
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                scheduler.remove_session(session_id);
+            }
             self.release_session_lease(address, path_context, generation, group_empty).await;
             if group_empty {
                 released.push(address);
@@ -1850,6 +1870,35 @@ mod tests {
         scheduler.tokens.insert(active[2], 1.0);
 
         assert_eq!(scheduler.choose(&active, Instant::now(), 100), active[0]);
+    }
+
+    #[test]
+    fn downlink_scheduler_keeps_token_state_isolated_between_client_groups() {
+        let mut scheduler = DownlinkScheduler::new();
+        let first_group = [[0xa1; 8], [0xa2; 8]];
+        let second_group = [[0xb1; 8], [0xb2; 8]];
+        let now = Instant::now();
+
+        scheduler.select(&first_group, CLIENT_IP, &scheduler_udp_flow(16_101, 1200), now);
+        let first_group_tokens = first_group.map(|id| scheduler.tokens[&id]);
+        scheduler.select(
+            &second_group,
+            Ipv4Addr::new(10, 77, 0, 3),
+            &scheduler_udp_flow(16_102, 1200),
+            now + Duration::from_millis(1),
+        );
+
+        for (id, expected) in first_group.into_iter().zip(first_group_tokens) {
+            assert_eq!(scheduler.tokens.get(&id), Some(&expected));
+            assert!(scheduler.last_update.contains_key(&id));
+        }
+        for id in second_group {
+            assert!(scheduler.tokens.contains_key(&id));
+        }
+
+        scheduler.remove_session(first_group[0]);
+        assert!(!scheduler.tokens.contains_key(&first_group[0]));
+        assert!(!scheduler.last_update.contains_key(&first_group[0]));
     }
 
     #[test]
