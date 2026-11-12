@@ -983,7 +983,8 @@ mod path_group_tests {
     fn bulk_packet(source_port: u16) -> Vec<u8> {
         let mut packet = vec![0u8; 1_300];
         packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(packet.len() as u16).to_be_bytes());
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
         packet[9] = 6;
         packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
         packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
@@ -1321,35 +1322,26 @@ mod path_group_tests {
         let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
         assert_eq!(group.active_paths(), 2);
 
-        // Uplink flow affinity must keep a flow on one path while distinct
-        // flows can be distributed across the independent path queues.
-        let mut selected_flows = [None, None];
+        // Distinct small UDP flows are spread over the independent path queues.
+        let mut selected_paths = [false; 2];
         for source_port in 10000..10100 {
-            let bytes = packet(source_port);
-            let path = select_path_index(&bytes, &[true, true]).unwrap();
-            if selected_flows[path].is_none() {
-                selected_flows[path] = Some((path, bytes));
+            let datagram = DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: packet(source_port),
+            };
+            group.send_packet(datagram.clone()).await.unwrap();
+            if let Ok(received) = uplink_a.try_recv() {
+                assert_eq!(received, datagram);
+                selected_paths[0] = true;
+            } else if let Ok(received) = uplink_b.try_recv() {
+                assert_eq!(received, datagram);
+                selected_paths[1] = true;
             }
-            if selected_flows.iter().all(Option::is_some) {
+            if selected_paths.iter().all(|selected| *selected) {
                 break;
             }
         }
-        let selected_flows = selected_flows.map(Option::unwrap);
-        for (expected_path, bytes) in selected_flows {
-            let datagram = DataDatagram {
-                kind: ghulakh_protocol::IpPacketKind::Ipv4,
-                packet: bytes.clone(),
-            };
-            group.send_packet(datagram.clone()).await.unwrap();
-            let received = if expected_path == 0 {
-                uplink_a.recv().await.unwrap()
-            } else {
-                uplink_b.recv().await.unwrap()
-            };
-            assert_eq!(received, datagram);
-            let other = if expected_path == 0 { &mut uplink_b } else { &mut uplink_a };
-            assert!(other.try_recv().is_err());
-        }
+        assert!(selected_paths.into_iter().all(|selected| selected));
 
         // The downlink fan-in accepts packets from either independent path.
         let down_a = DataDatagram {
@@ -1381,18 +1373,9 @@ mod path_group_tests {
             },
         ).await.unwrap();
 
-        let mut failed_path_flow = None;
-        for source_port in 20000..20100 {
-            let bytes = packet(source_port);
-            if select_path_index(&bytes, &[true, true]) == Some(0) {
-                failed_path_flow = Some(bytes);
-                break;
-            }
-        }
-        let bytes = failed_path_flow.expect("a flow assigned to path zero exists");
         let datagram = DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
-            packet: bytes,
+            packet: packet(20000),
         };
         group.send_packet(datagram.clone()).await.unwrap();
         assert_eq!(uplink_b.recv().await.unwrap(), datagram);
@@ -1408,43 +1391,31 @@ mod path_group_tests {
         let (path_b, mut uplink_b, _downlink_b) = mock_path(1, group_id);
         let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
 
-        let packet_bytes = packet(23456);
-        let selected = select_path_index(&packet_bytes, &[true, true]).unwrap();
         let datagram = DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
-            packet: packet_bytes,
+            packet: packet(23456),
         };
 
-        for _ in 0..APP_QUEUE_CAPACITY {
+        // The source scheduler changes paths at a flowlet boundary when the
+        // current allocation's bounded outbound queue is full.
+        for _ in 0..(APP_QUEUE_CAPACITY * 2) {
             group.send_packet(datagram.clone()).await.unwrap();
         }
         assert_eq!(group.uplink_queue_drops(), 0);
+        assert_eq!(uplink_a.len(), APP_QUEUE_CAPACITY);
+        assert_eq!(uplink_b.len(), APP_QUEUE_CAPACITY);
 
-        // A full flow-affine queue drops the newest packet; it must not move
-        // that flow to another path and overtake packets already queued there.
+        // Once every path queue is full, the newest packet is dropped.
         group.send_packet(datagram.clone()).await.unwrap();
         assert_eq!(group.uplink_queue_drops(), 1);
 
-        let (selected_rx, other_rx) = if selected == 0 {
-            (&mut uplink_a, &mut uplink_b)
-        } else {
-            (&mut uplink_b, &mut uplink_a)
-        };
         for _ in 0..APP_QUEUE_CAPACITY {
-            assert_eq!(selected_rx.recv().await.unwrap(), datagram);
+            assert_eq!(uplink_a.recv().await.unwrap(), datagram);
+            assert_eq!(uplink_b.recv().await.unwrap(), datagram);
         }
-        assert!(selected_rx.try_recv().is_err());
-        assert!(other_rx.try_recv().is_err());
+        assert!(uplink_a.try_recv().is_err());
+        assert!(uplink_b.try_recv().is_err());
         group.close();
     }
 
-    #[test]
-    fn different_flows_can_select_different_paths() {
-        let healthy = [true, true, true, true];
-        let selections: std::collections::HashSet<usize> =
-            (10000..10064)
-                .map(|port| select_path_index(&packet(port), &healthy).unwrap())
-                .collect();
-        assert!(selections.len() > 1);
-    }
 }
