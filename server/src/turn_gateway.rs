@@ -281,16 +281,26 @@ impl DownlinkScheduler {
 
 
 
-fn datagram_dispatch_shard(datagram: &[u8]) -> usize {
-    let Ok(session_id) = protected_frame_session_id(datagram) else {
-        // Handshake and malformed traffic share a bounded lane; established
-        // sessions never contend with one another unless their shard hashes collide.
-        return 0;
-    };
-    let hash = session_id.iter().fold(0x811c_9dc5u32, |state, byte| {
+fn dispatch_shard_for_key(key: &[u8]) -> usize {
+    let hash = key.iter().fold(0x811c_9dc5u32, |state, byte| {
         (state ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
     });
     hash as usize % DATAGRAM_DISPATCH_SHARDS
+}
+
+fn session_dispatch_shard(session_id: [u8; 8], group_id: Option<[u8; 16]>) -> usize {
+    match group_id {
+        Some(group_id) => dispatch_shard_for_key(&group_id),
+        None => dispatch_shard_for_key(&session_id),
+    }
+}
+
+fn datagram_dispatch_shard(datagram: &[u8]) -> usize {
+    let Ok(session_id) = protected_frame_session_id(datagram) else {
+        // Handshake and malformed traffic share a bounded lane.
+        return 0;
+    };
+    session_dispatch_shard(session_id, None)
 }
 
 struct SessionCrypto {
@@ -701,6 +711,15 @@ impl TurnGateway {
         }
     }
 
+    async fn session_dispatch_shard(&self, datagram: &[u8]) -> usize {
+        let Ok(session_id) = protected_frame_session_id(datagram) else {
+            return 0;
+        };
+        let session = self.sessions.read().await.get(&session_id).cloned();
+        let group_id = session.and_then(|session| session.path_context.map(|context| context.group_id));
+        session_dispatch_shard(session_id, group_id)
+    }
+
     /// Receive relay datagrams continuously. A fixed set of bounded shards
     /// preserves FIFO for each session while processing unrelated sessions in parallel.
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -726,7 +745,7 @@ impl TurnGateway {
                 received = self.socket.recv_from(&mut buffer) => {
                     let (length, source) = received.context("receive TURN relay datagram")?;
                     let datagram = buffer[..length].to_vec();
-                    let shard = datagram_dispatch_shard(&datagram);
+                    let shard = self.session_dispatch_shard(&datagram).await;
                     if senders[shard].try_send((datagram, source)).is_err() {
                         // Drop newest under pressure; never block socket intake or
                         // move a packet to another shard, which could reorder a session.
@@ -1108,6 +1127,15 @@ mod tests {
         DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
     }
 
+
+    #[test]
+    fn path_group_sessions_share_one_fifo_dispatch_shard() {
+        let group_id = [0x91; 16];
+        assert_eq!(
+            session_dispatch_shard([0x11; 8], Some(group_id)),
+            session_dispatch_shard([0x22; 8], Some(group_id)),
+        );
+    }
 
     #[test]
     fn datagram_dispatch_keeps_each_session_on_one_fifo_shard() {
