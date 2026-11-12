@@ -61,7 +61,7 @@ struct DownlinkFlowState {
 struct DownlinkScheduler {
     tokens: HashMap<[u8; 8], f64>,
     last_update: HashMap<[u8; 8], Instant>,
-    flows: HashMap<(Ipv4Addr, u64), DownlinkFlowState>,
+    flows: HashMap<(Ipv4Addr, ghulakh_protocol::ip_flow::Ipv4FlowKey), DownlinkFlowState>,
     cursor: usize,
     evict_counter: u32,
 }
@@ -74,7 +74,8 @@ impl DownlinkScheduler {
     fn is_small_udp(packet: &[u8]) -> bool {
         if packet.len() > SMALL_UDP_MAX_LEN || packet.len() < 20 || packet[0] >> 4 != 4 { return false; }
         let header_len = usize::from(packet[0] & 0x0f) * 4;
-        header_len >= 20 && packet.len() >= header_len && packet[9] == 17
+        let fragment = u16::from_be_bytes([packet[6], packet[7]]);
+        header_len >= 20 && packet.len() >= header_len && packet[9] == 17 && fragment & 0x3fff == 0
     }
 
     fn refill(&mut self, id: [u8; 8], now: Instant) {
@@ -111,9 +112,18 @@ impl DownlinkScheduler {
             self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
         }
 
-        // Flow hashes are scoped to the virtual client so identical five-tuples
-        // belonging to different tunnel groups never share scheduler state.
-        let key = (client_ipv4, ghulakh_protocol::ip_flow::flow_hash(packet));
+        // Scope collision-safe flow identities to the virtual client so
+        // identical tuples from separate tunnel groups cannot share state.
+        let Some(flow) = ghulakh_protocol::ip_flow::ipv4_flow_key(packet) else {
+            // Malformed/truncated IPv4 packets get no persistent affinity.
+            let id = self.choose(active, now, packet.len());
+            self.refill(id, now);
+            if let Some(tokens) = self.tokens.get_mut(&id) {
+                *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
+            }
+            return id;
+        };
+        let key = (client_ipv4, flow);
         if !self.flows.contains_key(&key) && self.flows.len() >= FLOW_TABLE_MAX {
             // Preserve active affinity state: evict only the least recently seen
             // flow instead of clearing the complete table under sustained load.
@@ -1854,9 +1864,9 @@ mod tests {
         scheduler.select(&active, CLIENT_IP, &new_flow, start + Duration::from_micros(FLOW_TABLE_MAX as u64));
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
-        assert!(!scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&scheduler_udp_flow(10_000, 1200)))));
-        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&scheduler_udp_flow(10_001, 1200)))));
-        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&new_flow))));
+        assert!(!scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap())));
+        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_001, 1200)).unwrap())));
+        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&new_flow).unwrap())));
     }
 
     #[test]
