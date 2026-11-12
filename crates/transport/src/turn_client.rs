@@ -1508,6 +1508,27 @@ mod path_group_tests {
     }
 
     #[test]
+    fn downlink_reorder_buffer_restores_order_across_bulk_burst_boundary() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        buffer.push(SequencedDataDatagram::new(13, DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12013),
+        }), now);
+        for sequence in 0..13u64 {
+            buffer.push(SequencedDataDatagram::new(sequence, DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: packet(12000 + sequence as u16),
+            }), now);
+        }
+        for sequence in 0..14u16 {
+            let received = buffer.pop_ready().expect("burst-boundary packet must be ready");
+            assert_eq!(received.packet[20..22], (12000 + sequence).to_be_bytes());
+        }
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
     fn downlink_reorder_buffer_skips_lost_sequence_and_drops_late_packet() {
         let now = Instant::now();
         let mut buffer = DownlinkReorderBuffer::default();

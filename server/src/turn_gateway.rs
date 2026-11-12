@@ -2450,6 +2450,22 @@ mod tests {
     }
 
     #[test]
+    fn downlink_scheduler_switches_bulk_flow_only_at_burst_boundary() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x31; 8], [0x32; 8]];
+        let start = Instant::now();
+        let packet = scheduler_udp_flow(12_001, 1_300);
+        let first_path = scheduler.select(&active, CLIENT_IP, &packet, start);
+        for index in 1..12 {
+            let now = start + Duration::from_micros(index * 520);
+            assert_eq!(scheduler.select(&active, CLIENT_IP, &packet, now), first_path);
+        }
+        let boundary = start + Duration::from_micros(12 * 520);
+        let next_path = scheduler.select(&active, CLIENT_IP, &packet, boundary);
+        assert_ne!(next_path, first_path);
+    }
+
+    #[test]
     fn downlink_scheduler_distributes_sustained_bulk_udp_across_paths() {
         let mut scheduler = DownlinkScheduler::new();
         let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
