@@ -192,7 +192,8 @@ impl TurnClientRuntime {
 
         let socket = TurnUdpSocket::from_protected_socket(protected_socket, relay_endpoint)
             .context("adopt protected VK Calls TURN socket")?;
-        let driver = TurnClientDriver::new(socket);
+        let driver = TurnClientDriver::new(socket)
+            .with_requested_relay_family(gateway_peer.is_ipv4());
         let provider = VkCallsTurnAuthProvider::from_credentials(credentials)
             .context("initialize VK Calls TURN authentication provider")?;
         let mut supervisor = TurnSessionSupervisor::new(driver, provider);
