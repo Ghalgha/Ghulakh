@@ -106,8 +106,11 @@ impl DownlinkScheduler {
         self.tokens.retain(|id, _| active.contains(id));
         self.last_update.retain(|id, _| active.contains(id));
         self.evict_counter = self.evict_counter.wrapping_add(1);
-        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) {
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX {
             self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
+            if self.flows.len() >= FLOW_TABLE_MAX {
+                self.flows.clear();
+            }
         }
 
         // Scope collision-safe flow identities to the virtual client so
@@ -122,20 +125,6 @@ impl DownlinkScheduler {
             return id;
         };
         let key = (client_ipv4, flow);
-        if !self.flows.contains_key(&key) && self.flows.len() >= FLOW_TABLE_MAX {
-            // Expired entries are reclaimed by the amortized periodic sweep
-            // above. Avoid scanning the entire table on every overflow packet.
-            // Preserve all active affinities; untracked overflow flows use a
-            // deterministic packet-flow hash until a sweep frees capacity.
-            let hash = ghulakh_protocol::ip_flow::flow_hash(packet);
-            let id = (hash % active.len() as u64) as usize;
-            let id = active[id];
-            self.refill(id, now);
-            if let Some(tokens) = self.tokens.get_mut(&id) {
-                *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
-            }
-            return id;
-        }
         let small_udp = packet.get(9) == Some(&17) && packet.len() <= SMALL_UDP_MAX_LEN;
         let selected = if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
@@ -1926,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn downlink_scheduler_preserves_active_affinity_at_capacity() {
+    fn downlink_scheduler_clears_full_flow_table_after_expiry_sweep() {
         let mut scheduler = DownlinkScheduler::new();
         let active = [[0x41; 8], [0x42; 8]];
         let start = Instant::now();
@@ -1937,18 +1926,20 @@ mod tests {
         }
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
 
-        let retained_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
-        let retained_path = scheduler.flows.get(&retained_key).unwrap().session_id;
         let overflow = scheduler_udp_flow(30_000, 1200);
-        let overflow_path = scheduler.select(&active, CLIENT_IP, &overflow, start + Duration::from_micros(FLOW_TABLE_MAX as u64));
-
-        assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
-        assert_eq!(scheduler.flows.get(&retained_key).unwrap().session_id, retained_path);
-        assert!(!scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&overflow).unwrap())));
-        assert_eq!(
-            overflow_path,
-            active[(ghulakh_protocol::ip_flow::flow_hash(&overflow) as usize) % active.len()],
+        let selected = scheduler.select(
+            &active,
+            CLIENT_IP,
+            &overflow,
+            start + Duration::from_micros(FLOW_TABLE_MAX as u64),
         );
+
+        assert!(active.contains(&selected));
+        assert_eq!(scheduler.flows.len(), 1);
+        assert!(scheduler.flows.contains_key(&(
+            CLIENT_IP,
+            ghulakh_protocol::ip_flow::ipv4_flow_key(&overflow).unwrap(),
+        )));
     }
 
     #[test]
