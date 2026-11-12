@@ -38,7 +38,7 @@ class GhulakhVpnService : VpnService() {
 
     private val recoveryLock = Any()
     private val recoveryTokens = mutableSetOf<AtomicBoolean>()
-    private val pathRecoveryThreads = mutableMapOf<Int, Thread>()
+    private val pathRecoveryThreads = mutableMapOf<Pair<AtomicBoolean, Int>, Thread>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (VpnService.prepare(this) != null) {
@@ -235,9 +235,10 @@ class GhulakhVpnService : VpnService() {
                 for (pathId in failedPaths) {
                     if (!running.get() || !recoveryToken.get()) break
                     val now = SystemClock.elapsedRealtime()
+                    val recoveryKey = recoveryToken to pathId
                     val recoveryThread = synchronized(recoveryLock) {
                         if (!running.get() || !recoveryToken.get() ||
-                            pathRecoveryThreads.containsKey(pathId) ||
+                            pathRecoveryThreads.containsKey(recoveryKey) ||
                             now < (nextAttemptAt[pathId] ?: 0L)
                         ) {
                             null
@@ -255,15 +256,15 @@ class GhulakhVpnService : VpnService() {
                                     recoveryToken,
                                 )
                             }, "ghulakh-turn-recovery-$pathId").also {
-                                pathRecoveryThreads[pathId] = it
+                                pathRecoveryThreads[recoveryKey] = it
                             }
                         }
                     }
                     if (recoveryThread != null) {
                         runCatching { recoveryThread.start() }.onFailure { error ->
                             synchronized(recoveryLock) {
-                                if (pathRecoveryThreads[pathId] === recoveryThread) {
-                                    pathRecoveryThreads.remove(pathId)
+                                if (pathRecoveryThreads[recoveryKey] === recoveryThread) {
+                                    pathRecoveryThreads.remove(recoveryKey)
                                 }
                             }
                             if (running.get() && recoveryToken.get()) {
@@ -328,7 +329,10 @@ class GhulakhVpnService : VpnService() {
             }
         } finally {
             synchronized(recoveryLock) {
-                if (pathRecoveryThreads[pathId] === Thread.currentThread()) pathRecoveryThreads.remove(pathId)
+                val recoveryKey = recoveryToken to pathId
+                if (pathRecoveryThreads[recoveryKey] === Thread.currentThread()) {
+                    pathRecoveryThreads.remove(recoveryKey)
+                }
             }
         }
     }
