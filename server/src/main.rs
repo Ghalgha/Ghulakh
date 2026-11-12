@@ -1,5 +1,3 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 pub mod turn_gateway;
 pub mod turn_handshake_service;
 
@@ -26,23 +24,28 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, RwLock};
 use tun_rs::DeviceBuilder;
 
+#[allow(dead_code)]
 const ALPN: &[u8] = b"ghulakh/1";
+#[allow(dead_code)]
 const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
 const TUN_MTU: u16 = 1100;
 const TUN_QUEUE_CAPACITY: usize = 512;
 const TUN_SERVER_IPV4: &str = "10.77.0.1";
 type SessionMap = Arc<RwLock<HashMap<Ipv4Addr, Connection>>>;
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct DatagramMetrics {
     accepted: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
 }
 
+#[allow(dead_code)]
 struct IpAllocator {
     next_host: std::sync::atomic::AtomicU32,
 }
 
+#[allow(dead_code)]
 impl IpAllocator {
     fn new() -> Self {
         Self {
@@ -135,6 +138,7 @@ fn start_tun(
     Ok(packet_sender)
 }
 
+#[allow(dead_code)]
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
     let mut cert_reader = BufReader::new(
         File::open(cert_path)
@@ -203,12 +207,14 @@ fn credential_matches(candidate: &str, expected_hashes: &[[u8; 32]]) -> bool {
     })
 }
 
+#[allow(dead_code)]
 fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
+#[allow(dead_code)]
 fn request_id(message: &ControlMessage) -> &str {
     match message {
         ControlMessage::ClientHello { request_id, .. }
@@ -222,6 +228,7 @@ fn request_id(message: &ControlMessage) -> &str {
 // Parameters are the per-session control state; grouping them would obscure ownership
 // across the spawned stream task.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_control_stream(
     connection: Connection,
     mut send: quinn::SendStream,
@@ -337,6 +344,7 @@ async fn handle_control_stream(
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum DatagramDisposition {
     Unauthenticated,
     Invalid,
@@ -346,6 +354,7 @@ enum DatagramDisposition {
     Accepted(Vec<u8>),
 }
 
+#[allow(dead_code)]
 fn destination_allowed(address: Ipv4Addr) -> bool {
     let octets = address.octets();
     let in_subnet = |a: u8, b: u8, c: u8, mask: u8| {
@@ -379,6 +388,7 @@ fn destination_allowed(address: Ipv4Addr) -> bool {
         && !in_subnet(203, 0, 113, 24)
 }
 
+#[allow(dead_code)]
 fn inspect_datagram(
     bytes: &[u8],
     authenticated: bool,
@@ -407,6 +417,7 @@ fn inspect_datagram(
 
 // The connection task owns these independent runtime resources for its full lifetime.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_connection(
     connection: Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
