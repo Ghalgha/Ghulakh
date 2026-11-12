@@ -1922,7 +1922,7 @@ mod tests {
         scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
         let expired_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
         scheduler.select(&[surviving], CLIENT_IP, &scheduler_udp_flow(16_001, 1200), expired_at);
-        let key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&flow).unwrap());
+        let key = (CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap());
         assert!(!scheduler.flows.contains_key(&key));
     }
 
@@ -1992,7 +1992,7 @@ mod tests {
         assert_eq!(scheduler.flows.len(), 1);
         assert!(scheduler.flows.contains_key(&(
             CLIENT_IP,
-            ghulakh_protocol::ip_flow::ipv4_flow_key(&overflow).unwrap(),
+            ghulakh_protocol::ip_flow::ip_flow_key(&overflow).unwrap(),
         )));
     }
 
@@ -2006,7 +2006,7 @@ mod tests {
             let flow = scheduler_udp_flow(port, 1200);
             scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
         }
-        let expired_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
+        let expired_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
         let sweep_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
         for (key, state) in &mut scheduler.flows {
             state.last_seen = if *key == expired_key { start } else { sweep_at };
@@ -2017,7 +2017,7 @@ mod tests {
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
         assert!(!scheduler.flows.contains_key(&expired_key));
-        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&new_flow).unwrap())));
+        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap())));
     }
 
     #[test]
