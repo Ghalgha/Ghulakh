@@ -78,8 +78,11 @@ impl DownlinkScheduler {
             }
         }
         let mut best = active[start];
-        for id in active.iter().copied().skip(1) {
-            if self.tokens.get(&id).copied().unwrap_or(0.0) > self.tokens.get(&best).copied().unwrap_or(0.0) { best = id; }
+        for offset in 1..active.len() {
+            let id = active[(start + offset) % active.len()];
+            if self.tokens.get(&id).copied().unwrap_or(0.0) > self.tokens.get(&best).copied().unwrap_or(0.0) {
+                best = id;
+            }
         }
         self.cursor = (active.iter().position(|id| *id == best).unwrap_or(start) + 1) % active.len();
         best
@@ -1797,6 +1800,35 @@ mod tests {
         bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
         bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
         bytes
+    }
+
+    #[test]
+    fn downlink_scheduler_fallback_considers_paths_before_cursor() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x11; 8], [0x22; 8], [0x33; 8]];
+        scheduler.cursor = 1;
+        scheduler.tokens.insert(active[0], 5.0);
+        scheduler.tokens.insert(active[1], 1.0);
+        scheduler.tokens.insert(active[2], 1.0);
+
+        assert_eq!(scheduler.choose(&active, Instant::now(), 100), active[0]);
+    }
+
+    #[test]
+    fn downlink_scheduler_reassigns_flow_after_path_loss_and_expires_idle_state() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x61; 8], [0x62; 8]];
+        let start = Instant::now();
+        let flow = scheduler_udp_flow(16_000, 1200);
+        let original = scheduler.select(&active, CLIENT_IP, &flow, start);
+        let surviving = if original == active[0] { active[1] } else { active[0] };
+        assert_eq!(scheduler.select(&[surviving], CLIENT_IP, &flow, start + Duration::from_millis(1)), surviving);
+
+        scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
+        let expired_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
+        scheduler.select(&[surviving], CLIENT_IP, &scheduler_udp_flow(16_001, 1200), expired_at);
+        let key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&flow).unwrap());
+        assert!(!scheduler.flows.contains_key(&key));
     }
 
     #[test]
