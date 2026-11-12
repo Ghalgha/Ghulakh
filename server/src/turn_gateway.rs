@@ -295,12 +295,14 @@ fn session_dispatch_shard(session_id: [u8; 8], group_id: Option<[u8; 16]>) -> us
     }
 }
 
-fn datagram_dispatch_shard(datagram: &[u8]) -> usize {
-    let Ok(session_id) = protected_frame_session_id(datagram) else {
-        // Handshake and malformed traffic share a bounded lane.
-        return 0;
-    };
-    session_dispatch_shard(session_id, None)
+struct SessionRegistration {
+    session_id: [u8; 8],
+    client_ipv4: Ipv4Addr,
+    client_ipv6: Ipv6Addr,
+    relay_peer: SocketAddr,
+    opener: FrameOpener,
+    sealer: FrameSealer,
+    path_lease: Option<(TurnPathContext, Option<[u8; 16]>)>,
 }
 
 struct SessionCrypto {
@@ -460,15 +462,15 @@ impl TurnGateway {
                 return Err(error).context("commit ServerAck replay protection before gateway registration");
             }
 
-            if let Err(error) = self.register_session_with_path_generation(
+            if let Err(error) = self.register_session_with_path_generation(SessionRegistration {
                 session_id,
                 client_ipv4,
                 client_ipv6,
-                established.relay_peer,
+                relay_peer: established.relay_peer,
                 opener,
                 sealer,
-                path_context.map(|context| (context, Some(handshake_id))),
-            ).await {
+                path_lease: path_context.map(|context| (context, Some(handshake_id))),
+            }).await {
                 let service = handshake.as_mut().context("TURN handshake service is not installed")?;
                 let cache_rollback = service.remove_cached_response(payload, relay_peer);
                 // Keep the staged keys and path lease for a retry of this exact
@@ -515,21 +517,30 @@ impl TurnGateway {
         sealer: FrameSealer,
         path_context: Option<TurnPathContext>,
     ) -> Result<()> {
-        self.register_session_with_path_generation(
-            session_id, client_ipv4, ipv6_for_virtual_ipv4(client_ipv4), relay_peer, opener, sealer, path_context.map(|context| (context, None)),
-        ).await
+        self.register_session_with_path_generation(SessionRegistration {
+            session_id,
+            client_ipv4,
+            client_ipv6: ipv6_for_virtual_ipv4(client_ipv4),
+            relay_peer,
+            opener,
+            sealer,
+            path_lease: path_context.map(|context| (context, None)),
+        }).await
     }
 
     async fn register_session_with_path_generation(
         &self,
-        session_id: [u8; 8],
-        client_ipv4: Ipv4Addr,
-        client_ipv6: Ipv6Addr,
-        relay_peer: SocketAddr,
-        opener: FrameOpener,
-        sealer: FrameSealer,
-        path_lease: Option<(TurnPathContext, Option<[u8; 16]>)>,
+        registration: SessionRegistration,
     ) -> Result<()> {
+        let SessionRegistration {
+            session_id,
+            client_ipv4,
+            client_ipv6,
+            relay_peer,
+            opener,
+            sealer,
+            path_lease,
+        } = registration;
         let path_context = path_lease.map(|(context, _)| context);
         let lease_generation = path_lease.and_then(|(_, generation)| generation);
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
