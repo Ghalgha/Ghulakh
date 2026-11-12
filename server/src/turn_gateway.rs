@@ -1879,6 +1879,11 @@ mod tests {
         let second_group = [[0xb1; 8], [0xb2; 8]];
         let now = Instant::now();
 
+        // Initialize accounting for every path in the group before comparing
+        // snapshots; select() only refills the path it actually chooses.
+        for id in first_group {
+            scheduler.refill(id, now);
+        }
         scheduler.select(&first_group, CLIENT_IP, &scheduler_udp_flow(16_101, 1200), now);
         let first_group_tokens = first_group.map(|id| scheduler.tokens[&id]);
         scheduler.select(
