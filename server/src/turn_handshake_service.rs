@@ -36,7 +36,7 @@ pub type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
 fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
     let octets = address.octets();
     let host = (u16::from(octets[2]) << 8) | u16::from(octets[3]);
-    Ipv6Addr::new(0xfd77, 0, 0, 0, 0, 0, 0, host)
+    Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
 }
 
 struct PendingHandshake {
