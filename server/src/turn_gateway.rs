@@ -1972,18 +1972,27 @@ mod tests {
         let mut scheduler = DownlinkScheduler::new();
         let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
         let start = Instant::now();
-        let flow = scheduler_udp_flow(12_001, 64);
+        // Model a sustained QUIC-like download: large UDP datagrams arrive
+        // continuously, while each flowlet remains on one allocation.
+        let flow = scheduler_udp_flow(12_001, 1300);
         let mut per_path = HashMap::<[u8; 8], usize>::new();
 
         for index in 0..4_000u64 {
-            let now = start + Duration::from_micros(index * 100);
+            let now = start + Duration::from_micros(index * 520);
             let path = scheduler.select(&active, CLIENT_IP, &flow, now);
             *per_path.entry(path).or_default() += 1;
         }
 
-        assert_eq!(per_path.len(), active.len(), "bulk flow should use every active path: {per_path:?}");
+        assert_eq!(
+            per_path.len(),
+            active.len(),
+            "bulk flow should use every active path: {per_path:?}",
+        );
         let busiest = per_path.values().copied().max().unwrap_or_default();
-        assert!(busiest < 800, "bulk flow remains pinned to too few paths: {per_path:?}");
+        assert!(
+            busiest < 800,
+            "bulk flow remains pinned to too few paths: {per_path:?}",
+        );
     }
 
 }
