@@ -205,7 +205,7 @@ object VkCallsCredentialProvider {
             .put("device_id", deviceId)
             .put("client_version", "1.0.1")
             .toString()
-        val login = postForm(
+        val login = postFormWithRetry(
             apiUrl,
             mapOf(
                 "session_data" to sessionData,
