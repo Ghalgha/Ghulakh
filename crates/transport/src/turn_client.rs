@@ -461,7 +461,7 @@ impl TurnClientPathGroup {
             .context("TURN path group contains a path without authenticated path context")?;
         let mut seen = std::collections::HashSet::new();
         for path in &paths {
-            anyhow::ensure!(path.config() == config, "TURN paths disagree on tunnel IPv4 or MTU");
+            anyhow::ensure!(path.config() == config, "TURN paths disagree on tunnel IPv4, IPv6, or MTU");
             let context = path.path_context()
                 .context("TURN path group contains a path without authenticated path context")?;
             context.validate().context("validate TURN path group member")?;
@@ -541,7 +541,7 @@ impl TurnClientPathGroup {
 
     /// Atomically replace one failed path after a fresh authenticated TURN handshake.
     pub fn replace_path(&self, replacement: TurnClientRuntime) -> Result<()> {
-        anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4 or MTU");
+        anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4, IPv6, or MTU");
         let context = replacement.path_context()
             .context("replacement TURN path has no authenticated path context")?;
         context.validate().context("validate replacement TURN path context")?;
