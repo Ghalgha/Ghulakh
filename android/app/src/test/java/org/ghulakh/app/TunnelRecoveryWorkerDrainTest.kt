@@ -40,8 +40,8 @@ class TunnelRecoveryWorkerDrainTest {
         val recoveryLock = Any()
         val recoveryToken = AtomicBoolean(true)
         val registered = mutableListOf<Thread>()
-        val supervisorMayRegister = CountDownLatch(1)
-        val supervisorReady = CountDownLatch(1)
+        val supervisorRegistered = CountDownLatch(1)
+        val allowSupervisorExit = CountDownLatch(1)
         val childStarted = CountDownLatch(1)
         val releaseChild = CountDownLatch(1)
         val brokerFinished = AtomicBoolean(false)
@@ -58,17 +58,17 @@ class TunnelRecoveryWorkerDrainTest {
             }
         }
         val supervisor = Thread {
-            supervisorReady.countDown()
-            supervisorMayRegister.await()
             synchronized(recoveryLock) {
                 if (recoveryToken.get()) {
                     registered += child
                     child.start()
                 }
             }
+            supervisorRegistered.countDown()
+            allowSupervisorExit.await()
         }
         supervisor.start()
-        assertTrue(supervisorReady.await(1, TimeUnit.SECONDS))
+        assertTrue(supervisorRegistered.await(1, TimeUnit.SECONDS))
 
         val cleanup = Thread {
             awaitWorkerTermination(supervisor) {
@@ -78,9 +78,10 @@ class TunnelRecoveryWorkerDrainTest {
         }
         cleanup.start()
 
-        // The stop races with the supervisor's last possible registration.
+        // Stop after registration but before the supervisor exits. Cleanup must
+        // join the supervisor, then discover and drain its registered worker.
         recoveryToken.set(false)
-        supervisorMayRegister.countDown()
+        allowSupervisorExit.countDown()
         assertTrue(childStarted.await(1, TimeUnit.SECONDS))
         child.interrupt()
         assertFalse(brokerFinished.get())
