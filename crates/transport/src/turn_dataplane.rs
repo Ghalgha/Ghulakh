@@ -71,7 +71,7 @@ impl TurnDataPlane {
         let mut last_keepalive_ack = Instant::now();
         enum Event {
             Inbound(Option<TurnInbound>),
-            Uplink(Option<DataDatagram>),
+            Uplink(Option<SequencedDataDatagram>),
             Keepalive,
             KeepaliveTimeout,
         }
