@@ -618,7 +618,7 @@ async fn main() -> Result<()> {
         let gateway_task = Arc::clone(&gateway);
         let turn_gateway_task = tokio::spawn(async move { gateway_task.run().await });
         eprintln!("TURN gateway listening on {}", gateway.local_addr()?);
-        Some((gateway, receiver, turn_gateway_task))
+        Some((gateway, Some(receiver), turn_gateway_task))
     } else {
         None
     };
@@ -642,6 +642,7 @@ async fn main() -> Result<()> {
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
         let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
         if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
+            let mut ingress = ingress.take().expect("TURN ingress receiver is available during startup");
             let tun_ingress_sender = sender.clone();
             let _turn_ingress_task = tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
