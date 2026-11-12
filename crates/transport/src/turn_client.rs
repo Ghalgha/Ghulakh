@@ -1433,6 +1433,7 @@ mod path_group_tests {
             TurnClientRuntime {
                 config: ghulakh_protocol::session_handshake::TurnSessionConfig {
                     virtual_ipv4: "10.77.0.2".parse().unwrap(),
+                    virtual_ipv6: "fd77::2".parse().unwrap(),
                     mtu: 1100,
                 },
                 path_context: Some(TurnPathContext {
