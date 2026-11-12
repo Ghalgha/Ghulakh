@@ -93,6 +93,7 @@ impl DownlinkReorderBuffer {
     fn advance_gap(&mut self, now: Instant) {
         if let Some((&next_sequence, _)) = self.pending.first_key_value() {
             self.expected_sequence = next_sequence;
+            self.gap_started = None;
             self.drain(now);
         } else {
             self.gap_started = None;
@@ -1476,10 +1477,19 @@ mod path_group_tests {
             packet: packet(port),
         };
         buffer.push(SequencedDataDatagram::new(1, make_datagram(12001)), now);
+        buffer.push(SequencedDataDatagram::new(3, make_datagram(12003)), now);
         assert!(buffer.pop_ready().is_none());
-        buffer.advance_gap(now + DOWNLINK_REORDER_GAP_TIMEOUT);
+        let first_gap_deadline = now + DOWNLINK_REORDER_GAP_TIMEOUT;
+        buffer.advance_gap(first_gap_deadline);
         assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
-        buffer.push(SequencedDataDatagram::new(0, packet(12000)), now + DOWNLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(
+            buffer.gap_deadline(),
+            Some(first_gap_deadline + DOWNLINK_REORDER_GAP_TIMEOUT),
+        );
+        buffer.advance_gap(first_gap_deadline + DOWNLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12003u16.to_be_bytes());
+        buffer.push(SequencedDataDatagram::new(0, make_datagram(12000)), first_gap_deadline);
+        buffer.push(SequencedDataDatagram::new(2, make_datagram(12002)), first_gap_deadline);
         assert!(buffer.pop_ready().is_none());
     }
 
