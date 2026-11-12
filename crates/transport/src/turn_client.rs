@@ -1454,13 +1454,13 @@ mod path_group_tests {
     fn downlink_reorder_buffer_restores_sequence_across_paths() {
         let now = Instant::now();
         let mut buffer = DownlinkReorderBuffer::default();
-        let packet = |port| DataDatagram {
+        let make_datagram = |port| DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet(port),
         };
-        buffer.push(SequencedDataDatagram::new(2, packet(12002)), now);
-        buffer.push(SequencedDataDatagram::new(0, packet(12000)), now);
-        buffer.push(SequencedDataDatagram::new(1, packet(12001)), now);
+        buffer.push(SequencedDataDatagram::new(2, make_datagram(12002)), now);
+        buffer.push(SequencedDataDatagram::new(0, make_datagram(12000)), now);
+        buffer.push(SequencedDataDatagram::new(1, make_datagram(12001)), now);
         assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12000u16.to_be_bytes());
         assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
         assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12002u16.to_be_bytes());
@@ -1471,11 +1471,11 @@ mod path_group_tests {
     fn downlink_reorder_buffer_skips_lost_sequence_and_drops_late_packet() {
         let now = Instant::now();
         let mut buffer = DownlinkReorderBuffer::default();
-        let packet = |port| DataDatagram {
+        let make_datagram = |port| DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet(port),
         };
-        buffer.push(SequencedDataDatagram::new(1, packet(12001)), now);
+        buffer.push(SequencedDataDatagram::new(1, make_datagram(12001)), now);
         assert!(buffer.pop_ready().is_none());
         buffer.advance_gap(now + DOWNLINK_REORDER_GAP_TIMEOUT);
         assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());

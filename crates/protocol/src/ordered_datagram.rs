@@ -69,7 +69,8 @@ mod tests {
     fn packet(length: usize) -> DataDatagram {
         let mut packet = vec![0u8; length.max(20)];
         packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(packet.len() as u16).to_be_bytes());
+        let packet_len = packet.len() as u16;
+        packet[2..4].copy_from_slice(&packet_len.to_be_bytes());
         DataDatagram { kind: IpPacketKind::Ipv4, packet }
     }
 
