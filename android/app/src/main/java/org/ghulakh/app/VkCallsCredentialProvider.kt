@@ -288,14 +288,19 @@ object VkCallsCredentialProvider {
                 ?: throw IllegalStateException("VK Calls returned no TURN URLs")
             require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
             val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+            // This is an auxiliary account session, not the call owner.
+            // The source broker leaves these sessions alone; only the owner
+            // session performs hangupConversation for the shared conversation.
             return VkCallsSession(
                 turnCredentialsJson = credentialsJson,
                 apiUrl = apiUrl,
                 sessionKey = sessionKey,
                 conversationId = conversationId,
+                finishAction = {},
             )
         } catch (error: Throwable) {
-            runCatching { finishConversation(apiUrl, sessionKey, conversationId) }
+            // Do not hang up the shared conversation when an auxiliary
+            // credential lookup fails. Its lifecycle belongs to ownerSession.
             throw error
         }
     }
