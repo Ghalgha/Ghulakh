@@ -17,7 +17,7 @@ use ghulakh_protocol::{
     turn_auth::parse_turn_challenge,
     turn_peer::TurnPeerRegistry,
     turn_request::{
-        allocate_request, channel_bind_request, create_permission_request,
+        allocate_request_for_family, channel_bind_request, create_permission_request,
         parse_success_response, refresh_request,
     },
     turn_transaction::{TransactionEvent, TransactionManager, TransactionPolicy},
@@ -58,6 +58,7 @@ pub struct TurnClientDriver {
     data_rx: Option<mpsc::Receiver<TurnInbound>>,
     handshake_rx: Option<mpsc::Receiver<TurnInbound>>,
     relay_endpoint: SocketAddr,
+    requested_relay_ipv4: bool,
     transactions: TransactionManager,
     allocations: AllocationManager,
     peers: Option<TurnPeerRegistry>,
@@ -74,6 +75,7 @@ impl TurnClientDriver {
             data_rx: Some(receivers.data),
             handshake_rx: Some(receivers.handshake),
             relay_endpoint,
+            requested_relay_ipv4: relay_endpoint.is_ipv4(),
             transactions: TransactionManager::new(),
             allocations: AllocationManager::new(),
             peers: None,
@@ -88,6 +90,13 @@ impl TurnClientDriver {
 
     pub fn relay_endpoint(&self) -> SocketAddr {
         self.relay_endpoint
+    }
+
+    /// Select the relayed-address family to match the VPN gateway peer.
+    /// TURN may use a different address family for its server-facing socket.
+    pub fn with_requested_relay_family(mut self, ipv4: bool) -> Self {
+        self.requested_relay_ipv4 = ipv4;
+        self
     }
 
     /// Transfer the bounded data-event receiver to the dataplane consumer.
@@ -139,7 +148,7 @@ impl TurnClientDriver {
             .map_err(|e| anyhow::anyhow!("generate TURN transaction ID: {e}"))?;
         self.allocations.begin_allocate(id)
             .map_err(|e| anyhow::anyhow!("begin allocation state: {e}"))?;
-        let request = allocate_request(id);
+        let request = allocate_request_for_family(id, self.requested_relay_ipv4);
         let response = match self.transact(request, auth).await {
             Ok(response) => response,
             Err(error) => {
@@ -154,6 +163,12 @@ impl TurnClientDriver {
                 return Err(error).context("parse TURN Allocate success");
             }
         };
+        if let ghulakh_protocol::turn_request::TurnSuccess::Allocate { relayed_address, .. } = &success {
+            if relayed_address.is_ipv4() != self.requested_relay_ipv4 {
+                let _ = self.allocations.abort_allocate(id);
+                anyhow::bail!("TURN Allocate returned a relayed address with the wrong IP family");
+            }
+        }
         let lease = match self.allocations.accept_allocate(id, success, Instant::now()) {
             Ok(lease) => lease.clone(),
             Err(error) => {
