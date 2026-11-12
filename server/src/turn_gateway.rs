@@ -28,8 +28,24 @@ use tokio::{
 
 const TUN_INGRESS_CAPACITY: usize = 512;
 const UDP_BUFFER_SIZE: usize = 65_507;
+// Sharding keeps packets from one session FIFO while allowing independent
+// sessions to be authenticated and decrypted concurrently.
+const DATAGRAM_DISPATCH_SHARDS: usize = 8;
+const DATAGRAM_DISPATCH_CAPACITY: usize = 256;
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+
+fn datagram_dispatch_shard(datagram: &[u8]) -> usize {
+    let Ok(session_id) = protected_frame_session_id(datagram) else {
+        // Handshake and malformed traffic share a bounded lane; established
+        // sessions never contend with one another unless their shard hashes collide.
+        return 0;
+    };
+    let hash = session_id.iter().fold(0x811c_9dc5u32, |state, byte| {
+        (state ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+    });
+    hash as usize % DATAGRAM_DISPATCH_SHARDS
+}
 
 struct SessionCrypto {
     opener: FrameOpener,
@@ -359,19 +375,47 @@ impl TurnGateway {
         }
     }
 
-    /// Receive relay datagrams continuously. Unknown sessions, wrong relay
-    /// tuples, invalid protected frames and spoofed inner IP sources are dropped.
+    /// Receive relay datagrams continuously. A fixed set of bounded shards
+    /// preserves FIFO for each session while processing unrelated sessions in parallel.
     pub async fn run(self: Arc<Self>) -> Result<()> {
+        let mut senders = Vec::with_capacity(DATAGRAM_DISPATCH_SHARDS);
+        let mut workers = tokio::task::JoinSet::new();
+        for _ in 0..DATAGRAM_DISPATCH_SHARDS {
+            let (sender, mut receiver) = mpsc::channel::<(Vec<u8>, SocketAddr)>(
+                DATAGRAM_DISPATCH_CAPACITY,
+            );
+            senders.push(sender);
+            let gateway = Arc::clone(&self);
+            workers.spawn(async move {
+                while let Some((datagram, source)) = receiver.recv().await {
+                    gateway.process_datagram(&datagram, source).await;
+                }
+            });
+        }
+
         let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
         let mut maintenance = tokio::time::interval(SESSION_MAINTENANCE_INTERVAL);
         loop {
             tokio::select! {
                 received = self.socket.recv_from(&mut buffer) => {
                     let (length, source) = received.context("receive TURN relay datagram")?;
-                    self.process_datagram(&buffer[..length], source).await;
+                    let datagram = buffer[..length].to_vec();
+                    let shard = datagram_dispatch_shard(&datagram);
+                    if senders[shard].try_send((datagram, source)).is_err() {
+                        // Drop newest under pressure; never block socket intake or
+                        // move a packet to another shard, which could reorder a session.
+                        self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
                 _ = maintenance.tick() => {
                     self.expire_idle_sessions(Instant::now(), SESSION_IDLE_TIMEOUT).await;
+                }
+                joined = workers.join_next() => {
+                    match joined {
+                        Some(Ok(())) => anyhow::bail!("TURN datagram dispatcher worker stopped"),
+                        Some(Err(error)) => return Err(error).context("TURN datagram dispatcher worker failed"),
+                        None => anyhow::bail!("TURN datagram dispatcher has no workers"),
+                    }
                 }
             }
         }
@@ -689,6 +733,26 @@ mod tests {
         DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
     }
 
+
+    #[test]
+    fn datagram_dispatch_keeps_each_session_on_one_fifo_shard() {
+        let session_a = [0x11; 8];
+        let session_b = [0x22; 8];
+        let frame_a = ghulakh_protocol::secure_frame::FrameSealer::new(
+            [0x31; 32], [0x41; 4], session_a,
+            ghulakh_protocol::secure_frame::FrameDirection::ClientToServer,
+        ).seal(b"packet").unwrap();
+        let frame_b = ghulakh_protocol::secure_frame::FrameSealer::new(
+            [0x32; 32], [0x42; 4], session_b,
+            ghulakh_protocol::secure_frame::FrameDirection::ClientToServer,
+        ).seal(b"packet").unwrap();
+        assert_eq!(datagram_dispatch_shard(&frame_a), datagram_dispatch_shard(&frame_a));
+        assert!(datagram_dispatch_shard(b"GHHS-invalid") < DATAGRAM_DISPATCH_SHARDS);
+        assert!(datagram_dispatch_shard(b"malformed") < DATAGRAM_DISPATCH_SHARDS);
+        // Distinct sessions may collide, but the dispatcher never changes a
+        // session's shard based on packet contents or arrival order.
+        let _ = datagram_dispatch_shard(&frame_b);
+    }
 
     #[tokio::test]
     async fn registers_multiple_authenticated_paths_for_one_virtual_client() {
