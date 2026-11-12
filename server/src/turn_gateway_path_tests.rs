@@ -156,3 +156,78 @@ async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions()
     assert!(gateway.sessions.read().await.is_empty());
     assert!(gateway.clients.read().await.is_empty());
 }
+
+#[test]
+fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() {
+    use std::sync::{mpsc::channel, Barrier, TryLockError};
+
+    let reorder = Arc::new(Mutex::new(UplinkReorderBuffer::default()));
+    let now = Instant::now();
+    let expired_packet = DataDatagram {
+        kind: IpPacketKind::Ipv4,
+        packet: vec![1],
+    };
+    let next_packet = DataDatagram {
+        kind: IpPacketKind::Ipv4,
+        packet: vec![2],
+    };
+    {
+        let mut buffer = reorder.lock().unwrap();
+        assert!(buffer.push(
+            SequencedDataDatagram::new(1, expired_packet.clone()),
+            now,
+        ).is_empty());
+    }
+
+    let (delivered_tx, delivered_rx) = channel();
+    let start_delivery = Arc::new(Barrier::new(2));
+
+    let expiry_reorder = Arc::clone(&reorder);
+    let expiry_sender = delivered_tx.clone();
+    let expiry_barrier = Arc::clone(&start_delivery);
+    let expiry = std::thread::spawn(move || {
+        assert!(update_and_deliver_uplink(
+            &expiry_reorder,
+            |buffer| buffer.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT),
+            |packet| {
+                assert!(matches!(
+                    expiry_reorder.try_lock(),
+                    Err(TryLockError::WouldBlock),
+                ), "reorder lock must remain held through TUN delivery");
+                // Start the competing packet handler while this expiry batch
+                // is ready but has not yet been delivered.
+                expiry_barrier.wait();
+                expiry_sender.send(packet).unwrap();
+            },
+        ));
+    });
+
+    let packet_reorder = Arc::clone(&reorder);
+    let packet_sender = delivered_tx;
+    let packet = next_packet.clone();
+    let packet_barrier = Arc::clone(&start_delivery);
+    let processing = std::thread::spawn(move || {
+        packet_barrier.wait();
+        assert!(update_and_deliver_uplink(
+            &packet_reorder,
+            |buffer| buffer.push(
+                SequencedDataDatagram::new(2, packet),
+                now + UPLINK_REORDER_GAP_TIMEOUT,
+            ),
+            |packet| {
+                assert!(matches!(
+                    packet_reorder.try_lock(),
+                    Err(TryLockError::WouldBlock),
+                ), "reorder lock must remain held through TUN delivery");
+                packet_sender.send(packet).unwrap();
+            },
+        ));
+    });
+
+    expiry.join().unwrap();
+    processing.join().unwrap();
+
+    assert_eq!(delivered_rx.recv().unwrap(), expired_packet);
+    assert_eq!(delivered_rx.recv().unwrap(), next_packet);
+    assert!(delivered_rx.try_recv().is_err());
+}
