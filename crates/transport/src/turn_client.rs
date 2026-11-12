@@ -1138,7 +1138,11 @@ mod path_group_tests {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet.clone(),
         }).await.unwrap();
-        assert_eq!(replacement_uplink.recv().await.unwrap().packet, packet);
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            replacement_uplink.recv(),
+        ).await.unwrap().unwrap();
+        assert_eq!(received.packet, packet);
     }
 
 
