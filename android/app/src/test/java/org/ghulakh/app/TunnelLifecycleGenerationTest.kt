@@ -3,6 +3,9 @@ package org.ghulakh.app
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 class TunnelLifecycleGenerationTest {
     @Test
@@ -31,6 +34,34 @@ class TunnelLifecycleGenerationTest {
         assertTrue(lifecycle.invalidate(secondRun))
         assertFalse(lifecycle.isCurrent(secondRun))
     }
+    @Test
+    fun concurrentStopAndSessionCompletionInvalidateOnlyTheirOwnGeneration() {
+        val lifecycle = TunnelLifecycleGeneration()
+        val oldGeneration = lifecycle.begin()
+        val ready = CountDownLatch(12)
+        val start = CountDownLatch(1)
+        val invalidations = AtomicInteger(0)
+        val workers = List(12) {
+            Thread {
+                ready.countDown()
+                start.await()
+                if (lifecycle.invalidate(oldGeneration)) invalidations.incrementAndGet()
+            }.apply { start() }
+        }
+
+        assertTrue(ready.await(1, TimeUnit.SECONDS))
+        start.countDown()
+        workers.forEach { it.join(1_000) }
+
+        assertTrue(workers.none { it.isAlive })
+        assertTrue(invalidations.get() == 1)
+        val newGeneration = lifecycle.begin()
+
+        // A late completion from the old run must not stop the restarted run.
+        assertFalse(lifecycle.invalidate(oldGeneration))
+        assertTrue(lifecycle.isCurrent(newGeneration))
+    }
+
     @Test
     fun blockingSetupCannotPublishAfterStopInvalidatesItsGeneration() {
         val lifecycle = TunnelLifecycleGeneration()
