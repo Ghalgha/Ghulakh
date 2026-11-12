@@ -645,6 +645,12 @@ async fn main() -> Result<()> {
             ip_forward.trim() == "1",
             "Linux IPv4 forwarding is disabled; set net.ipv4.ip_forward=1"
         );
+        let ipv6_forward = fs::read_to_string("/proc/sys/net/ipv6/conf/all/forwarding")
+            .context("read Linux IPv6 forwarding state")?;
+        anyhow::ensure!(
+            ipv6_forward.trim() == "1",
+            "Linux IPv6 forwarding is disabled; set net.ipv6.conf.all.forwarding=1"
+        );
     }
 
     let mut turn_ingress_task = None;
