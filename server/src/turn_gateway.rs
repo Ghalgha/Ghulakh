@@ -1174,7 +1174,7 @@ mod tests {
 
         gateway.register_session_with_path(
             session_a,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_a.local_addr().unwrap(),
             FrameOpener::new([0x11; 32], [0x31; 4], session_a, FrameDirection::ClientToServer),
             FrameSealer::new([0x22; 32], [0x42; 4], session_a, FrameDirection::ServerToClient),
@@ -1182,7 +1182,7 @@ mod tests {
         ).await.unwrap();
         gateway.register_session_with_path(
             session_b,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_b.local_addr().unwrap(),
             FrameOpener::new([0x12; 32], [0x32; 4], session_b, FrameDirection::ClientToServer),
             FrameSealer::new([0x23; 32], [0x43; 4], session_b, FrameDirection::ServerToClient),
@@ -1194,11 +1194,11 @@ mod tests {
         assert_eq!(route.sessions.len(), 2);
 
         assert!(gateway.unregister_session(session_a).await);
-        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
-        assert!(!gateway.clients.read().await.contains_key(&IpAddr::V4(CLIENT_IP)));
+        assert!(!gateway.clients.read().await.contains_key(&CLIENT_IP));
     }
 
     #[tokio::test]
@@ -1217,7 +1217,7 @@ mod tests {
             let context = TurnPathContext { group_id, path_id, path_count: 2 };
             gateway.register_session_with_path(
                 session_id,
-                IpAddr::V4(CLIENT_IP),
+                CLIENT_IP,
                 relay.local_addr().unwrap(),
                 FrameOpener::new(key, [0x61; 4], session_id, FrameDirection::ClientToServer),
                 FrameSealer::new(key, [0x71; 4], session_id, FrameDirection::ServerToClient),
@@ -1263,7 +1263,7 @@ mod tests {
         ] {
             gateway.register_session_with_path(
                 session_id,
-                IpAddr::V4(CLIENT_IP),
+                CLIENT_IP,
                 relay.local_addr().unwrap(),
                 FrameOpener::new(
                     client_key,
@@ -1903,7 +1903,7 @@ mod tests {
         let gateway_addr = gateway.local_addr().unwrap();
         gateway.register_session(
             SESSION,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -1985,7 +1985,7 @@ mod tests {
         let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -2035,7 +2035,7 @@ mod tests {
         let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
         gateway.register_session(
             SESSION,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
@@ -2367,7 +2367,7 @@ mod tests {
 
         gateway.register_session(
             SESSION,
-            IpAddr::V4(CLIENT_IP),
+            CLIENT_IP,
             relay_addr,
             FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
