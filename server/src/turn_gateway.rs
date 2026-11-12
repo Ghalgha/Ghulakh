@@ -63,7 +63,7 @@ struct DownlinkFlowState {
 struct DownlinkScheduler {
     tokens: HashMap<[u8; 8], f64>,
     last_update: HashMap<[u8; 8], Instant>,
-    flows: HashMap<(Ipv4Addr, ghulakh_protocol::ip_flow::Ipv4FlowKey), DownlinkFlowState>,
+    flows: HashMap<(Ipv4Addr, ghulakh_protocol::ip_flow::IpFlowKey), DownlinkFlowState>,
     cursor: usize,
     evict_counter: u32,
 }
@@ -118,7 +118,7 @@ impl DownlinkScheduler {
 
         // Scope collision-safe flow identities to the virtual client so
         // identical tuples from separate tunnel groups cannot share state.
-        let Some(flow) = ghulakh_protocol::ip_flow::ipv4_flow_key(packet) else {
+        let Some(flow) = ghulakh_protocol::ip_flow::ip_flow_key(packet) else {
             // Malformed/truncated IPv4 packets get no persistent affinity.
             let id = self.choose(active, now, packet.len());
             self.refill(id, now);
@@ -128,7 +128,7 @@ impl DownlinkScheduler {
             return id;
         };
         let key = (client_ipv4, flow);
-        let small_udp = packet.get(9) == Some(&17) && packet.len() <= SMALL_UDP_MAX_LEN;
+        let small_udp = flow.protocol() == 17 && packet.len() <= SMALL_UDP_MAX_LEN;
         let selected = if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
             if now.saturating_duration_since(state.window_start) >= PIN_WINDOW {

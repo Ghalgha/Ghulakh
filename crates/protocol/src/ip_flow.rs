@@ -55,6 +55,102 @@ pub fn ipv4_flow_key(packet: &[u8]) -> Option<Ipv4FlowKey> {
     })
 }
 
+
+/// Collision-safe identity for an IPv6 flow, including fragment identification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Ipv6FlowKey {
+    source: [u8; 16],
+    destination: [u8; 16],
+    protocol: u8,
+    discriminator: Ipv6FlowDiscriminator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+enum Ipv6FlowDiscriminator {
+    Ports { source: u16, destination: u16 },
+    Fragment(u32),
+    Other,
+}
+
+/// Address-family-neutral flow identity used by both TURN path schedulers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum IpFlowKey {
+    Ipv4(Ipv4FlowKey),
+    Ipv6(Ipv6FlowKey),
+}
+
+impl IpFlowKey {
+    pub fn protocol(self) -> u8 {
+        match self {
+            Self::Ipv4(key) => key.protocol,
+            Self::Ipv6(key) => key.protocol,
+        }
+    }
+}
+
+/// Parse an IPv6 packet, following supported extension headers to locate TCP/UDP.
+/// Fragmented packets use the fragment identification so every fragment stays together.
+pub fn ipv6_flow_key(packet: &[u8]) -> Option<Ipv6FlowKey> {
+    if packet.len() < 40 || packet[0] >> 4 != 6 {
+        return None;
+    }
+    let source = packet[8..24].try_into().ok()?;
+    let destination = packet[24..40].try_into().ok()?;
+    let mut protocol = packet[6];
+    let mut offset = 40usize;
+
+    loop {
+        match protocol {
+            0 | 43 | 60 | 135 | 139 | 140 => {
+                if packet.len() < offset + 2 { return None; }
+                let next = packet[offset];
+                let length = (usize::from(packet[offset + 1]) + 1).checked_mul(8)?;
+                if packet.len() < offset + length { return None; }
+                protocol = next;
+                offset += length;
+            }
+            51 => {
+                if packet.len() < offset + 2 { return None; }
+                let next = packet[offset];
+                let length = (usize::from(packet[offset + 1]) + 2).checked_mul(4)?;
+                if packet.len() < offset + length { return None; }
+                protocol = next;
+                offset += length;
+            }
+            44 => {
+                if packet.len() < offset + 8 { return None; }
+                let next = packet[offset];
+                let fragment_id = u32::from_be_bytes(packet[offset + 4..offset + 8].try_into().ok()?);
+                return Some(Ipv6FlowKey {
+                    source, destination, protocol: next,
+                    discriminator: Ipv6FlowDiscriminator::Fragment(fragment_id),
+                });
+            }
+            _ => break,
+        }
+    }
+
+    let discriminator = if protocol == 6 || protocol == 17 {
+        if packet.len() < offset + 4 { return None; }
+        Ipv6FlowDiscriminator::Ports {
+            source: u16::from_be_bytes([packet[offset], packet[offset + 1]]),
+            destination: u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]),
+        }
+    } else {
+        Ipv6FlowDiscriminator::Other
+    };
+    Some(Ipv6FlowKey { source, destination, protocol, discriminator })
+}
+
+/// Parse a flow key for either supported IP version.
+pub fn ip_flow_key(packet: &[u8]) -> Option<IpFlowKey> {
+    match packet.first()? >> 4 {
+        4 => ipv4_flow_key(packet).map(IpFlowKey::Ipv4),
+        6 => ipv6_flow_key(packet).map(IpFlowKey::Ipv6),
+        _ => None,
+    }
+}
+
 pub fn flow_hash(packet: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let mut feed = |bytes: &[u8]| {
@@ -156,4 +252,55 @@ mod tests {
         second[6..8].copy_from_slice(&0x2001u16.to_be_bytes());
         assert_eq!(flow_hash(&first), flow_hash(&second));
     }
+
+    fn ipv6(source_port: u16, destination_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 44];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&4u16.to_be_bytes());
+        packet[6] = 17;
+        packet[8..24].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[24..40].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn ipv6_flow_keys_distinguish_transport_ports() {
+        let first = ipv6(12345, 443);
+        let second = ipv6(12346, 443);
+        assert_ne!(ip_flow_key(&first), ip_flow_key(&second));
+        assert_eq!(ip_flow_key(&first), ip_flow_key(&first.clone()));
+    }
+
+    #[test]
+    fn ipv6_fragments_share_identification_based_flow_key() {
+        let mut first = vec![0u8; 56];
+        first[0] = 0x60;
+        first[4..6].copy_from_slice(&16u16.to_be_bytes());
+        first[6] = 44;
+        first[8..24].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        first[24..40].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        first[40] = 17;
+        first[44..48].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        let mut later = first.clone();
+        later[42..44].copy_from_slice(&8u16.to_be_bytes());
+        assert_eq!(ip_flow_key(&first), ip_flow_key(&later));
+        later[44..48].copy_from_slice(&0x1234_5679u32.to_be_bytes());
+        assert_ne!(ip_flow_key(&first), ip_flow_key(&later));
+    }
+
+    #[test]
+    fn ipv6_flow_key_follows_hop_by_hop_extension_header() {
+        let mut packet = vec![0u8; 52];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&12u16.to_be_bytes());
+        packet[6] = 0;
+        packet[40] = 17;
+        packet[41] = 0;
+        packet[48..50].copy_from_slice(&1000u16.to_be_bytes());
+        packet[50..52].copy_from_slice(&443u16.to_be_bytes());
+        assert!(matches!(ip_flow_key(&packet), Some(IpFlowKey::Ipv6(_))));
+    }
+
 }

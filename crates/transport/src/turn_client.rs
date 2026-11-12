@@ -740,7 +740,7 @@ struct UplinkScheduler {
     tokens: Vec<f64>,
     rates: Vec<UplinkRateController>,
     cursor: usize,
-    flows: HashMap<ghulakh_protocol::ip_flow::Ipv4FlowKey, UplinkFlowState>,
+    flows: HashMap<ghulakh_protocol::ip_flow::IpFlowKey, UplinkFlowState>,
     flow_evict_counter: u32,
 }
 
@@ -827,14 +827,14 @@ impl UplinkScheduler {
         }
         self.update_tokens(count, now);
         let packet_len = packet.len();
-        let Some(key) = ghulakh_protocol::ip_flow::ipv4_flow_key(packet) else {
+        let Some(key) = ghulakh_protocol::ip_flow::ip_flow_key(packet) else {
             let index = self.choose_path(healthy, sendable)?;
             self.charge(index, packet_len);
             return Some(index);
         };
 
         self.evict_flows(now);
-        let small_udp = packet.get(9) == Some(&17) && packet_len <= UPLINK_SMALL_UDP_MAX_LEN;
+        let small_udp = key.protocol() == 17 && packet_len <= UPLINK_SMALL_UDP_MAX_LEN;
         if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
             let sticky = state.keeps_pin(now, packet_len, small_udp);
