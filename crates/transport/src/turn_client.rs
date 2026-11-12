@@ -838,11 +838,18 @@ mod path_group_tests {
     async fn replacement_that_fails_immediately_is_marked_unhealthy() {
         let group_id = [0x7e; 16];
         let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
-        let (path_b, _uplink_b, _downlink_b) = mock_path(1, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
         let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
 
-        // The original slot starts healthy. Only the replacement watcher can
-        // make it unhealthy after this immediate receive failure.
+        // First establish that the slot is failed; then make the replacement
+        // fail immediately so its watcher must publish the unhealthy state.
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
         let (replacement, _replacement_uplink, replacement_downlink) = mock_path(1, group_id);
         drop(replacement_downlink);
         group.replace_path(replacement).unwrap();
