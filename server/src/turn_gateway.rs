@@ -1882,10 +1882,13 @@ mod tests {
             scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
         }
         let expired_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
-        scheduler.flows.get_mut(&expired_key).unwrap().last_seen = start;
+        let sweep_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
+        for (key, state) in &mut scheduler.flows {
+            state.last_seen = if *key == expired_key { start } else { sweep_at };
+        }
         scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
         let new_flow = scheduler_udp_flow(30_001, 1200);
-        scheduler.select(&active, CLIENT_IP, &new_flow, start + FLOW_IDLE_TTL + Duration::from_secs(1));
+        scheduler.select(&active, CLIENT_IP, &new_flow, sweep_at);
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
         assert!(!scheduler.flows.contains_key(&expired_key));
