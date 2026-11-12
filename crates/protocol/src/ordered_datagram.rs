@@ -7,7 +7,8 @@
 use crate::{DataDatagram, DatagramError, MAX_DATAGRAM_SIZE};
 
 const SEQUENCE_MAGIC: &[u8; 4] = b"GHSQ";
-const SEQUENCE_HEADER_LEN: usize = 12;
+const SEQUENCE_VERSION: u8 = 1;
+const SEQUENCE_HEADER_LEN: usize = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SequencedDataDatagram {
@@ -36,6 +37,7 @@ impl SequencedDataDatagram {
         }
         let mut output = Vec::with_capacity(total_len);
         output.extend_from_slice(SEQUENCE_MAGIC);
+        output.push(SEQUENCE_VERSION);
         output.extend_from_slice(&sequence.to_be_bytes());
         output.extend_from_slice(&encoded);
         Ok(output)
@@ -49,8 +51,11 @@ impl SequencedDataDatagram {
             if encoded.len() <= SEQUENCE_HEADER_LEN {
                 return Err(DatagramError::InvalidLength);
             }
+            if encoded[4] != SEQUENCE_VERSION {
+                return Err(DatagramError::UnsupportedVersion);
+            }
             let sequence = u64::from_be_bytes(
-                encoded[4..SEQUENCE_HEADER_LEN].try_into()
+                encoded[5..SEQUENCE_HEADER_LEN].try_into()
                     .map_err(|_| DatagramError::InvalidLength)?,
             );
             let datagram = DataDatagram::decode(&encoded[SEQUENCE_HEADER_LEN..])?;
@@ -91,6 +96,16 @@ mod tests {
     #[test]
     fn rejects_truncated_sequence_envelope() {
         assert_eq!(SequencedDataDatagram::decode(b"GHSQ"), Err(DatagramError::InvalidLength));
+    }
+
+    #[test]
+    fn rejects_unknown_sequence_envelope_version() {
+        let mut encoded = SequencedDataDatagram::new(1, packet(28)).encode().unwrap();
+        encoded[4] = 2;
+        assert_eq!(
+            SequencedDataDatagram::decode(&encoded),
+            Err(DatagramError::UnsupportedVersion),
+        );
     }
 
     #[test]

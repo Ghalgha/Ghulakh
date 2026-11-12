@@ -176,7 +176,7 @@ The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 pro
 
 ### Downlink ordering across independent TURN paths
 
-Server-to-client IP datagrams are wrapped inside the authenticated frame with a `GHSQ` ordering envelope: a 4-byte magic followed by a 64-bit monotonically increasing sequence number and the existing IP datagram encoding. The gateway allocates sequence numbers per virtual client route, so path selection does not change packet order. The Android path group buffers out-of-order packets and writes only increasing sequence numbers to TUN.
+Server-to-client IP datagrams are wrapped inside the authenticated frame with a `GHSQ` ordering envelope: a 4-byte magic, a 1-byte envelope version, a 64-bit monotonically increasing sequence number, and the existing IP datagram encoding. The gateway allocates sequence numbers per virtual client route, so path selection does not change packet order. The Android path group buffers out-of-order packets and writes only increasing sequence numbers to TUN.
 
 The resequencing buffer is bounded to 256 pending packets. If a sequence gap remains for 250 ms, or the buffer reaches its bound, the receiver advances to the lowest pending sequence and permanently drops any later-arriving packet below the new expected sequence. This prevents packet reordering at the cost of possible packet loss and head-of-line delay across the tunnel. Client-to-server packets retain the original unsequenced datagram encoding.
 
