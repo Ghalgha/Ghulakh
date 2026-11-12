@@ -58,7 +58,7 @@ class GhulakhVpnService : VpnService() {
             if (running.compareAndSet(false, true)) {
                 val generation = lifecycleGeneration.begin()
                 isActive = true
-                worker = Thread({ runTunnel(generation) }, "ghulakh-vpn-session").apply { start() }
+                worker = Thread({ runTunnel(generation, startId) }, "ghulakh-vpn-session").apply { start() }
             }
         }
         return START_NOT_STICKY
@@ -67,7 +67,7 @@ class GhulakhVpnService : VpnService() {
     private fun isCurrent(generation: Long): Boolean =
         running.get() && lifecycleGeneration.isCurrent(generation)
 
-    private fun runTunnel(generation: Long) {
+    private fun runTunnel(generation: Long, startId: Int) {
         val credentialGroups = Collections.synchronizedList(mutableListOf<VkCallsCredentialGroup>())
         try {
             val profile = CredentialStore(this).load()
@@ -229,7 +229,7 @@ class GhulakhVpnService : VpnService() {
                 }
                 credentialGroups.clear()
             }
-            if (ownsLifecycle) stopSelf()
+            if (ownsLifecycle) stopSelfResult(startId)
         }
     }
 
