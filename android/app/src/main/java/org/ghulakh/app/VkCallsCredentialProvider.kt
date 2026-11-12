@@ -33,7 +33,7 @@ data class VkCallsSession(
     }
 }
 
-data class VkCallsCredentialGroup(
+internal data class VkCallsCredentialGroup(
     val turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
     internal val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
