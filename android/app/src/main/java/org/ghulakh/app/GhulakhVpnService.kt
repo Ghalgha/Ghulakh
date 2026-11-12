@@ -376,6 +376,6 @@ class GhulakhVpnService : VpnService() {
         private const val MIN_TUN_MTU = 576
         private const val MAX_TUN_MTU = 1500
         private const val MAX_IP_PACKET_SIZE = 65_535
-        private const val DEFAULT_TURN_PATHS = 5
+        private const val DEFAULT_TURN_PATHS = 10
     }
 }
