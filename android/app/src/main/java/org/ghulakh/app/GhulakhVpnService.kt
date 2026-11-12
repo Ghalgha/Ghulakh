@@ -60,7 +60,7 @@ class GhulakhVpnService : VpnService() {
     }
 
     private fun runTunnel() {
-        val vkSessions = Collections.synchronizedList(mutableListOf<VkCallsSession>())
+        val credentialGroups = Collections.synchronizedList(mutableListOf<VkCallsCredentialGroup>())
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
@@ -102,7 +102,7 @@ class GhulakhVpnService : VpnService() {
                 }
             }
             val establishedGroup = checkNotNull(callsSession)
-            vkSessions.add(establishedGroup.ownerSession)
+            credentialGroups.add(establishedGroup)
             val retained = synchronized(this) {
                 if (running.get()) {
                     nativeTransport = transport
@@ -201,12 +201,12 @@ class GhulakhVpnService : VpnService() {
             }
         } finally {
             stopTunnel()
-            synchronized(vkSessions) {
-                vkSessions.forEach { calls ->
-                    runCatching { calls.finish() }
-                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls session", error) }
+            synchronized(credentialGroups) {
+                credentialGroups.forEach { group ->
+                    runCatching { group.finish() }
+                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls credential group", error) }
                 }
-                vkSessions.clear()
+                credentialGroups.clear()
             }
             stopSelf()
         }
