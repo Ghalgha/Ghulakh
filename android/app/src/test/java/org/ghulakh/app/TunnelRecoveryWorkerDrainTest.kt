@@ -36,6 +36,63 @@ class TunnelRecoveryWorkerDrainTest {
     }
 
     @Test
+    fun stopDuringRegisteredRecoveryWaitsBeforeFinishingCredentialBroker() {
+        val recoveryLock = Any()
+        val recoveryToken = AtomicBoolean(true)
+        val registered = mutableListOf<Thread>()
+        val supervisorMayRegister = CountDownLatch(1)
+        val supervisorReady = CountDownLatch(1)
+        val childStarted = CountDownLatch(1)
+        val releaseChild = CountDownLatch(1)
+        val brokerFinished = AtomicBoolean(false)
+        val child = Thread {
+            childStarted.countDown()
+            var released = false
+            while (!released) {
+                try {
+                    released = releaseChild.await(20, TimeUnit.MILLISECONDS)
+                } catch (_: InterruptedException) {
+                    // Model an in-flight native operation that does not finish
+                    // merely because its Java worker was interrupted.
+                }
+            }
+        }
+        val supervisor = Thread {
+            supervisorReady.countDown()
+            supervisorMayRegister.await()
+            synchronized(recoveryLock) {
+                if (recoveryToken.get()) {
+                    registered += child
+                    child.start()
+                }
+            }
+        }
+        supervisor.start()
+        assertTrue(supervisorReady.await(1, TimeUnit.SECONDS))
+
+        val cleanup = Thread {
+            awaitWorkerTermination(supervisor) {
+                synchronized(recoveryLock) { registered.toList() }
+            }
+            brokerFinished.set(true)
+        }
+        cleanup.start()
+
+        // The stop races with the supervisor's last possible registration.
+        recoveryToken.set(false)
+        supervisorMayRegister.countDown()
+        assertTrue(childStarted.await(1, TimeUnit.SECONDS))
+        child.interrupt()
+        assertFalse(brokerFinished.get())
+
+        releaseChild.countDown()
+        cleanup.join(1_000)
+
+        assertFalse(cleanup.isAlive)
+        assertTrue(brokerFinished.get())
+    }
+
+    @Test
     fun preservesInterruptAfterAllRecoveryWorkersExit() {
         val childStarted = CountDownLatch(1)
         val releaseChild = CountDownLatch(1)
