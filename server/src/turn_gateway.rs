@@ -448,10 +448,10 @@ impl TurnGateway {
         drop(clients);
         drop(sessions);
         if !replaced_sessions.is_empty() {
-            let mut scheduler = self.downlink_scheduler.lock()
-                .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?;
-            for old_id in replaced_sessions {
-                scheduler.remove_session(old_id);
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                for old_id in replaced_sessions {
+                    scheduler.remove_session(old_id);
+                }
             }
         }
         Ok(())
