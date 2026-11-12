@@ -36,7 +36,7 @@ data class VkCallsSession(
 data class VkCallsCredentialGroup(
     val turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
-    val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
+    internal val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
 ) {
     fun finish() = ownerSession.finish()
 }
