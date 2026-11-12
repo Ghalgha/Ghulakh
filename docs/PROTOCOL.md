@@ -1,14 +1,14 @@
 # Протокол: начальная спецификация
 
-Статус: draft, не является стабильным wire-стандартом.
+Статус: описание текущего исследовательского wire-протокола; формат не объявляется стабильным публичным стандартом.
 
 ## Текущий статус транспорта
 
 Целевой транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC-формат ниже сохранён только как описание экспериментального прототипа и не должен использоваться для передачи пользовательских IP-пакетов в целевой конфигурации.
 
-В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Кодек реализует MESSAGE-INTEGRITY на HMAC-SHA1 с внешним ключом и FINGERPRINT на CRC-32. Он не выводит long-term ключи, не реализует TURN transaction state machine, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
+`ghulakh-protocol::stun` реализует STUN framing, transaction ID, class/method, TLV attributes с padding, XOR address encoding/decoding для IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 и FINGERPRINT CRC-32. Отдельные модули реализуют TURN challenge parsing, password-algorithm attributes, transaction manager, ChannelData, allocation lifecycle, peer/channel registry и защищённые datagram envelopes. `crates/transport` связывает эти primitives с UDP socket actor, TURN driver/supervisor, Noise handshake и bidirectional dataplane.
 
-Следующие обязательные компоненты: подтверждение фактического TURN credential/auth profile VK Calls, Allocate/Refresh/CreatePermission/ChannelBind state machine, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
+Оставшаяся проверка относится прежде всего к совместимости VK Calls credential/auth profile и relay behavior на реальной инфраструктуре. Реализация TURN state machine, relay data path и gateway reverse path присутствует и покрыта mock integration tests; эти тесты не доказывают live compatibility.
 
 ## Экспериментальный QUIC прототип (не целевой транспорт)
 
@@ -157,7 +157,7 @@ The UDP ChannelData codec validates the current RFC 8656 channel range `0x4000�
 
 The protocol crate includes an AEAD frame codec using ChaCha20-Poly1305. A frame authenticates its magic/version marker, session identifier, direction, sequence number, and payload length as associated data. Nonces are formed from a caller-supplied 32-bit per-direction prefix and a 64-bit monotonic sequence. The receiver enforces a 128-packet replay window and commits sequence state only after successful authentication.
 
-The codec requires independent directional keys and nonce prefixes from a future authenticated session key agreement. It does not derive keys from TURN credentials, does not implement the key agreement, and is not yet connected to the Android TUN, TURN socket, or server gateway.
+The codec requires independent directional keys and nonce prefixes supplied by the authenticated Noise XX session handshake. It does not derive keys from TURN credentials. The codec is integrated with the TURN dataplane, Android TUN and server gateway; automated mock integration tests cover the composed packet path.
 
 
 ### TURN peer permission and channel state
@@ -167,12 +167,12 @@ The allocation-scoped peer registry tracks permissions by peer IP and channel bi
 
 ### TURN UDP socket adapter
 
-The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages to one configured TURN endpoint, preserves the source address of received datagrams, and can adopt a pre-bound standard UDP socket. Android integration is expected to create and protect that socket with `VpnService.protect(fd)` before handing it to the adapter. The adapter does not yet perform TURN authentication, transaction scheduling, allocation management, or relay session establishment.
+The transport crate provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages, preserves source addresses and adopts pre-bound sockets. Android creates and protects each socket with `VpnService.protect(fd)`. The adapter is integrated with the TURN socket actor, control driver, allocation supervisor and path runtime.
 
 
 ### TURN tunnel data codec composition
 
-The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This is a codec composition only: it does not own UDP receive dispatch, TURN state transitions, or the authenticated key exchange.
+The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This codec composition is used by the TURN dataplane; UDP dispatch, TURN state transitions and authenticated key exchange are owned by their respective integrated runtime components.
 
 ### Downlink ordering across independent TURN paths
 

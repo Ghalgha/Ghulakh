@@ -21,7 +21,7 @@ TURN relay — внешний посредник, не сервер прилож
 
 Одна tunnel group состоит из 2–10 независимых TURN allocations. Каждый path имеет собственные socket, allocation, permission/channel state, Noise session, session ID, directional keys и bounded queues. Paths имеют общий group ID, path count, virtual IPv4 и MTU.
 
-Uplink использует flow affinity: одинаковый IP flow стабильно выбирает один path, разные flows распределяются по разным paths. При отказе path новый allocation и Noise handshake устанавливаются отдельно; успешный replacement атомарно занимает прежний path slot. Downlink выбирает только paths с недавно подтверждённой authenticated activity. Пакеты не striping-ятся внутри одного flow, поскольку общий group sequence и reorder buffer пока не реализованы.
+Uplink использует flow/flowlet scheduling: поток сохраняет path в пределах burst, а bulk flow может перейти на другой path на границе burst. Sequence numbers и bounded reorder buffer защищают порядок при переключении. Downlink распределяет flows по активным путям с учётом path availability и backpressure. Отказавший path заменяется после новой allocation и Noise handshake; замена ограничена жизненным циклом tunnel group.
 
 ## Обратный путь и session binding
 
@@ -35,7 +35,7 @@ TURN relay source tuple подтверждает маршрут через alloc
 - Не подтверждены актуальные quotas, allocation lifetime, endpoint rotation и vendor-specific attributes.
 - Mock TURN relay моделирует отдельные client-facing и peer-facing sockets; это подтверждает внутреннюю логику адресации, но не реальную политику VK relay.
 - Один UDP gateway listener обслуживает множество независимых relay paths; gateway receive loop пока обрабатывает datagrams последовательно. Параллелизация требует benchmark и отдельной проверки сохранности session/replay state.
-- Транспорт передаёт IPv4; IPv6 пока блокируется на клиенте и не маршрутизируется сервером.
+- IPv4 и IPv6 проходят через Android TUN, защищённый TURN dataplane и dual-stack серверный gateway. Публичный IPv6 egress требует upstream route или NAT66 и не подтверждён на реальном сервере.
 - Flow affinity распределяет разные flows, но не агрегирует пропускную способность нескольких paths внутри одного flow.
 
 ## Проверки

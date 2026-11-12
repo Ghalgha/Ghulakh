@@ -31,8 +31,8 @@
 
 1. Один владелец TURN control state и сериализованные control transitions.
 2. Отдельный receive loop для relay datagrams.
-3. Bounded ingress queue; начать с Tokio MPSC ради более простой корректной интеграции, затем сравнить с SPSC на одном и том же benchmark.
-4. Отдельная bounded outbound queue для uplink; при UDP WouldBlock ждать writable readiness с cancellation/shutdown.
+3. Bounded ingress/egress queues и единый socket actor используются в текущем runtime. SPSC/ring-buffer замена остаётся только возможной оптимизацией после сопоставимого benchmark.
+4. Outbound UDP operations выполняются через actor/runtime с ограниченными очередями и управляемым shutdown; отдельная SPSC writer-архитектура не заявляется как реализованная.
 5. Event-driven notifications вместо периодического polling.
 6. Буферы из PacketPool/reusable buffers, чтобы избежать лишних allocation/copy на каждый пакет.
 7. Явные счётчики queue-full, pool-exhaustion, socket WouldBlock, packet loss, retransmission и reconnect.

@@ -1,6 +1,6 @@
 # Server deployment notes
 
-These steps describe the current TURN-only runtime. They are not a claim of live VK relay compatibility; the live VK API and TURN authentication profile still require validation.
+These steps describe the current TURN-only runtime. Automated mock integration tests cover the client/server path, but live VK Calls API, relay allocation and TURN authentication compatibility remain unverified.
 
 ## 1. Generate the persistent Noise keypair
 
@@ -37,7 +37,7 @@ The server checks that Linux IPv4 forwarding, global IPv6 forwarding are enabled
     net.ipv4.ip_forward=1
     net.ipv6.conf.all.forwarding=1
 
-The dual-stack TUN interface uses 10.77.0.1/16 and fd77:77::1/64 with MTU 1100. Authenticated sessions receive one IPv4 and one IPv6 address; the gateway validates both source addresses and routes downlink packets by their full IP address.
+The dual-stack TUN interface uses 10.77.0.1/16 and fd77:77::1/64 with MTU 1100. Authenticated sessions receive paired IPv4 and IPv6 addresses; the gateway validates both source addresses and routes downlink packets by their full IP address. Android configures both default routes and passes both packet families to the native TURN dataplane.
 
 ## 4. Configure egress routing
 
@@ -54,9 +54,9 @@ The VK access token is currently entered manually and encrypted with Android Key
 ## 6. Current limitations
 
 - Only UDP TURN endpoints are supported; TCP and TURNS/TLS endpoints are rejected.
-- IPv4 and IPv6 packet transport, source validation, and virtual-address routing are implemented. Public IPv6 egress still depends on the host's upstream route or NAT66 configuration; it has not been validated on a live server.
+- IPv4 and IPv6 packet transport, source validation, dual-stack virtual-address allocation and routing are implemented in the client/server code and covered by automated tests. Public IPv6 egress still depends on the host's upstream route or NAT66 configuration and has not been validated on a live server.
 - The legacy VK TURN authentication candidate uses MD5(username:realm:password) and HMAC-SHA1. Vendor attribute 0x8021 and PASSWORD-ALGORITHMS behavior remain unverified.
-- Real VK Calls API, relay allocation, credential expiry/rotation, Android device and VPS tests have not yet been completed.
+- Live VK Calls API and relay compatibility, real allocation quotas/expiry/rotation, and physical Android/VPS end-to-end tests have not yet been completed. Mock tests are not evidence of live relay compatibility.
 - The server exposes only the TURN gateway; there is no alternative transport fallback.
 
 Treat this configuration as a development deployment until the remaining integration and live-network tests pass.

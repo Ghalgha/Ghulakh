@@ -16,22 +16,22 @@ Temporary key buffers are wrapped in zeroizing containers where owned by this mo
 
 TURN allocation credentials authorize use of a relay. They do not authenticate a Ghulakh account/device to the gateway and must not become IP-traffic encryption keys. The Noise handshake establishes the application session independently of TURN's long-term credential mechanism. The handshake messages themselves still need to be transported through the established TURN allocation.
 
-## Current limitations — not production-ready yet
+## Current integration and remaining limitations
 
-- The Noise module remains a cryptographic state machine. `handshake_datagram.rs` supplies deterministic TURN datagram envelope, retry, response matching and replay-cache primitives. The TURN socket actor now unwraps ChannelData, validates the handshake envelope, and routes it to a separate bounded handshake queue; `TurnClientDriver` exposes that queue together with a clone of the actor send handle. The retry/cache manager is not yet wired to this queue or the Noise state machine.
-- The caller must invoke `match_response`, authenticate/process the Noise payload, and only then call `complete_response`. A matched but unauthenticated packet must not cancel the retry transaction.
-- Retry scheduling is caller-driven through `poll(now)`; the module owns no timer, socket, task or runtime. It resends the exact encoded request bytes, uses bounded exponential backoff and expires pending requests after a fixed transmission budget.
+- Client and server handshake tasks are integrated with the TURN runtime. The client validates the expected relay endpoint and encrypted ServerAck; the server applies bounded admission/rate limits and caches handshake responses before sending them. The authenticated session is registered before ServerAck delivery to avoid a first-uplink race.
+- Handshake response matching and state advancement remain ordered: a matched but unauthenticated response must not complete a retry transaction.
+- Retry scheduling is bounded and owned by the runtime task; retransmission and timeout behavior is covered by deterministic tests, not by live relay measurements.
 - The response cache is bounded globally and per source, uses a fixed TTL, and rejects transaction-key reuse with different request bytes. Handshake queue overload drops the newest handshake datagram and increments a dedicated counter rather than blocking the sole TURN socket reader.
-- The network integration still needs source admission/rate limiting and must cache the response before attempting network send.
-- The server credential verifier is supplied by the caller. It must use the existing credential store with constant-time digest comparison, expiry/revocation and rate limiting.
-- The server static key pair persistence/rotation and secure client pin distribution are not integrated.
-- The gateway session registry is not yet populated from a completed Noise handshake.
+- Source tuple admission, rate limiting and response caching are implemented in the server handshake service; live traffic characteristics remain untested.
+- Device credentials are checked against configured SHA-256 digests using constant-time comparison; credential revocation currently requires updating the digest file and restarting the server.
+- Server static key persistence and keypair consistency checks are implemented. Secure distribution/rotation of the pinned public key remains an operator responsibility.
+- Server TURN handshake service completes Noise XX, validates the device credential, creates the encrypted session acknowledgement, and registers the authenticated session before the acknowledgement is sent. The mock integration suite covers this ordering; live VK relay compatibility remains unverified.
 - Snow 0.10.0 implements the Noise framework but its own project documentation states it has not received a formal security audit. Treat the integration as research-stage pending dependency review and protocol audit.
 - The current implementation has unit tests for pinned server identity, credential rejection, encrypted server acknowledgement and both directional frame keys. These tests do not establish UDP handshake reliability or VK Calls compatibility.
 
-## Next integration steps
+## Remaining validation
 
-1. Connect `HandshakeDatagramDriver` to the TURN socket actor and a single-owner handshake task; keep socket I/O and timer scheduling outside the protocol module.
+1. Validate Noise handshake behavior across real VK TURN relay paths, including loss, duplication, reordering and reconnect.
 2. Integrate the cache lookup before Noise state advancement and cache the exact response before sending it; never advance Noise state twice for a duplicate datagram.
 3. Bind successful handshake results to the verified TURN relayed address, channel number and allocated virtual IPv4.
 4. Register the resulting directional codecs in `TurnGateway` only after the client has received and authenticated the final acknowledgement.

@@ -41,7 +41,7 @@ TURN relay считается недоверенным посредником д
 - handshake admission, peer rate table, replay cache, transaction concurrency и очереди ограничены;
 - TURN credentials хранятся в zeroizing контейнерах и redacted Debug; Android секреты хранятся с использованием Android Keystore;
 - Android вызывает `VpnService.protect(fd)` для каждого TURN UDP socket до использования его внутри VPN;
-- IPv6 маршрут захватывается Android, но IPv6 packets не передаются в серверный IPv4 dataplane (fail-closed);
+- IPv4 и IPv6 маршруты захватываются Android; оба семейства передаются в dual-stack server TUN, где проверяются source addresses. Публичный IPv6 egress зависит от серверного upstream route/NAT66;
 - серверная egress ACL блокирует частные, loopback, link-local, multicast, reserved/documentation и другие непубличные диапазоны.
 
 ## Остаточные риски и ограничения
@@ -51,7 +51,7 @@ TURN relay считается недоверенным посредником д
 - Noise library и собственная композиция handshake/session framing не прошли независимый формальный аудит.
 - Компрометация Android OS, сервера или device credential может раскрыть пользовательский трафик/доступ.
 - TURN quota и ограничения allocation контролируются внешним сервисом и не гарантируются клиентом.
-- IPv6, LAN access, DNS service, credential OAuth UI/rotation и production-grade firewall orchestration не реализованы.
+- In-app OAuth UI/автоматическое получение VK access token, DNS service, LAN access и production-grade firewall orchestration не реализованы. TURN credential refresh/recovery реализован для сессии; поведение реальной VK quota/rotation требует live-проверки.
 - Ошибочная конфигурация IP forwarding/NAT/firewall может нарушить маршрутизацию; флаг администратора не является автоматической проверкой firewall.
 - MTU 1100 и поведение path health/recovery требуют дальнейшей симуляции и в конце проекта — физических испытаний.
 
