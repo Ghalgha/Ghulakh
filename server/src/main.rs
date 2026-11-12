@@ -616,13 +616,9 @@ async fn main() -> Result<()> {
             .context("bind server TURN gateway")?;
         gateway.install_handshake_service(service).await?;
         let gateway_task = Arc::clone(&gateway);
-        let _turn_gateway_task = tokio::spawn(async move {
-            if let Err(error) = gateway_task.run().await {
-                eprintln!("TURN gateway stopped: {error:#}");
-            }
-        });
+        let turn_gateway_task = tokio::spawn(async move { gateway_task.run().await });
         eprintln!("TURN gateway listening on {}", gateway.local_addr()?);
-        Some((gateway, receiver))
+        Some((gateway, receiver, turn_gateway_task))
     } else {
         None
     };
@@ -643,9 +639,9 @@ async fn main() -> Result<()> {
 
     let tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
-        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _)| Arc::clone(gateway));
+        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
         let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
-        if let Some((_, mut ingress)) = turn_gateway_setup {
+        if let Some((_, mut ingress, _)) = turn_gateway_setup {
             let tun_ingress_sender = sender.clone();
             let _turn_ingress_task = tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
@@ -713,9 +709,12 @@ async fn main() -> Result<()> {
             });
         }
         bail!("QUIC endpoint stopped accepting connections")
-    } else {
+    } else if let Some((_, _, turn_gateway_task)) = turn_gateway_setup {
         eprintln!("Legacy QUIC runtime disabled; VK Calls TURN is the only active transport");
-        std::future::pending::<()>().await;
+        turn_gateway_task
+            .await
+            .context("TURN gateway task panicked")?
+            .context("TURN gateway task failed")?;
     }
     Ok(())
 }
