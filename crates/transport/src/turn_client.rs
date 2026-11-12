@@ -5,12 +5,13 @@
 //! bidirectional IP dataplane. VK API credential acquisition remains external.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock, Mutex as StdMutex,
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -362,8 +363,8 @@ impl TurnPathRecoveryPolicy {
 }
 
 /// One logical VPN tunnel backed by several independent authenticated TURN paths.
-/// Flow affinity keeps each IP flow on one path while preserving aggregate
-/// throughput across concurrent flows and avoiding packet reordering.
+/// Per-flowlet scheduling spreads sustained bulk traffic while keeping small
+/// latency-sensitive UDP flows pinned to one path.
 pub struct TurnClientPathGroup {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     paths: RwLock<Vec<Arc<TurnClientRuntime>>>,
@@ -371,6 +372,7 @@ pub struct TurnClientPathGroup {
     downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
     downlink_senders: StdMutex<mpsc::Sender<DataDatagram>>,
     forwarders: StdMutex<Vec<JoinHandle<()>>>,
+    uplink_scheduler: StdMutex<UplinkScheduler>,
     uplink_queue_drops: AtomicU64,
     closed: AtomicBool,
     closed_signal: watch::Sender<bool>,
@@ -434,6 +436,7 @@ impl TurnClientPathGroup {
             downlink: tokio::sync::Mutex::new(downlink),
             downlink_senders: StdMutex::new(downlink_tx_for_group),
             forwarders: StdMutex::new(forwarders),
+            uplink_scheduler: StdMutex::new(UplinkScheduler::default()),
             uplink_queue_drops: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             closed_signal,
@@ -530,40 +533,37 @@ impl TurnClientPathGroup {
             !self.closed.load(Ordering::Acquire) && !*closed.borrow(),
             "TURN path group is closed"
         );
-        let health: Vec<bool> = self.healthy.iter()
-            .map(|path| path.load(Ordering::Acquire))
-            .collect();
-        let Some(start) = select_path_index(&packet.packet, &health) else {
-            // Keep the TUN reader alive while the Android recovery worker
-            // recreates failed allocations; packets are dropped, never queued
-            // onto a different path out of order.
-            self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        };
         let paths = self.paths.read()
             .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
-        for offset in 0..paths.len() {
-            let index = (start + offset) % paths.len();
-            if !self.healthy[index].load(Ordering::Acquire) {
-                continue;
-            }
-            let enqueue = enqueue_uplink_packet(
-                &paths[index].uplink,
-                packet.clone(),
-                &self.uplink_queue_drops,
-            );
-            match enqueue {
+        let now = Instant::now();
+        let mut scheduler = self.uplink_scheduler.lock()
+            .map_err(|_| anyhow::anyhow!("TURN uplink scheduler lock poisoned"))?;
+        let mut pending = packet;
+        for _ in 0..paths.len() {
+            let healthy: Vec<bool> = self.healthy.iter()
+                .map(|path| path.load(Ordering::Acquire))
+                .collect();
+            let sendable: Vec<bool> = paths.iter().enumerate().map(|(index, path)| {
+                healthy[index] && !path.uplink.is_closed() && path.uplink.capacity() > 0
+            }).collect();
+            let Some(index) = scheduler.select(&healthy, &sendable, &pending.packet, now) else {
+                self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            };
+            match paths[index].uplink.try_send(pending) {
                 Ok(()) => return Ok(()),
-                // Do not move a congested flow to another path: packets already
-                // queued there would be overtaken. Drop newest and keep reading TUN.
-                Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
-                Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // The queue filled after the capacity snapshot. Drop newest;
+                    // do not send it on another path and overtake queued packets.
+                    self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(mpsc::error::TrySendError::Closed(returned)) => {
                     self.healthy[index].store(false, Ordering::Release);
+                    pending = returned;
                 }
             }
         }
-        // All slots failed between the health snapshot and enqueue. Keep
-        // the TUN pump alive so the platform recovery worker can restore them.
         self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -655,14 +655,247 @@ fn enqueue_uplink_packet(
     }
 }
 
-fn select_path_index(packet: &[u8], healthy: &[bool]) -> Option<usize> {
-    if healthy.is_empty() {
-        return None;
+const UPLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
+const UPLINK_BUCKET_CAPACITY: f64 = 10_500.0;
+const UPLINK_MAX_DEFICIT: f64 = -4_500.0;
+const UPLINK_FLOW_BURST_BYTES: usize = 16 * 1024;
+const UPLINK_FLOW_TABLE_MAX: usize = 1024;
+const UPLINK_FLOW_EVICT_EVERY: u32 = 1024;
+const UPLINK_FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
+const UPLINK_SMALL_UDP_MAX_LEN: usize = 300;
+const UPLINK_SMALL_UDP_STICKY: Duration = Duration::from_secs(1);
+const UPLINK_PIN_WINDOW: Duration = Duration::from_millis(250);
+const UPLINK_PIN_WINDOW_MAX_BYTES: usize =
+    (UPLINK_RATE_BYTES_PER_SEC as usize) * 3 / 4 / 4;
+const UPLINK_BULK_HOLD: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+struct UplinkFlowState {
+    path_index: usize,
+    last_seen: Instant,
+    burst_left: usize,
+    sticky_until: Option<Instant>,
+    window_start: Instant,
+    window_bytes: usize,
+    bulk_until: Option<Instant>,
+}
+
+impl UplinkFlowState {
+    fn new(path_index: usize, now: Instant, packet_len: usize, small_udp: bool) -> Self {
+        Self {
+            path_index,
+            last_seen: now,
+            burst_left: UPLINK_FLOW_BURST_BYTES.saturating_sub(packet_len),
+            sticky_until: small_udp.then_some(now + UPLINK_SMALL_UDP_STICKY),
+            window_start: now,
+            window_bytes: packet_len,
+            bulk_until: None,
+        }
     }
-    let start = (ghulakh_protocol::ip_flow::flow_hash(packet) as usize) % healthy.len();
-    (0..healthy.len())
-        .map(|offset| (start + offset) % healthy.len())
-        .find(|index| healthy[*index])
+
+    fn keeps_pin(&mut self, now: Instant, packet_len: usize, small_udp: bool) -> bool {
+        if now.saturating_duration_since(self.window_start) >= UPLINK_PIN_WINDOW {
+            self.window_start = now;
+            self.window_bytes = 0;
+        }
+        self.window_bytes = self.window_bytes.saturating_add(packet_len);
+        if self.window_bytes > UPLINK_PIN_WINDOW_MAX_BYTES {
+            self.bulk_until = Some(now + UPLINK_BULK_HOLD);
+            self.sticky_until = None;
+        }
+        let bulk = self.bulk_until.is_some_and(|until| now < until);
+        if small_udp && !bulk {
+            self.sticky_until = Some(now + UPLINK_SMALL_UDP_STICKY);
+        }
+        self.sticky_until.is_some_and(|until| now < until)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UplinkRateController {
+    rate: f64,
+    congested: bool,
+    last_adjust: Option<Instant>,
+}
+
+impl UplinkRateController {
+    fn new() -> Self {
+        Self {
+            rate: UPLINK_RATE_BYTES_PER_SEC,
+            congested: false,
+            last_adjust: None,
+        }
+    }
+
+    fn mark_congested(&mut self) {
+        self.congested = true;
+    }
+
+    fn tick(&mut self, now: Instant) {
+        let Some(last) = self.last_adjust else {
+            self.last_adjust = Some(now);
+            return;
+        };
+        if now.saturating_duration_since(last) < Duration::from_millis(100) {
+            return;
+        }
+        if self.congested {
+            self.rate = (self.rate * 0.85).max(150_000.0);
+            self.congested = false;
+        } else {
+            self.rate = (self.rate + 5_000.0).min(UPLINK_RATE_BYTES_PER_SEC);
+        }
+        self.last_adjust = Some(now);
+    }
+}
+
+#[derive(Default)]
+struct UplinkScheduler {
+    last_update: Option<Instant>,
+    tokens: Vec<f64>,
+    rates: Vec<UplinkRateController>,
+    cursor: usize,
+    flows: HashMap<ghulakh_protocol::ip_flow::Ipv4FlowKey, UplinkFlowState>,
+    flow_evict_counter: u32,
+}
+
+impl UplinkScheduler {
+    fn update_tokens(&mut self, count: usize, now: Instant) {
+        if self.tokens.len() != count {
+            self.tokens.resize(count, UPLINK_BUCKET_CAPACITY);
+            self.rates.resize_with(count, UplinkRateController::new);
+            self.last_update = Some(now);
+            self.flows.clear();
+            self.flow_evict_counter = 0;
+        }
+        for rate in &mut self.rates {
+            rate.tick(now);
+        }
+        let start = self.last_update.unwrap_or(now);
+        let elapsed = now.saturating_duration_since(start).as_secs_f64();
+        if elapsed >= 0.0001 {
+            self.last_update = Some(now);
+            for (tokens, rate) in self.tokens.iter_mut().zip(self.rates.iter()) {
+                *tokens = (*tokens + elapsed * rate.rate).min(UPLINK_BUCKET_CAPACITY);
+            }
+        }
+    }
+
+    fn evict_flows(&mut self, now: Instant) {
+        self.flow_evict_counter = self.flow_evict_counter.wrapping_add(1);
+        if self.flow_evict_counter % UPLINK_FLOW_EVICT_EVERY != 0
+            && self.flows.len() < UPLINK_FLOW_TABLE_MAX
+        {
+            return;
+        }
+        self.flows.retain(|_, state| {
+            now.saturating_duration_since(state.last_seen) < UPLINK_FLOW_IDLE_TTL
+        });
+        if self.flows.len() >= UPLINK_FLOW_TABLE_MAX {
+            self.flows.clear();
+        }
+    }
+
+    fn choose_path(&mut self, healthy: &[bool], sendable: &[bool]) -> Option<usize> {
+        let count = sendable.len();
+        if count == 0 {
+            return None;
+        }
+        let start = self.cursor.min(count - 1);
+        let mut best_index = None;
+        let mut best_tokens = f64::NEG_INFINITY;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            if !healthy[index] {
+                continue;
+            }
+            if !sendable[index] {
+                self.rates[index].mark_congested();
+                continue;
+            }
+            if self.tokens[index] > best_tokens {
+                best_tokens = self.tokens[index];
+                best_index = Some(index);
+            }
+        }
+        if let Some(index) = best_index {
+            self.cursor = (index + 1) % count;
+        }
+        best_index
+    }
+
+    fn charge(&mut self, index: usize, packet_len: usize) {
+        self.tokens[index] =
+            (self.tokens[index] - packet_len as f64).max(UPLINK_MAX_DEFICIT);
+    }
+
+    fn select(
+        &mut self,
+        healthy: &[bool],
+        sendable: &[bool],
+        packet: &[u8],
+        now: Instant,
+    ) -> Option<usize> {
+        let count = sendable.len();
+        if count == 0 || healthy.len() != count {
+            return None;
+        }
+        self.update_tokens(count, now);
+        let packet_len = packet.len();
+        let Some(key) = ghulakh_protocol::ip_flow::ipv4_flow_key(packet) else {
+            let index = self.choose_path(healthy, sendable)?;
+            self.charge(index, packet_len);
+            return Some(index);
+        };
+
+        self.evict_flows(now);
+        let small_udp = packet.get(9) == Some(&17) && packet_len <= UPLINK_SMALL_UDP_MAX_LEN;
+        if let Some(mut state) = self.flows.get(&key).copied() {
+            state.last_seen = now;
+            let sticky = state.keeps_pin(now, packet_len, small_udp);
+            let assigned_sendable = state.path_index < count
+                && healthy[state.path_index]
+                && sendable[state.path_index];
+            if assigned_sendable && (sticky || state.burst_left >= packet_len) {
+                let index = state.path_index;
+                state.burst_left = state.burst_left.saturating_sub(packet_len);
+                self.flows.insert(key, state);
+                self.charge(index, packet_len);
+                return Some(index);
+            }
+
+            let index = self.choose_path(healthy, sendable)?;
+            state.path_index = index;
+            state.burst_left = UPLINK_FLOW_BURST_BYTES.saturating_sub(packet_len);
+            self.flows.insert(key, state);
+            self.charge(index, packet_len);
+            return Some(index);
+        }
+
+        let index = self.choose_path(healthy, sendable)?;
+        self.flows.insert(
+            key,
+            UplinkFlowState::new(index, now, packet_len, small_udp),
+        );
+        self.charge(index, packet_len);
+        Some(index)
+    }
+}
+
+#[cfg(test)]
+fn enqueue_uplink_packet(
+    sender: &mpsc::Sender<DataDatagram>,
+    packet: DataDatagram,
+    dropped: &AtomicU64,
+) -> std::result::Result<(), mpsc::error::TrySendError<DataDatagram>> {
+    match sender.try_send(packet) {
+        Ok(()) => Ok(()),
+        Err(error @ mpsc::error::TrySendError::Full(_)) => {
+            dropped.fetch_add(1, Ordering::Relaxed);
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -747,18 +980,104 @@ mod path_group_tests {
         assert_eq!(delays, vec![1, 2, 4, 5, 5, 5, 5]);
     }
 
-    #[test]
-    fn flow_selection_is_stable_and_uses_other_healthy_paths_on_failure() {
-        let healthy = [true, true, true, true];
-        let first = select_path_index(&packet(12000), &healthy).unwrap();
-        let second = select_path_index(&packet(12000), &healthy).unwrap();
-        assert_eq!(first, second);
+    fn bulk_packet(source_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 1_300];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(packet.len() as u16).to_be_bytes());
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet
+    }
 
+    #[test]
+    fn small_udp_flow_remains_pinned_to_one_healthy_path() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let packet = packet(12000);
+        let start = Instant::now();
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
+        for offset in 1..50 {
+            let selected = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet,
+                start + Duration::from_millis(offset),
+            ).unwrap();
+            assert_eq!(selected, first);
+        }
+    }
+
+    #[test]
+    fn sustained_bulk_flow_rotates_between_paths_in_bounded_flowlets() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let packet = bulk_packet(12000);
+        let start = Instant::now();
+        let mut counts = [0usize; 10];
+        for offset in 0..4_000u64 {
+            let selected = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet,
+                start + Duration::from_micros(offset * 520),
+            ).unwrap();
+            counts[selected] += 1;
+        }
+        assert!(counts.iter().all(|count| *count > 0), "all paths should carry bulk flowlets: {counts:?}");
+        assert!(counts.iter().copied().max().unwrap() < 800, "bulk flow should not remain on one path: {counts:?}");
+    }
+
+    #[test]
+    fn independent_flows_are_distributed_across_healthy_paths() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let start = Instant::now();
+        let mut selected = [false; 10];
+        for source_port in 10_000..11_000 {
+            let index = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet(source_port),
+                start,
+            ).unwrap();
+            selected[index] = true;
+        }
+        assert!(selected.into_iter().all(|path| path));
+    }
+
+    #[test]
+    fn failed_or_backpressured_path_is_not_selected_for_new_flowlet() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 4];
+        let sendable = [true; 4];
+        let packet = packet(12000);
+        let start = Instant::now();
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
         let mut degraded = healthy;
         degraded[first] = false;
-        let fallback = select_path_index(&packet(12000), &degraded).unwrap();
-        assert_ne!(fallback, first);
-        assert_eq!(select_path_index(&packet(12000), &[false; 4]), None);
+        let replacement = scheduler.select(
+            &degraded,
+            &sendable,
+            &packet,
+            start + Duration::from_millis(1),
+        ).unwrap();
+        assert_ne!(replacement, first);
+        let mut backpressured = [true; 4];
+        backpressured[replacement] = false;
+        let next = scheduler.select(
+            &healthy,
+            &backpressured,
+            &packet,
+            start + Duration::from_millis(2),
+        ).unwrap();
+        assert_ne!(next, replacement);
+        assert_eq!(scheduler.select(&[false; 4], &[false; 4], &packet, start), None);
     }
 
     #[tokio::test]
