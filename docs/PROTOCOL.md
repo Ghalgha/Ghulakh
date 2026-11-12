@@ -174,6 +174,11 @@ The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN
 
 The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This is a codec composition only: it does not own UDP receive dispatch, TURN state transitions, or the authenticated key exchange.
 
+### Downlink ordering across independent TURN paths
+
+Server-to-client IP datagrams are wrapped inside the authenticated frame with a `GHSQ` ordering envelope: a 4-byte magic followed by a 64-bit monotonically increasing sequence number and the existing IP datagram encoding. The gateway allocates sequence numbers per virtual client route, so path selection does not change packet order. The Android path group buffers out-of-order packets and writes only increasing sequence numbers to TUN.
+
+The resequencing buffer is bounded to 256 pending packets. If a sequence gap remains for 250 ms, or the buffer reaches its bound, the receiver advances to the lowest pending sequence and permanently drops any later-arriving packet below the new expected sequence. This prevents packet reordering at the cost of possible packet loss and head-of-line delay across the tunnel. Client-to-server packets retain the original unsequenced datagram encoding.
 
 ### VK Calls credential and URI parser
 
