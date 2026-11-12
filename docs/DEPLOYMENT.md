@@ -29,7 +29,6 @@ Required environment:
     GHULAKH_TURN_GATEWAY_BIND=0.0.0.0:4434
     GHULAKH_NOISE_PRIVATE_KEY=/etc/ghulakh/noise_private.hex
     GHULAKH_NOISE_PUBLIC_KEY=/etc/ghulakh/noise_public.hex
-    GHULAKH_QUIC_ENABLED=false
 
 The TURN gateway listens for raw UDP payloads from VK TURN relays. Open the configured UDP port in the host firewall. The gateway validates relay source tuples and authenticated frames, but the actual VK relay address ranges have not yet been live-verified; do not invent an allowlist.
 
@@ -53,6 +52,6 @@ The VK access token is currently entered manually and encrypted with Android Key
 - Only IPv4 traffic is routed. Android captures IPv6 to prevent leaks, but IPv6 is not transported.
 - The legacy VK TURN authentication candidate uses MD5(username:realm:password) and HMAC-SHA1. Vendor attribute 0x8021 and PASSWORD-ALGORITHMS behavior remain unverified.
 - Real VK Calls API, relay allocation, credential expiry/rotation, Android device and VPS tests have not yet been completed.
-- QUIC runtime is disabled by default. It is not a TURN fallback.
+- The server exposes only the TURN gateway; there is no alternative transport fallback.
 
 Treat this configuration as a development deployment until the remaining integration and live-network tests pass.
