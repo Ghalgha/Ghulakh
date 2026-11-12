@@ -196,3 +196,46 @@ class VkCallsSessionIdempotenceTest {
         assertEquals(1, cleanupCalls.get())
     }
 }
+
+class VkCallsCredentialGroupCleanupTest {
+    @Test
+    fun finishingCredentialGroupClosesOwnerAndEveryAdditionalSessionExactlyOnce() {
+        val finishCalls = java.util.concurrent.atomic.AtomicInteger()
+        val owner = VkCallsSession(
+            turnCredentialsJson = """{"turn_server":{"username":"owner","credential":"owner-secret","urls":["turn:relay.example:3478"]}}""",
+            apiUrl = "https://calls.example.invalid/fb.do",
+            sessionKey = "owner-session",
+            conversationId = "test-conversation",
+            finishAction = { finishCalls.incrementAndGet() },
+        )
+        val issued = java.util.concurrent.atomic.AtomicInteger()
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "test-token",
+            conversationId = "test-conversation",
+            initialCredentialsJson = owner.turnCredentialsJson,
+            sessionFetcher = {
+                val id = issued.incrementAndGet()
+                VkCallsSession(
+                    turnCredentialsJson = """{"turn_server":{"username":"worker-$id","credential":"worker-secret-$id","urls":["turn:relay.example:3478"]}}""",
+                    apiUrl = "https://calls.example.invalid/fb.do",
+                    sessionKey = "worker-session-$id",
+                    conversationId = "test-conversation",
+                    finishAction = { finishCalls.incrementAndGet() },
+                )
+            },
+        )
+        val group = VkCallsCredentialGroup(
+            turnCredentialsJson = "[]",
+            ownerSession = owner,
+            credentialBroker = broker,
+        )
+
+        repeat(3) { broker.obtainCredentials() }
+        group.finish()
+        group.finish()
+
+        assertEquals(3, issued.get())
+        assertEquals(4, finishCalls.get())
+    }
+}
+
