@@ -206,7 +206,7 @@ class GhulakhVpnService : VpnService() {
     ) {
         val failures = mutableMapOf<Int, Int>()
         val nextAttemptAt = mutableMapOf<Int, Long>()
-        val rejectedCredentialsByPath = mutableMapOf<Int, LinkedHashSet<String>>()
+        val rejectedCredentials = linkedSetOf<String>()
         while (running.get()) {
             val failedPaths = runCatching { transport.nativeTurnFailedPaths(handle).toList() }
                 .getOrElse { error ->
@@ -223,9 +223,8 @@ class GhulakhVpnService : VpnService() {
                     callsSession = establishedSession
                     val credentialFingerprint =
                         TurnQuotaRetryPolicy.fingerprint(establishedSession.turnCredentialsJson)
-                    if (TurnQuotaRetryPolicy.wasRejectedForPath(
-                            rejectedCredentialsByPath,
-                            pathId,
+                    if (TurnQuotaRetryPolicy.wasRejected(
+                            rejectedCredentials,
                             credentialFingerprint,
                         )
                     ) {
@@ -262,13 +261,12 @@ class GhulakhVpnService : VpnService() {
                     callsSession = null
                     failures.remove(pathId)
                     nextAttemptAt.remove(pathId)
-                    rejectedCredentialsByPath.remove(pathId)
+                    rejectedCredentials.clear()
                     updateNotification("VPN активен · TURN-путь $pathId восстановлен")
                 } catch (error: Throwable) {
                     if (error.message == "TURN_ALLOCATION_QUOTA_486" && callsSession != null) {
                         TurnQuotaRetryPolicy.rememberRejectedFingerprint(
-                            rejectedCredentialsByPath,
-                            pathId,
+                            rejectedCredentials,
                             TurnQuotaRetryPolicy.fingerprint(callsSession!!.turnCredentialsJson),
                         )
                     }
