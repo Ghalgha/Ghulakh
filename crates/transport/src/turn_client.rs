@@ -1518,22 +1518,50 @@ mod path_group_tests {
     }
 
     #[test]
-    fn downlink_reorder_buffer_restores_order_across_bulk_burst_boundary() {
+    fn downlink_reorder_buffer_restores_same_flow_order_across_bulk_burst_boundary() {
         let now = Instant::now();
         let mut buffer = DownlinkReorderBuffer::default();
-        buffer.push(SequencedDataDatagram::new(13, DataDatagram {
-            kind: ghulakh_protocol::IpPacketKind::Ipv4,
-            packet: packet(12013),
-        }), now);
-        for sequence in 0..13u64 {
-            buffer.push(SequencedDataDatagram::new(sequence, DataDatagram {
+        let flow_packet = |marker: u16| {
+            let mut bytes = vec![0u8; 28];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&marker.to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
+            bytes[12..16].copy_from_slice(&[203, 0, 113, 8]);
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 2]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+            DataDatagram {
                 kind: ghulakh_protocol::IpPacketKind::Ipv4,
-                packet: packet(12000 + sequence as u16),
-            }), now);
+                packet: bytes,
+            }
+        };
+        let flow_key = ghulakh_protocol::ip_flow::ip_flow_key(&flow_packet(0).packet)
+            .expect("test packet must identify a UDP flow");
+        for marker in 0..=13u16 {
+            let packet = flow_packet(marker);
+            assert_eq!(
+                ghulakh_protocol::ip_flow::ip_flow_key(&packet.packet),
+                Some(flow_key),
+                "all burst-boundary packets must belong to one UDP flow",
+            );
+        }
+
+        // Model the final packet of the next flowlet arriving before the
+        // earlier packets still in flight on the previous TURN allocation.
+        buffer.push(SequencedDataDatagram::new(13, flow_packet(13)), now);
+        for sequence in 0..13u64 {
+            buffer.push(SequencedDataDatagram::new(sequence, flow_packet(sequence as u16)), now);
         }
         for sequence in 0..14u16 {
             let received = buffer.pop_ready().expect("burst-boundary packet must be ready");
-            assert_eq!(received.packet[20..22], (12000 + sequence).to_be_bytes());
+            assert_eq!(
+                u16::from_be_bytes([received.packet[4], received.packet[5]]),
+                sequence,
+                "one UDP flow must retain packet order across TURN path changes",
+            );
         }
         assert!(buffer.pop_ready().is_none());
     }
