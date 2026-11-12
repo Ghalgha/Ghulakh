@@ -7,7 +7,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    net::{Ipv4Addr, SocketAddr},
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -32,6 +32,12 @@ const CACHE_PER_PEER: usize = 16;
 const SERVER_TUN_MTU: u16 = 1100;
 
 pub type CredentialVerifier = dyn Fn(&[u8]) -> bool + Send + Sync + 'static;
+
+fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
+    let octets = address.octets();
+    let host = (u16::from(octets[2]) << 8) | u16::from(octets[3]);
+    Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
+}
 
 struct PendingHandshake {
     server: TurnHandshakeServer,
@@ -87,6 +93,7 @@ pub struct EstablishedTurnSession {
 
 struct PathGroupLease {
     virtual_ipv4: Ipv4Addr,
+    virtual_ipv6: Ipv6Addr,
     path_count: u16,
     active_paths: HashMap<u16, [u8; 16]>,
 }
@@ -100,6 +107,7 @@ pub struct TurnHandshakeService {
     peer_rates: HashMap<SocketAddr, PeerRate>,
     next_client_host: u32,
     allocated_ips: HashSet<Ipv4Addr>,
+    allocated_ipv6: HashSet<Ipv6Addr>,
     path_groups: HashMap<[u8; 16], PathGroupLease>,
 }
 
@@ -124,6 +132,7 @@ impl TurnHandshakeService {
             peer_rates: HashMap::with_capacity(MAX_RATE_PEERS),
             next_client_host: 2,
             allocated_ips: HashSet::new(),
+            allocated_ipv6: HashSet::new(),
             path_groups: HashMap::new(),
         })
     }
@@ -211,21 +220,23 @@ impl TurnHandshakeService {
                     datagram,
                     |credential| verifier(credential),
                     |path_context| {
-                        let virtual_ipv4 = if let Some(context) = path_context {
+                        let (virtual_ipv4, virtual_ipv6) = if let Some(context) = path_context {
                             reserved_path = Some(context);
-                            let (address, previous) = self.reserve_path_transactional(context, envelope.handshake_id)
+                            let (ipv4, ipv6, previous) = self.reserve_path_transactional(context, envelope.handshake_id)
                                 .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
                             replaced_generation = previous;
-                            address
+                            (ipv4, ipv6)
                         } else {
-                            let address = self.allocate_virtual_ipv4()
+                            let (ipv4, ipv6) = self.allocate_virtual_addresses()
                                 .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
-                            self.allocated_ips.insert(address);
-                            reserved_legacy_ip = Some(address);
-                            address
+                            self.allocated_ips.insert(ipv4);
+                            self.allocated_ipv6.insert(ipv6);
+                            reserved_legacy_ip = Some(ipv4);
+                            (ipv4, ipv6)
                         };
                         let config = TurnSessionConfig {
                             virtual_ipv4,
+                            virtual_ipv6,
                             mtu: SERVER_TUN_MTU,
                         };
                         Ok(config.encode()?.to_vec())
@@ -239,21 +250,24 @@ impl TurnHandshakeService {
                         }
                         if let Some(address) = reserved_legacy_ip {
                             self.allocated_ips.remove(&address);
+                            self.allocated_ipv6.remove(&ipv6_for_virtual_ipv4(address));
                         }
                         return Err(error).context("authenticate client Noise finish");
                     }
                 };
                 // The same configuration was encoded by the authenticated
                 // acknowledgement builder immediately before Noise encrypted it.
-                let virtual_ipv4 = if let Some(context) = path_context {
+                let (virtual_ipv4, virtual_ipv6) = if let Some(context) = path_context {
                     self.path_groups.get(&context.group_id)
-                        .map(|group| group.virtual_ipv4)
+                        .map(|group| (group.virtual_ipv4, group.virtual_ipv6))
                         .context("reserved path group disappeared before acknowledgement")?
                 } else {
-                    reserved_legacy_ip.context("legacy virtual IPv4 reservation missing")?
+                    let ipv4 = reserved_legacy_ip.context("legacy virtual IPv4 reservation missing")?;
+                    (ipv4, ipv6_for_virtual_ipv4(ipv4))
                 };
                 let config = TurnSessionConfig {
                     virtual_ipv4,
+                    virtual_ipv6,
                     mtu: SERVER_TUN_MTU,
                 };
 
@@ -336,7 +350,7 @@ impl TurnHandshakeService {
         &mut self,
         context: TurnPathContext,
         generation: [u8; 16],
-    ) -> Result<(Ipv4Addr, Option<[u8; 16]>)> {
+    ) -> Result<(Ipv4Addr, Ipv6Addr, Option<[u8; 16]>)> {
         context.validate().context("validate authenticated TURN path context")?;
         if let Some(group) = self.path_groups.get_mut(&context.group_id) {
             ensure!(group.path_count == context.path_count, "TURN path group count mismatch");
@@ -346,19 +360,21 @@ impl TurnHandshakeService {
                 "TURN path group is already full"
             );
             let previous = group.active_paths.insert(context.path_id, generation);
-            return Ok((group.virtual_ipv4, previous));
+            return Ok((group.virtual_ipv4, group.virtual_ipv6, previous));
         }
 
-        let virtual_ipv4 = self.allocate_virtual_ipv4()?;
+        let (virtual_ipv4, virtual_ipv6) = self.allocate_virtual_addresses()?;
         self.allocated_ips.insert(virtual_ipv4);
+        self.allocated_ipv6.insert(virtual_ipv6);
         let mut active_paths = HashMap::new();
         active_paths.insert(context.path_id, generation);
         self.path_groups.insert(context.group_id, PathGroupLease {
             virtual_ipv4,
+            virtual_ipv6,
             path_count: context.path_count,
             active_paths,
         });
-        Ok((virtual_ipv4, None))
+        Ok((virtual_ipv4, virtual_ipv6, None))
     }
 
     /// Undo a reservation if gateway registration fails, restoring the displaced
@@ -382,8 +398,10 @@ impl TurnHandshakeService {
             group.active_paths.remove(&context.path_id);
             if group.active_paths.is_empty() {
                 let address = group.virtual_ipv4;
+                let address6 = group.virtual_ipv6;
                 self.path_groups.remove(&context.group_id);
                 self.allocated_ips.remove(&address);
+                self.allocated_ipv6.remove(&address6);
             }
             true
         }
@@ -399,8 +417,10 @@ impl TurnHandshakeService {
         group.active_paths.remove(&context.path_id);
         if group.active_paths.is_empty() {
             let address = group.virtual_ipv4;
+            let address6 = group.virtual_ipv6;
             self.path_groups.remove(&context.group_id);
             self.allocated_ips.remove(&address);
+            self.allocated_ipv6.remove(&address6);
         }
         true
     }
@@ -409,16 +429,21 @@ impl TurnHandshakeService {
         self.rollback_path(context, generation)
     }
 
-    fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
+    fn allocate_virtual_addresses(&mut self) -> Result<(Ipv4Addr, Ipv6Addr)> {
         for _ in 0..65_532 {
             let host = self.next_client_host;
             self.next_client_host = if host >= 65_533 { 2 } else { host + 1 };
-            let address = Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8);
-            if !self.allocated_ips.contains(&address) {
-                return Ok(address);
+            let address4 = Ipv4Addr::new(10, 77, (host >> 8) as u8, host as u8);
+            let address6 = Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host as u16);
+            if !self.allocated_ips.contains(&address4) && !self.allocated_ipv6.contains(&address6) {
+                return Ok((address4, address6));
             }
         }
-        bail!("server virtual IPv4 pool exhausted");
+        bail!("server dual-stack virtual address pool exhausted");
+    }
+
+    fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
+        self.allocate_virtual_addresses().map(|(ipv4, _)| ipv4)
     }
 
     pub fn release_virtual_ipv4(&mut self, address: Ipv4Addr) -> bool {
@@ -427,11 +452,17 @@ impl TurnHandshakeService {
         if self.path_groups.values().any(|group| group.virtual_ipv4 == address) {
             return false;
         }
-        self.allocated_ips.remove(&address)
+        let removed = self.allocated_ips.remove(&address);
+        self.allocated_ipv6.remove(&ipv6_for_virtual_ipv4(address));
+        removed
     }
 
     pub fn allocated_virtual_ipv4_count(&self) -> usize {
         self.allocated_ips.len()
+    }
+
+    pub fn allocated_virtual_ipv6_count(&self) -> usize {
+        self.allocated_ipv6.len()
     }
 
     pub fn active_handshakes(&self) -> usize {
@@ -523,20 +554,23 @@ mod tests {
             path_id: 1,
             ..first
         };
-        let (address_a, previous_a) = service
+        let (address_a, ipv6_a, previous_a) = service
             .reserve_path_transactional(first, [1; 16])
             .unwrap();
-        let (address_b, previous_b) = service
+        let (address_b, ipv6_b, previous_b) = service
             .reserve_path_transactional(second, [2; 16])
             .unwrap();
         assert_eq!(previous_a, None);
         assert_eq!(previous_b, None);
         assert_eq!(address_a, address_b);
+        assert_eq!(ipv6_a, ipv6_b);
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
-        let (replacement_address, displaced) = service
+        assert_eq!(service.allocated_virtual_ipv6_count(), 1);
+        let (replacement_address, replacement_ipv6, displaced) = service
             .reserve_path_transactional(first, [3; 16])
             .unwrap();
         assert_eq!(replacement_address, address_a);
+        assert_eq!(replacement_ipv6, ipv6_a);
         assert_eq!(displaced, Some([1; 16]));
         assert!(!service.release_path(first, [1; 16]));
         assert!(service.release_path(first, [3; 16]));
@@ -558,15 +592,16 @@ mod tests {
         };
         let original_generation = [0x11; 16];
         let replacement_generation = [0x22; 16];
-        let (address, previous) = service
+        let (address, ipv6, previous) = service
             .reserve_path_transactional(context, original_generation)
             .unwrap();
         assert_eq!(previous, None);
 
-        let (replacement_address, displaced) = service
+        let (replacement_address, replacement_ipv6, displaced) = service
             .reserve_path_transactional(context, replacement_generation)
             .unwrap();
         assert_eq!(replacement_address, address);
+        assert_eq!(replacement_ipv6, ipv6);
         assert_eq!(displaced, Some(original_generation));
 
         assert!(service.rollback_path_replacement(
@@ -587,14 +622,17 @@ mod tests {
             path_id: 0,
             path_count: 2,
         };
-        let (address, previous) = service
+        let (address, ipv6, previous) = service
             .reserve_path_transactional(context, [0x31; 16])
             .unwrap();
         assert_eq!(previous, None);
         assert!(!service.release_virtual_ipv4(address));
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 1);
         assert!(service.release_path(context, [0x31; 16]));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 0);
+        assert_eq!(ipv6, ipv6_for_virtual_ipv4(address));
     }
 
     #[test]
@@ -631,11 +669,13 @@ mod tests {
             assert_eq!(established.path_context, Some(context));
             let (keys, config_payload) = client.receive_server_ack_with_payload(&server_ack).unwrap();
             assert_eq!(keys.session_id(), established.frame_keys.session_id());
-            assigned.push(TurnSessionConfig::decode(&config_payload).unwrap().virtual_ipv4);
+            let config = TurnSessionConfig::decode(&config_payload).unwrap();
+            assigned.push((config.virtual_ipv4, config.virtual_ipv6));
         }
 
         assert_eq!(assigned[0], assigned[1]);
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 1);
     }
 
     #[test]
@@ -693,6 +733,7 @@ mod tests {
         let client_config = TurnSessionConfig::decode(&client_config_payload).unwrap();
         assert_eq!(client_config, established.config);
         assert_eq!(client_config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
+        assert_eq!(client_config.virtual_ipv6, Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, 2));
         assert_eq!(client_keys.session_id(), established.frame_keys.session_id());
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
@@ -719,6 +760,7 @@ mod tests {
         assert_eq!(service.active_handshakes(), 1);
         service.prune(now + HANDSHAKE_TTL);
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
+        assert_eq!(service.allocated_virtual_ipv6_count(), 0);
         assert_eq!(service.active_handshakes(), 0);
     }
 
