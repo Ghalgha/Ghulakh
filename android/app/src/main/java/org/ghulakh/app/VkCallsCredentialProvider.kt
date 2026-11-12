@@ -1,6 +1,7 @@
 package org.ghulakh.app
 
 import org.json.JSONObject
+import org.json.JSONArray
 import java.io.ByteArrayOutputStream
 import javax.net.ssl.HttpsURLConnection
 import java.net.URL
@@ -10,9 +11,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 data class VkCallsSession(
     val turnCredentialsJson: String,
-    private val apiUrl: String,
-    private val sessionKey: String,
-    private val conversationId: String,
+    internal val apiUrl: String,
+    internal val sessionKey: String,
+    internal val conversationId: String,
 ) {
     private val finished = AtomicBoolean(false)
 
@@ -25,6 +26,13 @@ data class VkCallsSession(
             )
         }
     }
+
+data class VkCallsCredentialGroup(
+    val turnCredentialsJson: String,
+    val ownerSession: VkCallsSession,
+) {
+    fun finish() = ownerSession.finish()
+}
 
     internal fun finishOnce(action: () -> Unit) {
         if (finished.compareAndSet(false, true)) action()
@@ -148,6 +156,90 @@ object VkCallsCredentialProvider {
             runCatching { finishConversation(apiUrl, sessionKey, conversationId) }
             throw error
         }
+    }
+
+
+    /**
+     * Creates one Calls conversation and obtains a distinct TURN credential set
+     * for each independent allocation through separate anonymous account sessions.
+     */
+    fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
+        require(pathCount in 2..10) { "TURN path count must be between 2 and 10" }
+        val owner = obtain(accessToken)
+        try {
+            val credentials = ArrayList<String>(pathCount)
+            val fingerprints = HashSet<String>()
+            credentials += owner.turnCredentialsJson
+            fingerprints += TurnQuotaRetryPolicy.fingerprint(owner.turnCredentialsJson)
+            repeat(pathCount - 1) {
+                val next = obtainConversationCredentials(accessToken, owner.conversationId)
+                val fingerprint = TurnQuotaRetryPolicy.fingerprint(next)
+                require(fingerprints.add(fingerprint)) {
+                    "VK Calls returned a repeated TURN credential set"
+                }
+                credentials += next
+            }
+            val array = JSONArray()
+            credentials.forEach { array.put(JSONObject(it)) }
+            return VkCallsCredentialGroup(array.toString(), owner)
+        } catch (error: Throwable) {
+            runCatching { owner.finish() }
+            throw error
+        }
+    }
+
+    private fun obtainConversationCredentials(accessToken: String, conversationId: String): String {
+        val deviceId = UUID.randomUUID().toString()
+        val tokenResponse = postForm(
+            "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
+            mapOf("env" to "production", "access_token" to accessToken),
+        )
+        val tokenData = tokenResponse.getJSONObject("response")
+        val callToken = tokenData.getString("token")
+        require(callToken.isNotBlank()) { "VK did not return a Calls token" }
+        val apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
+        val sessionData = JSONObject()
+            .put("auth_token", callToken)
+            .put("version", 3)
+            .put("device_id", deviceId)
+            .put("client_version", "1.0.1")
+            .toString()
+        val login = postForm(
+            apiUrl,
+            mapOf(
+                "session_data" to sessionData,
+                "device_id" to deviceId,
+                "verification_supported" to "true",
+                "verification_supported_v" to "1",
+                "client" to "test",
+                "gen_token" to "true",
+                "method" to "auth.anonymLogin",
+                "format" to "JSON",
+                "application_key" to OK_APPLICATION_KEY,
+            ),
+        )
+        val sessionKey = login.getString("session_key")
+        require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
+        val parameters = postForm(
+            apiUrl,
+            mapOf(
+                "conversationId" to conversationId,
+                "method" to "vchat.getConversationParams",
+                "format" to "JSON",
+                "application_key" to OK_APPLICATION_KEY,
+                "session_key" to sessionKey,
+            ),
+        )
+        checkApiError(parameters)
+        val turnServer = parameters.optJSONObject("turn_server")
+            ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
+            ?: throw IllegalStateException("Calls backend response has no turn_server object")
+        require(turnServer.optString("username").isNotBlank()) { "VK Calls returned an empty TURN username" }
+        require(turnServer.optString("credential").isNotBlank()) { "VK Calls returned an empty TURN credential" }
+        val urls = turnServer.optJSONArray("urls")
+            ?: throw IllegalStateException("VK Calls returned no TURN URLs")
+        require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
+        return JSONObject().put("turn_server", turnServer).toString()
     }
 
     internal fun finishConversation(

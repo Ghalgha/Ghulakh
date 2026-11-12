@@ -230,13 +230,10 @@ fn connect_turn_impl(
     let clients = runtime.block_on(async {
         // Parse every credential set before starting any allocation. A local
         // parse failure must not drop a JoinSet containing live startup tasks.
-        let mut credentials = Vec::with_capacity(usize::from(path_count));
-        for _ in 0..path_count {
-            credentials.push(
-                TurnCredentials::from_vk_response_json(&turn_credentials_json)
-                    .context("parse temporary VK Calls TURN credentials")?,
-            );
-        }
+        let credentials = TurnCredentials::from_vk_response_json_array(
+            &turn_credentials_json,
+            usize::from(path_count),
+        ).context("parse independent VK Calls TURN credential sets")?;
 
         let mut tasks = JoinSet::new();
         for (path_id, (protected_socket, credentials)) in protected_sockets

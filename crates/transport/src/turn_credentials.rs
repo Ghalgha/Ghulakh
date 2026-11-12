@@ -91,6 +91,25 @@ impl TurnCredentials {
         self.endpoints.iter().find(|endpoint| endpoint.is_udp())
     }
 
+    /// Parse a JSON array containing one independent VK Calls credential object per path.
+    pub fn from_vk_response_json_array(
+        input: &str,
+        expected_count: usize,
+    ) -> Result<Vec<Self>, TurnCredentialError> {
+        if input.len() > 512 * 1024 {
+            return Err(TurnCredentialError::ResponseTooLarge);
+        }
+        let root: serde_json::Value =
+            serde_json::from_str(input).map_err(|_| TurnCredentialError::InvalidJson)?;
+        let values = root.as_array().ok_or(TurnCredentialError::InvalidJson)?;
+        if values.len() != expected_count || !(2..=10).contains(&values.len()) {
+            return Err(TurnCredentialError::InvalidCredentialSetCount);
+        }
+        values.iter()
+            .map(|value| Self::from_vk_response_json(&value.to_string()))
+            .collect()
+    }
+
     /// Parse the VK Calls response object containing the turn_server member.
     pub fn from_vk_response_json(input: &str) -> Result<Self, TurnCredentialError> {
         if input.len() > 512 * 1024 {
@@ -167,6 +186,8 @@ pub enum TurnCredentialError {
     InvalidJson,
     #[error("VK Calls response has no turn_server object")]
     MissingTurnServer,
+    #[error("VK Calls credential set count does not match the TURN path count")]
+    InvalidCredentialSetCount,
     #[error("turn_server.username is missing or invalid")]
     MissingUsername,
     #[error("turn_server.credential is missing or invalid")]

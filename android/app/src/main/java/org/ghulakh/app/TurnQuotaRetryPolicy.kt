@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.security.MessageDigest
 import org.json.JSONObject
+import org.json.JSONArray
 
 /**
  * Bounded handling for an authenticated TURN Allocate 486 response.
@@ -29,7 +30,31 @@ internal object TurnQuotaRetryPolicy {
     ): Boolean = fingerprint in rejected
 
     fun fingerprint(credentialsJson: String): String {
-        val root = JSONObject(credentialsJson)
+        val trimmed = credentialsJson.trim()
+        if (trimmed.startsWith("[")) {
+            val array = JSONArray(trimmed)
+            require(array.length() in 2..10) { "TURN credential group size is invalid" }
+            val fingerprints = (0 until array.length()).map { index ->
+                fingerprintSingle(array.getJSONObject(index))
+            }
+            require(fingerprints.distinct().size == fingerprints.size) {
+                "TURN credential group contains repeated credential sets"
+            }
+            val canonical = ByteArrayOutputStream()
+            DataOutputStream(canonical).use { output ->
+                fingerprints.sorted().forEach { value ->
+                    val bytes = value.toByteArray(Charsets.US_ASCII)
+                    output.writeInt(bytes.size)
+                    output.write(bytes)
+                }
+            }
+            return digest(canonical.toByteArray())
+        }
+        return fingerprintSingle(JSONObject(trimmed))
+    }
+
+
+    private fun fingerprintSingle(root: JSONObject): String {
         val turnServer = root.optJSONObject("turn_server") ?: root
         val username = turnServer.getString("username")
         val credential = turnServer.getString("credential")
@@ -41,9 +66,6 @@ internal object TurnQuotaRetryPolicy {
         val endpoints = (0 until urls.length()).map { index ->
             urls.getString(index).also { require(it.isNotBlank()) { "TURN endpoint is empty" } }
         }.distinct().sorted()
-
-        // Hash only credential identity, not JSON formatting or unrelated response metadata.
-        // Length-prefixing makes the canonical byte sequence unambiguous.
         val canonical = ByteArrayOutputStream()
         DataOutputStream(canonical).use { output ->
             (listOf(username, credential) + endpoints).forEach { value ->
@@ -52,9 +74,12 @@ internal object TurnQuotaRetryPolicy {
                 output.write(bytes)
             }
         }
-        val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray())
-        return digest.joinToString("") { byte -> "%02x".format(byte) }
+        return digest(canonical.toByteArray())
     }
+
+    private fun digest(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes)
+            .joinToString("") { byte -> "%02x".format(byte) }
 
     /**
      * [attemptIndex] is zero-based. A credential fingerprint is rejected at most once.

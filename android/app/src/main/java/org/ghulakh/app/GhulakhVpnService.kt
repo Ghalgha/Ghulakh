@@ -62,11 +62,11 @@ class GhulakhVpnService : VpnService() {
             val transport = NativeTransport()
             val rejectedCredentialFingerprints = mutableSetOf<String>()
             var connectAttempt = 0
-            var callsSession: VkCallsSession? = null
+            var callsSession: VkCallsCredentialGroup? = null
             var handle = 0L
             while (true) {
                 if (!running.get()) return
-                val candidate = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
+                val candidate = VkCallsCredentialProvider.obtainGroup(profile.vkAccessToken, DEFAULT_TURN_PATHS)
                 try {
                     val connectedHandle = transport.nativeTurnConnect(
                         this,
@@ -97,7 +97,7 @@ class GhulakhVpnService : VpnService() {
                     Thread.sleep(TurnQuotaRetryPolicy.retryDelayMillis(connectAttempt - 1))
                 }
             }
-            vkSessions.add(checkNotNull(callsSession))
+            vkSessions.add(checkNotNull(callsSession).ownerSession)
             val retained = synchronized(this) {
                 if (running.get()) {
                     nativeTransport = transport
