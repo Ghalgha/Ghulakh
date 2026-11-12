@@ -2328,4 +2328,64 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn forwards_authenticated_ipv6_uplink_and_downlink() {
+        let (gateway, mut tun_rx) =
+            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        let client_ipv6 = ipv6_for_virtual_ipv4(CLIENT_IP);
+
+        gateway.register_session(
+            SESSION,
+            CLIENT_IP,
+            relay_addr,
+            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+        ).await.unwrap();
+
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let ipv6_packet = |source: Ipv6Addr, destination: Ipv6Addr| {
+            let mut bytes = vec![0u8; 40];
+            bytes[0] = 0x60;
+            bytes[6] = 59;
+            bytes[7] = 64;
+            bytes[8..24].copy_from_slice(&source.octets());
+            bytes[24..40].copy_from_slice(&destination.octets());
+            DataDatagram { kind: IpPacketKind::Ipv6, packet: bytes }
+        };
+
+        let uplink = ipv6_packet(client_ipv6, "2001:db8::99".parse().unwrap());
+        let mut client_tx = FrameSealer::new(
+            CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
+        );
+        let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
+        relay.send_to(&protected, gateway_addr).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            uplink,
+        );
+
+        let downlink = ipv6_packet("2001:db8::99".parse().unwrap(), client_ipv6);
+        gateway.send_downlink(&downlink).await.unwrap();
+        let mut buffer = [0u8; 1500];
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        assert_eq!(source, gateway_addr);
+        let mut server_rx = FrameOpener::new(
+            SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient,
+        );
+        let plaintext = server_rx.open(&buffer[..length]).unwrap();
+        let ordered = ghulakh_protocol::ordered_datagram::SequencedDataDatagram::decode(&plaintext).unwrap();
+        assert_eq!(ordered.datagram, downlink);
+        assert_eq!(ordered.sequence, Some(0));
+
+        gateway_task.abort();
+    }
+
 }
