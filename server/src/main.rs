@@ -31,6 +31,7 @@ const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
 const TUN_MTU: u16 = 1100;
 const TUN_QUEUE_CAPACITY: usize = 512;
 const TUN_SERVER_IPV4: &str = "10.77.0.1";
+const TUN_SERVER_IPV6: &str = "fd77:77::1";
 type SessionMap = Arc<RwLock<HashMap<Ipv4Addr, Connection>>>;
 type TunTaskHandles = (
     mpsc::Sender<Vec<u8>>,
@@ -80,10 +81,14 @@ fn start_tun(
     sessions: SessionMap,
     turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,
 ) -> Result<TunTaskHandles> {
+    let mut builder = DeviceBuilder::new()
+        .name(name)
+        .ipv4(TUN_SERVER_IPV4, 16, None);
+    if turn_gateway.is_some() {
+        builder = builder.ipv6(TUN_SERVER_IPV6, 64);
+    }
     let device = Arc::new(
-        DeviceBuilder::new()
-            .name(name)
-            .ipv4(TUN_SERVER_IPV4, 16, None)
+        builder
             .mtu(TUN_MTU)
             .build_async()
             .with_context(|| format!("create TUN interface {name}"))?,
@@ -103,19 +108,29 @@ fn start_tun(
         let mut buffer = vec![0u8; 65_535];
         loop {
             let length = reader.recv(&mut buffer).await.context("read packet from TUN")?;
-            let Some((_, destination)) = ipv4_endpoints(&buffer[..length]) else {
-                continue;
-            };
-            let datagram = DataDatagram {
-                kind: IpPacketKind::Ipv4,
-                packet: buffer[..length].to_vec(),
+            let packet = &buffer[..length];
+            let kind = match packet.first().map(|byte| byte >> 4) {
+                Some(4) => IpPacketKind::Ipv4,
+                Some(6) => IpPacketKind::Ipv6,
+                _ => continue,
             };
             if let Some(gateway) = &turn_gateway {
+                let datagram = DataDatagram {
+                    kind,
+                    packet: packet.to_vec(),
+                };
                 if let Err(error) = gateway.send_downlink(&datagram).await {
                     eprintln!("TURN downlink rejected: {error:#}");
                 }
                 continue;
             }
+            let Some((_, destination)) = ipv4_endpoints(packet) else {
+                continue;
+            };
+            let datagram = DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: packet.to_vec(),
+            };
             let connection = sessions.read().await.get(&destination).cloned();
             let Some(connection) = connection else {
                 continue;
