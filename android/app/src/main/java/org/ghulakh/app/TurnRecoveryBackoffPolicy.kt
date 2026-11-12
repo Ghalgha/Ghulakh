@@ -3,15 +3,17 @@ package org.ghulakh.app
 /**
  * Bounded exponential retry policy for independently recovered TURN paths.
  *
- * The failure count is supplied by the path owner, so a successful path reset
- * does not affect the retry schedule of another path.
+ * A small bounded jitter prevents paths that fail together from repeatedly
+ * requesting fresh credentials and allocations in lockstep.
  */
 internal object TurnRecoveryBackoffPolicy {
     private const val MAX_EXPONENT = 5
-    private const val MAX_DELAY_SECONDS = 30L
+    private const val MAX_DELAY_MILLIS = 30_000L
+    private const val MAX_JITTER_MILLIS = 500L
 
-    fun delaySeconds(failureCount: Int): Long {
+    fun delayMillis(failureCount: Int, jitterMillis: Long = 0L): Long {
         val exponent = failureCount.coerceIn(0, MAX_EXPONENT)
-        return (1L shl exponent).coerceAtMost(MAX_DELAY_SECONDS)
+        val baseDelay = (1_000L shl exponent).coerceAtMost(MAX_DELAY_MILLIS)
+        return baseDelay + jitterMillis.coerceIn(0L, MAX_JITTER_MILLIS)
     }
 }

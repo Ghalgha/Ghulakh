@@ -271,11 +271,12 @@ class GhulakhVpnService : VpnService() {
                     }
                     runCatching { callsSession?.finish() }
                     val count = failures[pathId] ?: 0
-                    val delaySeconds = TurnRecoveryBackoffPolicy.delaySeconds(count)
+                    val jitterMillis = java.util.concurrent.ThreadLocalRandom.current().nextLong(0L, 501L)
+                    val delayMillis = TurnRecoveryBackoffPolicy.delayMillis(count, jitterMillis)
                     failures[pathId] = count + 1
-                    nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delaySeconds * 1_000L
+                    nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delayMillis
                     if (running.get()) {
-                        Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delaySeconds}s", error)
+                        Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delayMillis}ms", error)
                         updateNotification("VPN активен · восстановление TURN-пути $pathId")
                     }
                 }
