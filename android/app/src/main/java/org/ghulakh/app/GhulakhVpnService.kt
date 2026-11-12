@@ -262,13 +262,22 @@ class GhulakhVpnService : VpnService() {
         val rejectedCredentials = linkedSetOf<String>()
         try {
             while (isCurrent(generation) && recoveryToken.get()) {
-                val failedPaths = runCatching { transport.nativeTurnFailedPaths(handle).toList() }
-                    .getOrElse { error ->
-                        if (isCurrent(generation) && recoveryToken.get()) {
-                            Log.w(TAG, "Unable to inspect TURN path health", error)
+                val failedPaths = runCatching {
+                    // The native handle can be closed by stopTunnel(). Keep even
+                    // read-only JNI handle access under the same lock as close().
+                    synchronized(nativeOperationLock) {
+                        if (!isCurrent(generation) || !recoveryToken.get()) {
+                            emptyList()
+                        } else {
+                            transport.nativeTurnFailedPaths(handle).toList()
                         }
-                        emptyList()
                     }
+                }.getOrElse { error ->
+                    if (isCurrent(generation) && recoveryToken.get()) {
+                        Log.w(TAG, "Unable to inspect TURN path health", error)
+                    }
+                    emptyList()
+                }
                 for (pathId in failedPaths) {
                     if (!isCurrent(generation) || !recoveryToken.get()) break
                     val now = SystemClock.elapsedRealtime()
