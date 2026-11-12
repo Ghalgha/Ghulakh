@@ -1,8 +1,8 @@
 package org.ghulakh.app
 
 /**
- * JNI facade for the native protected TURN VPN runtime and temporary legacy
- * QUIC diagnostics. Blocking calls must run on a dedicated worker thread.
+ * JNI facade for the native protected TURN VPN runtime.
+ * Blocking calls must run on a dedicated worker thread.
  */
 class NativeTransport {
     external fun nativeTurnConnect(
@@ -41,29 +41,6 @@ class NativeTransport {
         pathId: Int,
     ): Boolean
 
-    external fun nativeConnect(
-        vpnService: android.net.VpnService?,
-        host: String,
-        port: Int,
-        serverName: String,
-        rootCertificateDer: ByteArray,
-        credential: String,
-    ): Long
-
-    external fun nativeClientIpv4(session: Long): String
-
-    external fun nativeTunnelEnabled(session: Long): Boolean
-
-    external fun nativeForwardingEnabled(session: Long): Boolean
-
-    external fun nativeSendPacket(session: Long, packet: ByteArray): Boolean
-
-    /** Blocks until a validated IPv4/IPv6 packet arrives or the session fails. */
-    external fun nativeReceivePacket(session: Long): ByteArray?
-
-    external fun nativePing(session: Long): Boolean
-
-    external fun nativeClose(session: Long)
 
     companion object {
         init {
