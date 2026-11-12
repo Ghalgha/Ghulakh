@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use ghulakh_protocol::{ordered_datagram::SequencedDataDatagram, DataDatagram};
+use ghulakh_protocol::ordered_datagram::SequencedDataDatagram;
 use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -148,7 +148,7 @@ mod tests {
     use ghulakh_protocol::{
         secure_frame::{FrameDirection, FrameOpener, FrameSealer},
         turn_channel_data::decode_channel_data,
-        IpPacketKind,
+        IpPacketKind, DataDatagram,
     };
     use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
     use tokio::{net::UdpSocket, time::{timeout, Duration}};

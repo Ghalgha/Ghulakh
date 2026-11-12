@@ -111,6 +111,7 @@ pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     path_context: Option<TurnPathContext>,
     uplink: mpsc::Sender<SequencedDataDatagram>,
+    next_uplink_sequence: tokio::sync::Mutex<u64>,
     downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
@@ -329,6 +330,7 @@ impl TurnClientRuntime {
             config,
             path_context,
             uplink,
+            next_uplink_sequence: tokio::sync::Mutex::new(0),
             downlink: tokio::sync::Mutex::new(downlink),
             dataplane_task,
             maintenance_task,
@@ -344,8 +346,15 @@ impl TurnClientRuntime {
         self.path_context
     }
 
-    pub async fn send_packet(&self, packet: SequencedDataDatagram) -> Result<()> {
-        self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
+    pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
+        let mut next_sequence = self.next_uplink_sequence.lock().await;
+        let sequence = *next_sequence;
+        let following_sequence = sequence.checked_add(1)
+            .context("TURN uplink sequence space exhausted")?;
+        self.uplink.send(SequencedDataDatagram::new(sequence, packet)).await
+            .context("TURN VPN uplink queue closed")?;
+        *next_sequence = following_sequence;
+        Ok(())
     }
 
     pub async fn receive_packet(&self) -> Result<SequencedDataDatagram> {
@@ -1450,6 +1459,7 @@ mod path_group_tests {
                     path_count: 2,
                 }),
                 uplink,
+                next_uplink_sequence: tokio::sync::Mutex::new(0),
                 downlink: tokio::sync::Mutex::new(downlink),
                 dataplane_task: pending_dataplane,
                 maintenance_task: pending_maintenance,
