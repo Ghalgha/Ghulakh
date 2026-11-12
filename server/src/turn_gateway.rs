@@ -1899,7 +1899,7 @@ mod tests {
 
         for flow_index in 0..1_000u16 {
             let flow = scheduler_udp_flow(20_000 + flow_index, 1200);
-            let first_at = start + Duration::from_micros(u64::from(flow_index));
+            let first_at = start + Duration::from_micros(u64::from(flow_index) * 1_000);
             let selected = scheduler.select(&active, CLIENT_IP, &flow, first_at);
             *per_path.entry(selected).or_default() += 1;
 
