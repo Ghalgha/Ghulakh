@@ -262,6 +262,7 @@ impl DownlinkScheduler {
         Some(selected)
     }
 
+    #[cfg(test)]
     fn select(
         &mut self,
         active: &[[u8; 8]],
