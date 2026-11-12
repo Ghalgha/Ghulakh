@@ -677,12 +677,12 @@ async fn main() -> Result<()> {
         result = tun_writer_task => {
             result
                 .context("TUN writer task panicked")?
-                .context("TUN writer task failed")??;
+                .context("TUN writer task failed")?;
         }
         result = tun_reader_task => {
             result
                 .context("TUN reader task panicked")?
-                .context("TUN reader task failed")??;
+                .context("TUN reader task failed")?;
         }
     }
     drop(tun_sender);
