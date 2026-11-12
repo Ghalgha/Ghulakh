@@ -56,10 +56,10 @@ This approach avoids embedding account credentials in native networking code, bu
 
 ## Unresolved integration decisions
 
-1. Whether the first Android release should join a user-supplied existing call link or create a dedicated call through an authorized VK account.
-2. Whether the app should use a WebView-based provider or a native authenticated API provider.
+1. Live VK Calls API stability, account permissions and regional/account-specific behavior remain to be validated.
+2. Whether future API changes require a different supported authorization method.
 3. Which TURN URI schemes and transport parameters are actually returned for the target accounts and regions.
 4. Whether the returned credential profile uses standard TURN long-term credentials and which password algorithm is negotiated by the relay.
 5. Credential lifetime, refresh behavior, endpoint rotation and per-account relay quotas.
 
-Until these points are confirmed, the VK Calls provider remains an interface and documented acquisition flow, not a claim of live service compatibility.
+The Android app currently implements the authenticated account flow using a manually provisioned VK access token: `messages.getCallToken`, OK CDN session initialization, conversation creation, and `getConversationParams` for additional credential sets. A shared credential broker rejects repeated TURN credential sets and closes the conversation/session group during teardown. The provider is implemented, not merely an interface; however, live VK API compatibility, account permissions, credential quotas/expiry and relay authentication remain unverified. In-app OAuth/login is not implemented; the access token is entered manually and protected by Android Keystore.
