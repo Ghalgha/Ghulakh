@@ -733,7 +733,7 @@ mod tests {
         let client_config = TurnSessionConfig::decode(&client_config_payload).unwrap();
         assert_eq!(client_config, established.config);
         assert_eq!(client_config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
-        assert_eq!(client_config.virtual_ipv6, Ipv6Addr::new(0xfd77, 0, 0, 0, 0, 0, 0, 2));
+        assert_eq!(client_config.virtual_ipv6, Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, 2));
         assert_eq!(client_keys.session_id(), established.frame_keys.session_id());
 
         let duplicate_finish = service.process(&finish, peer, now).unwrap();
