@@ -235,7 +235,7 @@ class GhulakhVpnService : VpnService() {
             }
         } finally {
             val ownsLifecycle = isCurrent(generation)
-            if (ownsLifecycle) stopTunnel()
+            if (ownsLifecycle) stopTunnel(generation)
             synchronized(credentialGroups) {
                 credentialGroups.forEach { group ->
                     runCatching { group.finish() }
@@ -394,17 +394,24 @@ class GhulakhVpnService : VpnService() {
     }
 
     private fun failSession(generation: Long, message: String, error: Throwable) {
-        if (!isCurrent(generation)) return
+        if (!stopTunnel(generation)) return
         Log.e(TAG, message, error)
         updateNotification("$message: ${error.message ?: "ошибка"}")
-        stopTunnel()
         stopSelf()
     }
 
     @Synchronized
-    private fun stopTunnel() {
+    private fun stopTunnel(expectedGeneration: Long? = null): Boolean {
+        // A stale reader/recovery worker must never tear down a newer VPN run.
+        // The generation check and invalidation are one atomic transition.
+        val invalidated = if (expectedGeneration == null) {
+            lifecycleGeneration.invalidate()
+            true
+        } else {
+            lifecycleGeneration.invalidate(expectedGeneration)
+        }
+        if (!invalidated) return false
         running.set(false)
-        lifecycleGeneration.invalidate()
         val activeWorker = worker
         worker = null
         if (activeWorker != null && activeWorker !== Thread.currentThread()) {
@@ -436,6 +443,7 @@ class GhulakhVpnService : VpnService() {
                 }
             }
         }
+        return true
     }
 
     override fun onRevoke() {
