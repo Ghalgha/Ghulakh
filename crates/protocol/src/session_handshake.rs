@@ -9,7 +9,7 @@ use hkdf::Hkdf;
 use sha2::Sha256;
 use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
 use zeroize::{Zeroize, Zeroizing};
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::{
     secure_frame::{FrameDirection, FrameOpener, FrameSealer},
@@ -28,15 +28,18 @@ const MAX_CREDENTIAL_SIZE: usize = crate::MAX_CREDENTIAL_LEN;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnSessionConfig {
     pub virtual_ipv4: Ipv4Addr,
+    pub virtual_ipv6: Ipv6Addr,
     pub mtu: u16,
 }
 
 impl TurnSessionConfig {
-    pub const ENCODED_LEN: usize = 6;
+    pub const ENCODED_LEN: usize = 22;
 
     pub fn encode(self) -> Result<[u8; Self::ENCODED_LEN], SessionHandshakeError> {
         if self.virtual_ipv4.is_unspecified()
             || self.virtual_ipv4.is_multicast()
+            || self.virtual_ipv6.is_unspecified()
+            || self.virtual_ipv6.is_multicast()
             || self.mtu < 576
             || self.mtu > 1500
         {
@@ -44,7 +47,8 @@ impl TurnSessionConfig {
         }
         let mut encoded = [0u8; Self::ENCODED_LEN];
         encoded[..4].copy_from_slice(&self.virtual_ipv4.octets());
-        encoded[4..].copy_from_slice(&self.mtu.to_be_bytes());
+        encoded[4..20].copy_from_slice(&self.virtual_ipv6.octets());
+        encoded[20..].copy_from_slice(&self.mtu.to_be_bytes());
         Ok(encoded)
     }
 
@@ -54,7 +58,8 @@ impl TurnSessionConfig {
         }
         let config = Self {
             virtual_ipv4: Ipv4Addr::new(encoded[0], encoded[1], encoded[2], encoded[3]),
-            mtu: u16::from_be_bytes([encoded[4], encoded[5]]),
+            virtual_ipv6: Ipv6Addr::from(<[u8; 16]>::try_from(&encoded[4..20]).map_err(|_| SessionHandshakeError::InvalidSessionConfig)?),
+            mtu: u16::from_be_bytes([encoded[20], encoded[21]]),
         };
         config.encode()?;
         Ok(config)
