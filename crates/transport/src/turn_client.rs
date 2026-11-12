@@ -596,12 +596,13 @@ impl TurnClientPathGroup {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.closed_signal.send_replace(true);
         }
-        if let Ok(tasks) = self.forwarders.lock() {
-            for task in tasks.iter() { task.abort(); }
-        }
-        if let Ok(paths) = self.paths.read() {
-            for path in paths.iter() { path.close(); }
-        }
+        // Keep the same lock order as replace_path(): path registry before
+        // forwarder registry. Reversing these locks can deadlock shutdown
+        // against a concurrent path replacement.
+        let paths = self.paths.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let forwarders = self.forwarders.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for task in forwarders.iter() { task.abort(); }
+        for path in paths.iter() { path.close(); }
     }
 }
 
@@ -1101,6 +1102,53 @@ mod path_group_tests {
         let (replacement, _replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
         assert!(group.replace_path(replacement).is_err());
         drop(downlink_a);
+    }
+
+    #[tokio::test]
+    async fn concurrent_path_replacement_and_close_complete_without_deadlock() {
+        for attempt in 0..16u8 {
+            let group_id = [attempt; 16];
+            let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
+            let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+            let group = Arc::new(TurnClientPathGroup::new(vec![path_a, path_b]).unwrap());
+            drop(downlink_b);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while group.failed_path_ids() != vec![1] {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+
+            let (replacement, _replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let runtime = tokio::runtime::Handle::current();
+            let replace_group = Arc::clone(&group);
+            let replace_barrier = Arc::clone(&barrier);
+            let replace_runtime = runtime.clone();
+            let replace_thread = std::thread::spawn(move || {
+                let _entered = replace_runtime.enter();
+                replace_barrier.wait();
+                replace_group.replace_path(replacement)
+            });
+            let close_group = Arc::clone(&group);
+            let close_barrier = Arc::clone(&barrier);
+            let close_thread = std::thread::spawn(move || {
+                close_barrier.wait();
+                close_group.close();
+            });
+            barrier.wait();
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while (!replace_thread.is_finished() || !close_thread.is_finished())
+                && Instant::now() < deadline
+            {
+                tokio::task::yield_now().await;
+            }
+            assert!(replace_thread.is_finished(), "path replacement deadlocked with close()");
+            assert!(close_thread.is_finished(), "close() deadlocked with path replacement");
+            let _ = replace_thread.join().unwrap();
+            close_thread.join().unwrap();
+            assert!(group.is_closed());
+        }
     }
 
     #[tokio::test]
