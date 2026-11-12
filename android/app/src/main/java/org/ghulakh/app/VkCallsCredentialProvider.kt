@@ -185,7 +185,7 @@ object VkCallsCredentialProvider {
      * Creates one Calls conversation and obtains a distinct TURN credential set
      * for each independent allocation through separate anonymous account sessions.
      */
-    fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
+    internal fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
         require(pathCount in 2..10) { "TURN path count must be between 2 and 10" }
         val owner = obtain(accessToken)
         try {
