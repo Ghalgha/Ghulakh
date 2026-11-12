@@ -110,26 +110,18 @@ impl DownlinkScheduler {
         };
         let key = (client_ipv4, flow);
         if !self.flows.contains_key(&key) && self.flows.len() >= FLOW_TABLE_MAX {
-            // At capacity, reclaim only entries that have already exceeded the
-            // idle TTL. Never evict a recently active flow merely to admit churn.
-            if let Some(expired) = self.flows.iter()
-                .filter(|(_, state)| now.saturating_duration_since(state.last_seen) >= FLOW_IDLE_TTL)
-                .min_by_key(|(_, state)| state.last_seen)
-                .map(|(key, _)| *key)
-            {
-                self.flows.remove(&expired);
-            } else {
-                // Keep existing flow affinity intact under sustained high
-                // cardinality. Untracked overflow flows use a deterministic
-                // packet-flow hash while the active path set remains unchanged.
-                let hash = ghulakh_protocol::ip_flow::flow_hash(packet);
-                let id = active[(hash as usize) % active.len()];
-                self.refill(id, now);
-                if let Some(tokens) = self.tokens.get_mut(&id) {
-                    *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
-                }
-                return id;
+            // Expired entries are reclaimed by the amortized periodic sweep
+            // above. Avoid scanning the entire table on every overflow packet.
+            // Preserve all active affinities; untracked overflow flows use a
+            // deterministic packet-flow hash until a sweep frees capacity.
+            let hash = ghulakh_protocol::ip_flow::flow_hash(packet);
+            let id = (hash % active.len() as u64) as usize;
+            let id = active[id];
+            self.refill(id, now);
+            if let Some(tokens) = self.tokens.get_mut(&id) {
+                *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
             }
+            return id;
         }
         // Keep every valid flow on one TURN allocation for its lifetime.
         // Distinct flows are distributed across allocations; moving packets
@@ -1891,6 +1883,7 @@ mod tests {
         }
         let expired_key = (CLIENT_IP, ghulakh_protocol::ip_flow::ipv4_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
         scheduler.flows.get_mut(&expired_key).unwrap().last_seen = start;
+        scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
         let new_flow = scheduler_udp_flow(30_001, 1200);
         scheduler.select(&active, CLIENT_IP, &new_flow, start + FLOW_IDLE_TTL + Duration::from_secs(1));
 
