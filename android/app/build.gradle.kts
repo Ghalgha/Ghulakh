@@ -5,6 +5,8 @@ plugins {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    // Use a real JSON implementation in local JVM tests instead of Android SDK stub methods.
+    testImplementation("org.json:json:20240303")
 }
 
 android {
