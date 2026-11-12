@@ -5,6 +5,7 @@ import org.json.JSONArray
 import java.io.ByteArrayOutputStream
 import javax.net.ssl.HttpsURLConnection
 import java.net.URL
+import java.io.IOException
 import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,7 +58,7 @@ object VkCallsCredentialProvider {
         require(accessToken.length <= 16_384) { "VK access token is too long" }
 
         val deviceId = UUID.randomUUID().toString()
-        val tokenResponse = postForm(
+        val tokenResponse = postFormWithRetry(
             "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
             mapOf(
                 "env" to "production",
@@ -75,7 +76,7 @@ object VkCallsCredentialProvider {
             .put("device_id", deviceId)
             .put("client_version", "1.0.1")
             .toString()
-        val login = postForm(
+        val login = postFormWithRetry(
             apiUrl,
             mapOf(
                 "session_data" to sessionData,
@@ -122,7 +123,7 @@ object VkCallsCredentialProvider {
                 "Calls backend did not return a join link"
             }
 
-            val parameters = postForm(
+            val parameters = postFormWithRetry(
                 apiUrl,
                 mapOf(
                     "conversationId" to conversationId,
@@ -190,7 +191,7 @@ object VkCallsCredentialProvider {
 
     private fun obtainConversationCredentials(accessToken: String, conversationId: String): String {
         val deviceId = UUID.randomUUID().toString()
-        val tokenResponse = postForm(
+        val tokenResponse = postFormWithRetry(
             "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
             mapOf("env" to "production", "access_token" to accessToken),
         )
@@ -220,7 +221,7 @@ object VkCallsCredentialProvider {
         )
         val sessionKey = login.getString("session_key")
         require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
-        val parameters = postForm(
+        val parameters = postFormWithRetry(
             apiUrl,
             mapOf(
                 "conversationId" to conversationId,
@@ -278,6 +279,27 @@ object VkCallsCredentialProvider {
         return URL(url, "/fb.do").toString()
     }
 
+    private fun postFormWithRetry(endpoint: String, fields: Map<String, String>): JSONObject {
+        var lastError: IOException? = null
+        repeat(MAX_TRANSIENT_ATTEMPTS) { attempt ->
+            try {
+                return postForm(endpoint, fields)
+            } catch (error: IOException) {
+                if (!VkCallsRetryPolicy.isRetryable(error)) throw error
+                lastError = error
+                if (attempt + 1 < MAX_TRANSIENT_ATTEMPTS) {
+                    try {
+                        Thread.sleep(VkCallsRetryPolicy.delayMillis(attempt))
+                    } catch (interrupted: InterruptedException) {
+                        Thread.currentThread().interrupt()
+                        throw IOException("VK Calls request retry interrupted", interrupted)
+                    }
+                }
+            }
+        }
+        throw lastError ?: IOException("VK Calls request failed without a response")
+    }
+
     private fun postForm(endpoint: String, fields: Map<String, String>): JSONObject {
         val url = URL(endpoint)
         require(url.protocol == "https") { "VK Calls API endpoint must use HTTPS" }
@@ -311,7 +333,9 @@ object VkCallsCredentialProvider {
                 }
                 output.toByteArray()
             } ?: ByteArray(0)
-            require(status in 200..299) { "VK Calls HTTP request failed with status $status" }
+            if (status !in 200..299) {
+                throw VkCallsHttpException(status)
+            }
             val json = JSONObject(String(bytes, Charsets.UTF_8))
             checkApiError(json)
             return json
@@ -335,4 +359,20 @@ object VkCallsCredentialProvider {
 
     private fun encode(value: String): String =
         URLEncoder.encode(value, Charsets.UTF_8.name())
+
+    private const val MAX_TRANSIENT_ATTEMPTS = 3
+}
+
+internal class VkCallsHttpException(val statusCode: Int) :
+    IOException("VK Calls HTTP request failed with status $statusCode")
+
+internal object VkCallsRetryPolicy {
+    fun isRetryable(error: IOException): Boolean =
+        error !is VkCallsHttpException ||
+            error.statusCode == 408 ||
+            error.statusCode == 429 ||
+            error.statusCode in 500..599
+
+    fun delayMillis(attemptIndex: Int): Long =
+        250L * (attemptIndex.coerceIn(0, 1) + 1)
 }
