@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 
 use crate::stun::{
     decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-    ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
-    ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
+    ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
+    ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
     METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
 };
 
@@ -63,17 +63,25 @@ fn attr(kind: u16, value: Vec<u8>) -> StunAttribute {
     StunAttribute { kind, value }
 }
 
-/// Construct the mandatory UDP Allocate request. Authentication attributes and
-/// MESSAGE-INTEGRITY are added by the selected TURN authentication provider.
-pub fn allocate_request(transaction_id: [u8; 12]) -> StunMessage {
+/// Construct a UDP Allocate request for the requested relayed-address family.
+/// Authentication attributes and MESSAGE-INTEGRITY are added by the TURN provider.
+pub fn allocate_request_for_family(
+    transaction_id: [u8; 12],
+    ipv4: bool,
+) -> StunMessage {
     request(
         METHOD_ALLOCATE,
         transaction_id,
-        vec![attr(
-            ATTR_REQUESTED_TRANSPORT,
-            vec![UDP_PROTOCOL_NUMBER, 0, 0, 0],
-        )],
+        vec![
+            attr(ATTR_REQUESTED_TRANSPORT, vec![UDP_PROTOCOL_NUMBER, 0, 0, 0]),
+            attr(ATTR_REQUESTED_ADDRESS_FAMILY, vec![if ipv4 { 1 } else { 2 }, 0, 0, 0]),
+        ],
     )
+}
+
+/// Construct the default IPv4 UDP Allocate request.
+pub fn allocate_request(transaction_id: [u8; 12]) -> StunMessage {
+    allocate_request_for_family(transaction_id, true)
 }
 
 /// Construct a Refresh request. A lifetime of zero requests allocation deletion.
@@ -190,6 +198,9 @@ mod tests {
         assert_eq!(message.method, METHOD_ALLOCATE);
         assert_eq!(message.class, StunClass::Request);
         assert_eq!(message.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+        assert_eq!(message.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
+        let ipv6 = allocate_request_for_family(id(), false);
+        assert_eq!(ipv6.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[2, 0, 0, 0][..]));
     }
 
     #[test]

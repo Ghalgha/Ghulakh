@@ -7,7 +7,7 @@ use ghulakh_protocol::{
     validate_envelope, validate_message, ControlEnvelope, ControlMessage, DataDatagram,
     IpPacketKind, MAX_CONTROL_BODY, MAX_DATAGRAM_SIZE, PROTOCOL_VERSION,
 };
-use quinn::{crypto::rustls::QuicServerConfig, Connection, Endpoint};
+use quinn::{crypto::rustls::QuicServerConfig, Connection};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
@@ -24,23 +24,34 @@ use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, RwLock};
 use tun_rs::DeviceBuilder;
 
+#[allow(dead_code)]
 const ALPN: &[u8] = b"ghulakh/1";
+#[allow(dead_code)]
 const DATAGRAM_RECEIVE_BUDGET: usize = MAX_DATAGRAM_SIZE * 32;
 const TUN_MTU: u16 = 1100;
 const TUN_QUEUE_CAPACITY: usize = 512;
 const TUN_SERVER_IPV4: &str = "10.77.0.1";
+const TUN_SERVER_IPV6: &str = "fd77:77::1";
 type SessionMap = Arc<RwLock<HashMap<Ipv4Addr, Connection>>>;
+type TunTaskHandles = (
+    mpsc::Sender<Vec<u8>>,
+    tokio::task::JoinHandle<Result<()>>,
+    tokio::task::JoinHandle<Result<()>>,
+);
 
+#[allow(dead_code)]
 #[derive(Default)]
 struct DatagramMetrics {
     accepted: std::sync::atomic::AtomicU64,
     rejected: std::sync::atomic::AtomicU64,
 }
 
+#[allow(dead_code)]
 struct IpAllocator {
     next_host: std::sync::atomic::AtomicU32,
 }
 
+#[allow(dead_code)]
 impl IpAllocator {
     fn new() -> Self {
         Self {
@@ -69,11 +80,15 @@ fn start_tun(
     name: &str,
     sessions: SessionMap,
     turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,
-) -> Result<mpsc::Sender<Vec<u8>>> {
+) -> Result<TunTaskHandles> {
+    let mut builder = DeviceBuilder::new()
+        .name(name)
+        .ipv4(TUN_SERVER_IPV4, 16, None);
+    if turn_gateway.is_some() {
+        builder = builder.ipv6(TUN_SERVER_IPV6, 64);
+    }
     let device = Arc::new(
-        DeviceBuilder::new()
-            .name(name)
-            .ipv4(TUN_SERVER_IPV4, 16, None)
+        builder
             .mtu(TUN_MTU)
             .build_async()
             .with_context(|| format!("create TUN interface {name}"))?,
@@ -81,39 +96,41 @@ fn start_tun(
     let (packet_sender, mut packet_receiver) = mpsc::channel::<Vec<u8>>(TUN_QUEUE_CAPACITY);
 
     let writer = Arc::clone(&device);
-    let _tun_writer_task = tokio::spawn(async move {
+    let tun_writer_task = tokio::spawn(async move {
         while let Some(packet) = packet_receiver.recv().await {
-            if let Err(error) = writer.send(&packet).await {
-                eprintln!("TUN write failed: {error}");
-                break;
-            }
+            writer.send(&packet).await.context("write packet to TUN")?;
         }
+        bail!("TUN packet channel closed unexpectedly")
     });
 
     let reader = Arc::clone(&device);
-    let _tun_reader_task = tokio::spawn(async move {
+    let tun_reader_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let length = match reader.recv(&mut buffer).await {
-                Ok(length) => length,
-                Err(error) => {
-                    eprintln!("TUN read failed: {error}");
-                    break;
-                }
-            };
-            let Some((_, destination)) = ipv4_endpoints(&buffer[..length]) else {
-                continue;
-            };
-            let datagram = DataDatagram {
-                kind: IpPacketKind::Ipv4,
-                packet: buffer[..length].to_vec(),
+            let length = reader.recv(&mut buffer).await.context("read packet from TUN")?;
+            let packet = &buffer[..length];
+            let kind = match packet.first().map(|byte| byte >> 4) {
+                Some(4) => IpPacketKind::Ipv4,
+                Some(6) => IpPacketKind::Ipv6,
+                _ => continue,
             };
             if let Some(gateway) = &turn_gateway {
+                let datagram = DataDatagram {
+                    kind,
+                    packet: packet.to_vec(),
+                };
                 if let Err(error) = gateway.send_downlink(&datagram).await {
                     eprintln!("TURN downlink rejected: {error:#}");
                 }
                 continue;
             }
+            let Some((_, destination)) = ipv4_endpoints(packet) else {
+                continue;
+            };
+            let datagram = DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: packet.to_vec(),
+            };
             let connection = sessions.read().await.get(&destination).cloned();
             let Some(connection) = connection else {
                 continue;
@@ -130,9 +147,10 @@ fn start_tun(
         }
     });
 
-    Ok(packet_sender)
+    Ok((packet_sender, tun_writer_task, tun_reader_task))
 }
 
+#[allow(dead_code)]
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
     let mut cert_reader = BufReader::new(
         File::open(cert_path)
@@ -201,12 +219,14 @@ fn credential_matches(candidate: &str, expected_hashes: &[[u8; 32]]) -> bool {
     })
 }
 
+#[allow(dead_code)]
 fn new_session_id() -> String {
     let mut bytes = [0u8; 16];
     OsRng.fill_bytes(&mut bytes);
     hex::encode(bytes)
 }
 
+#[allow(dead_code)]
 fn request_id(message: &ControlMessage) -> &str {
     match message {
         ControlMessage::ClientHello { request_id, .. }
@@ -220,6 +240,7 @@ fn request_id(message: &ControlMessage) -> &str {
 // Parameters are the per-session control state; grouping them would obscure ownership
 // across the spawned stream task.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_control_stream(
     connection: Connection,
     mut send: quinn::SendStream,
@@ -335,6 +356,7 @@ async fn handle_control_stream(
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum DatagramDisposition {
     Unauthenticated,
     Invalid,
@@ -344,6 +366,7 @@ enum DatagramDisposition {
     Accepted(Vec<u8>),
 }
 
+#[allow(dead_code)]
 fn destination_allowed(address: Ipv4Addr) -> bool {
     let octets = address.octets();
     let in_subnet = |a: u8, b: u8, c: u8, mask: u8| {
@@ -377,6 +400,7 @@ fn destination_allowed(address: Ipv4Addr) -> bool {
         && !in_subnet(203, 0, 113, 24)
 }
 
+#[allow(dead_code)]
 fn inspect_datagram(
     bytes: &[u8],
     authenticated: bool,
@@ -405,6 +429,7 @@ fn inspect_datagram(
 
 // The connection task owns these independent runtime resources for its full lifetime.
 #[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
 async fn handle_connection(
     connection: Connection,
     credential_hashes: Arc<Vec<[u8; 32]>>,
@@ -560,22 +585,7 @@ async fn main() -> Result<()> {
         .context("set GHULAKH_CREDENTIAL_HASHES to a file of SHA-256 credential digests")?;
     let credential_hashes = Arc::new(load_credential_hashes(&credential_path)?);
 
-    let quic_enabled = env::var("GHULAKH_QUIC_ENABLED")
-        .unwrap_or_else(|_| "false".to_string())
-        .eq_ignore_ascii_case("true");
-    let quic_bind = if quic_enabled {
-        Some(
-            env::var("GHULAKH_QUIC_BIND")
-                .unwrap_or_else(|_| "0.0.0.0:4433".to_string())
-                .parse::<SocketAddr>()
-                .context("invalid GHULAKH_QUIC_BIND address")?,
-        )
-    } else {
-        None
-    };
-
     let sessions: SessionMap = Arc::new(RwLock::new(HashMap::new()));
-    let ip_allocator = Arc::new(IpAllocator::new());
     let tun_enabled = env::var("GHULAKH_TUN_ENABLED")
         .unwrap_or_else(|_| "false".to_string())
         .eq_ignore_ascii_case("true");
@@ -584,7 +594,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| "false".to_string())
             .eq_ignore_ascii_case("true");
 
-    let turn_gateway_setup = if let Ok(gateway_bind) = env::var("GHULAKH_TURN_GATEWAY_BIND") {
+    let mut turn_gateway_setup = if let Ok(gateway_bind) = env::var("GHULAKH_TURN_GATEWAY_BIND") {
         anyhow::ensure!(
             tun_enabled && forwarding_enabled,
             "TURN gateway requires GHULAKH_TUN_ENABLED=true and GHULAKH_FORWARDING_ENABLED=true"
@@ -616,20 +626,16 @@ async fn main() -> Result<()> {
             .context("bind server TURN gateway")?;
         gateway.install_handshake_service(service).await?;
         let gateway_task = Arc::clone(&gateway);
-        let _turn_gateway_task = tokio::spawn(async move {
-            if let Err(error) = gateway_task.run().await {
-                eprintln!("TURN gateway stopped: {error:#}");
-            }
-        });
+        let turn_gateway_task = tokio::spawn(async move { gateway_task.run().await });
         eprintln!("TURN gateway listening on {}", gateway.local_addr()?);
-        Some((gateway, receiver))
+        Some((gateway, Some(receiver), turn_gateway_task))
     } else {
         None
     };
 
     anyhow::ensure!(
-        quic_enabled || turn_gateway_setup.is_some(),
-        "no transport enabled: configure TURN gateway or explicitly enable legacy QUIC"
+        turn_gateway_setup.is_some(),
+        "TURN gateway is required; no alternative transport is enabled"
     );
 
     if turn_gateway_setup.is_some() {
@@ -639,84 +645,69 @@ async fn main() -> Result<()> {
             ip_forward.trim() == "1",
             "Linux IPv4 forwarding is disabled; set net.ipv4.ip_forward=1"
         );
+        let ipv6_forward = fs::read_to_string("/proc/sys/net/ipv6/conf/all/forwarding")
+            .context("read Linux IPv6 forwarding state")?;
+        anyhow::ensure!(
+            ipv6_forward.trim() == "1",
+            "Linux IPv6 forwarding is disabled; set net.ipv6.conf.all.forwarding=1"
+        );
     }
 
-    let tun_sender = if tun_enabled {
+    let mut turn_ingress_task = None;
+    let (tun_sender, tun_writer_task, tun_reader_task) = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
-        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _)| Arc::clone(gateway));
-        let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
-        if let Some((_, mut ingress)) = turn_gateway_setup {
+        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
+        let (sender, writer_task, reader_task) =
+            start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
+        if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
+            let mut ingress = ingress.take().expect("TURN ingress receiver is available during startup");
             let tun_ingress_sender = sender.clone();
-            let _turn_ingress_task = tokio::spawn(async move {
+            turn_ingress_task = Some(tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
-                    if tun_ingress_sender.send(packet.packet).await.is_err() {
-                        break;
-                    }
+                    tun_ingress_sender
+                        .send(packet.packet)
+                        .await
+                        .context("forward TURN ingress packet to TUN")?;
                 }
-            });
+                anyhow::bail!("TURN ingress channel closed unexpectedly");
+            }));
         }
         eprintln!(
-            "TUN interface {} is active at {}/16 with MTU {}",
-            name, TUN_SERVER_IPV4, TUN_MTU
+            "Dual-stack TUN interface {} is active at {}/16 and {}/64 with MTU {}",
+            name, TUN_SERVER_IPV4, TUN_SERVER_IPV6, TUN_MTU
         );
-        Some(sender)
+        (sender, writer_task, reader_task)
     } else {
-        eprintln!("TUN forwarding is disabled; authenticated packets are validated and dropped");
-        None
+        bail!("TUN is required when the TURN gateway is enabled");
     };
 
-    if quic_enabled {
-        let cert_path = env::var("GHULAKH_TLS_CERT")
-            .context("set GHULAKH_TLS_CERT when GHULAKH_QUIC_ENABLED=true")?;
-        let key_path = env::var("GHULAKH_TLS_KEY")
-            .context("set GHULAKH_TLS_KEY when GHULAKH_QUIC_ENABLED=true")?;
-        let bind = quic_bind.context("QUIC bind address is missing")?;
-        let server_config = load_server_config(&cert_path, &key_path)?;
-        let endpoint = Endpoint::server(server_config, bind)?;
-
-        eprintln!(
-            "Legacy QUIC endpoint listening on {}",
-            endpoint.local_addr()?
-        );
-        let connection_limit = Arc::new(tokio::sync::Semaphore::new(1024));
-        while let Some(connecting) = endpoint.accept().await {
-            let permit = Arc::clone(&connection_limit)
-                .acquire_owned()
-                .await
-                .context("connection limit semaphore closed")?;
-            let hashes = Arc::clone(&credential_hashes);
-            let metrics = Arc::new(DatagramMetrics::default());
-            let sender = tun_sender.clone();
-            let session_map = Arc::clone(&sessions);
-            let allocator = Arc::clone(&ip_allocator);
-            let _connection_task = tokio::spawn(async move {
-                let _permit = permit;
-                match connecting.await {
-                    Ok(connection) => {
-                        if let Err(error) = handle_connection(
-                            connection,
-                            hashes,
-                            metrics,
-                            sender,
-                            session_map,
-                            allocator,
-                            tun_enabled,
-                            forwarding_enabled,
-                        )
-                        .await
-                        {
-                            eprintln!("connection closed: {error:#}");
-                        }
-                    }
-                    Err(error) => eprintln!("QUIC handshake failed: {error}"),
-                }
-            });
+    let (_, _, turn_gateway_task) = turn_gateway_setup
+        .expect("TURN gateway is required by the startup guard");
+    let turn_ingress_task = turn_ingress_task
+        .expect("TURN ingress task is required when the gateway is enabled");
+    tokio::select! {
+        result = turn_gateway_task => {
+            result
+                .context("TURN gateway task panicked")?
+                .context("TURN gateway task failed")?;
         }
-        bail!("QUIC endpoint stopped accepting connections")
-    } else {
-        eprintln!("Legacy QUIC runtime disabled; VK Calls TURN is the only active transport");
-        std::future::pending::<()>().await;
+        result = turn_ingress_task => {
+            result
+                .context("TURN ingress task panicked")?
+                .context("TURN ingress task failed")?;
+        }
+        result = tun_writer_task => {
+            result
+                .context("TUN writer task panicked")?
+                .context("TUN writer task failed")?;
+        }
+        result = tun_reader_task => {
+            result
+                .context("TUN reader task panicked")?
+                .context("TUN reader task failed")?;
+        }
     }
+    drop(tun_sender);
     Ok(())
 }
 
@@ -818,6 +809,7 @@ mod tests {
     #[tokio::test]
     async fn native_client_authenticates_and_sends_quic_datagram() {
         use ghulakh_transport::{ClientOptions, QuicClient};
+        use quinn::Endpoint;
 
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let directory = tempfile::tempdir().unwrap();

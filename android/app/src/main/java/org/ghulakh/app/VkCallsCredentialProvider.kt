@@ -15,12 +15,13 @@ data class VkCallsSession(
     internal val apiUrl: String,
     internal val sessionKey: String,
     internal val conversationId: String,
+    private val finishAction: (() -> Unit)? = null,
 ) {
     private val finished = AtomicBoolean(false)
 
     fun finish() {
         finishOnce {
-            VkCallsCredentialProvider.finishConversation(
+            finishAction?.invoke() ?: VkCallsCredentialProvider.finishConversation(
                 apiUrl,
                 sessionKey,
                 conversationId,
@@ -33,11 +34,15 @@ data class VkCallsSession(
     }
 }
 
-data class VkCallsCredentialGroup(
+internal data class VkCallsCredentialGroup(
     val turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
+    internal val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
 ) {
-    fun finish() = ownerSession.finish()
+    fun finish() {
+        credentialBroker.finish()
+        ownerSession.finish()
+    }
 }
 
 /**
@@ -160,36 +165,73 @@ object VkCallsCredentialProvider {
     }
 
 
+    internal class CredentialBroker(
+        private val accessToken: String,
+        private val conversationId: String,
+        initialCredentialsJson: String,
+        private val sessionFetcher: (() -> VkCallsSession)? = null,
+    ) {
+        private val lock = Any()
+        private val issuedFingerprints = mutableSetOf(
+            TurnQuotaRetryPolicy.fingerprint(initialCredentialsJson),
+        )
+        private val sessions = mutableListOf<VkCallsSession>()
+        private var finished = false
+
+        fun obtainCredentials(): String {
+            val session = sessionFetcher?.invoke()
+                ?: VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
+            try {
+                val fingerprint = TurnQuotaRetryPolicy.fingerprint(session.turnCredentialsJson)
+                synchronized(lock) {
+                    check(!finished) { "VK Calls credential broker is already finished" }
+                    require(issuedFingerprints.add(fingerprint)) {
+                        "VK Calls returned a repeated TURN credential set"
+                    }
+                    sessions.add(session)
+                }
+                return session.turnCredentialsJson
+            } catch (error: Throwable) {
+                runCatching { session.finish() }
+                throw error
+            }
+        }
+
+        fun finish() {
+            val pending = synchronized(lock) {
+                if (finished) return
+                finished = true
+                sessions.toList().also { sessions.clear() }
+            }
+            pending.forEach { session ->
+                runCatching { session.finish() }
+            }
+        }
+    }
+
     /**
      * Creates one Calls conversation and obtains a distinct TURN credential set
      * for each independent allocation through separate anonymous account sessions.
      */
-    fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
+    internal fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
         require(pathCount in 2..10) { "TURN path count must be between 2 and 10" }
         val owner = obtain(accessToken)
+        val broker = CredentialBroker(accessToken, owner.conversationId, owner.turnCredentialsJson)
         try {
             val credentials = ArrayList<String>(pathCount)
-            val fingerprints = HashSet<String>()
             credentials += owner.turnCredentialsJson
-            fingerprints += TurnQuotaRetryPolicy.fingerprint(owner.turnCredentialsJson)
-            repeat(pathCount - 1) {
-                val next = obtainConversationCredentials(accessToken, owner.conversationId)
-                val fingerprint = TurnQuotaRetryPolicy.fingerprint(next)
-                require(fingerprints.add(fingerprint)) {
-                    "VK Calls returned a repeated TURN credential set"
-                }
-                credentials += next
-            }
+            repeat(pathCount - 1) { credentials += broker.obtainCredentials() }
             val array = JSONArray()
             credentials.forEach { array.put(JSONObject(it)) }
-            return VkCallsCredentialGroup(array.toString(), owner)
+            return VkCallsCredentialGroup(array.toString(), owner, broker)
         } catch (error: Throwable) {
+            broker.finish()
             runCatching { owner.finish() }
             throw error
         }
     }
 
-    private fun obtainConversationCredentials(accessToken: String, conversationId: String): String {
+    private fun obtainConversationSession(accessToken: String, conversationId: String): VkCallsSession {
         val deviceId = UUID.randomUUID().toString()
         val tokenResponse = postFormWithRetry(
             "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
@@ -235,12 +277,26 @@ object VkCallsCredentialProvider {
         val turnServer = parameters.optJSONObject("turn_server")
             ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
             ?: throw IllegalStateException("Calls backend response has no turn_server object")
-        require(turnServer.optString("username").isNotBlank()) { "VK Calls returned an empty TURN username" }
-        require(turnServer.optString("credential").isNotBlank()) { "VK Calls returned an empty TURN credential" }
+        require(turnServer.optString("username").isNotBlank()) {
+            "VK Calls returned an empty TURN username"
+        }
+        require(turnServer.optString("credential").isNotBlank()) {
+            "VK Calls returned an empty TURN credential"
+        }
         val urls = turnServer.optJSONArray("urls")
             ?: throw IllegalStateException("VK Calls returned no TURN URLs")
         require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
-        return JSONObject().put("turn_server", turnServer).toString()
+        val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+        // This is an auxiliary account session, not the call owner.
+        // The source broker leaves these sessions alone; only the owner
+        // session performs hangupConversation for the shared conversation.
+        return VkCallsSession(
+            turnCredentialsJson = credentialsJson,
+            apiUrl = apiUrl,
+            sessionKey = sessionKey,
+            conversationId = conversationId,
+            finishAction = {},
+        )
     }
 
     internal fun finishConversation(

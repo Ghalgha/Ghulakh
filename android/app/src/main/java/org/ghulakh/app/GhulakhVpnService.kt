@@ -12,6 +12,7 @@ import android.util.Log
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -19,6 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class GhulakhVpnService : VpnService() {
     private val running = AtomicBoolean(false)
+    private val lifecycleGeneration = TunnelLifecycleGeneration()
+    private val nativeOperationLock = Any()
 
     @Volatile
     private var tunnelDescriptor: ParcelFileDescriptor? = null
@@ -35,6 +38,10 @@ class GhulakhVpnService : VpnService() {
     @Volatile
     private var recoveryWorker: Thread? = null
 
+    private val recoveryLock = Any()
+    private val recoveryTokens = mutableSetOf<AtomicBoolean>()
+    private val pathRecoveryThreads = mutableMapOf<Pair<AtomicBoolean, Int>, Thread>()
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (VpnService.prepare(this) != null) {
             stopSelf()
@@ -47,15 +54,23 @@ class GhulakhVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if (running.compareAndSet(false, true)) {
-            isActive = true
-            worker = Thread({ runTunnel() }, "ghulakh-vpn-session").apply { start() }
+        synchronized(this) {
+            if (running.compareAndSet(false, true)) {
+                val generation = lifecycleGeneration.begin()
+                isActive = true
+                worker = Thread({ runTunnel(generation, startId) }, "ghulakh-vpn-session").apply { start() }
+            }
         }
         return START_NOT_STICKY
     }
 
-    private fun runTunnel() {
-        val vkSessions = Collections.synchronizedList(mutableListOf<VkCallsSession>())
+    private fun isCurrent(generation: Long): Boolean =
+        running.get() && lifecycleGeneration.isCurrent(generation)
+
+    private fun runTunnel(generation: Long, startId: Int) {
+        val credentialGroups = Collections.synchronizedList(mutableListOf<VkCallsCredentialGroup>())
+        var recoveryToken: AtomicBoolean? = null
+        var recoverySupervisor: Thread? = null
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
@@ -65,10 +80,23 @@ class GhulakhVpnService : VpnService() {
             var callsSession: VkCallsCredentialGroup? = null
             var handle = 0L
             while (true) {
-                if (!running.get()) return
+                if (!isCurrent(generation)) return
                 val candidate = VkCallsCredentialProvider.obtainGroup(profile.vkAccessToken, DEFAULT_TURN_PATHS)
+                // Credential acquisition performs blocking HTTPS requests. The VPN may be
+                // stopped while they are in flight, so serialize the generation check,
+                // native connect and handle publication with native shutdown.
                 try {
-                    val connectedHandle = transport.nativeTurnConnect(
+                    if (!isCurrent(generation)) {
+                        runCatching { candidate.finish() }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                        return
+                    }
+                    // Native connect performs network I/O. Do not hold the
+                    // shutdown lock while allocations and Noise handshakes run:
+                    // a stop can invalidate this generation immediately, and
+                    // the returned handle is either published atomically or
+                    // closed as stale below.
+                    val connected = transport.nativeTurnConnect(
                         this,
                         profile.host,
                         profile.port,
@@ -77,6 +105,23 @@ class GhulakhVpnService : VpnService() {
                         profile.credential,
                         DEFAULT_TURN_PATHS,
                     )
+                    check(connected != 0L) { "Native TURN connect returned an invalid handle" }
+                    val connectedHandle = synchronized(nativeOperationLock) {
+                        if (!isCurrent(generation)) {
+                            runCatching { transport.nativeTurnClose(connected) }
+                                .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session", closeError) }
+                            null
+                        } else {
+                            nativeTransport = transport
+                            sessionHandle = connected
+                            connected
+                        }
+                    }
+                    if (connectedHandle == null) {
+                        runCatching { candidate.finish() }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                        return
+                    }
                     handle = connectedHandle
                     callsSession = candidate
                     break
@@ -92,41 +137,44 @@ class GhulakhVpnService : VpnService() {
                         throw error
                     }
                     connectAttempt++
-                    if (!running.get()) return
+                    if (!isCurrent(generation)) return
                     Thread.sleep(TurnQuotaRetryPolicy.retryDelayMillis(connectAttempt - 1))
                 }
             }
-            vkSessions.add(checkNotNull(callsSession).ownerSession)
-            val retained = synchronized(this) {
-                if (running.get()) {
-                    nativeTransport = transport
-                    sessionHandle = handle
-                    true
-                } else {
-                    false
-                }
+            val establishedGroup = checkNotNull(callsSession)
+            credentialGroups.add(establishedGroup)
+            val (clientAddress, clientIpv6Address, mtu) = synchronized(nativeOperationLock) {
+                if (!isCurrent(generation)) return
+                Triple(
+                    transport.nativeTurnClientIpv4(handle),
+                    transport.nativeTurnClientIpv6(handle),
+                    transport.nativeTurnMtu(handle),
+                )
             }
-            if (!retained) {
-                transport.nativeTurnClose(handle)
-                return
-            }
-
-            val clientAddress = transport.nativeTurnClientIpv4(handle)
-            val mtu = transport.nativeTurnMtu(handle)
             require(mtu in MIN_TUN_MTU..MAX_TUN_MTU) { "Сервер передал недопустимый MTU" }
             val descriptor = Builder()
                 .setSession("Ghulakh")
                 .setMtu(mtu)
                 .addAddress(clientAddress, 32)
-                .addAddress("fd77::2", 128)
+                .addAddress(clientIpv6Address, 128)
                 .addRoute("0.0.0.0", 0)
-                // IPv6 is captured to prevent leaks; the current server drops IPv6 packets.
                 .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
                 .establish()
                 ?: throw IllegalStateException("Android не создал TUN-интерфейс")
-            tunnelDescriptor = descriptor
-            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 блокируется")
+            val descriptorRetained = synchronized(this) {
+                if (isCurrent(generation)) {
+                    tunnelDescriptor = descriptor
+                    true
+                } else {
+                    false
+                }
+            }
+            if (!descriptorRetained) {
+                descriptor.close()
+                return
+            }
+            updateNotification("VPN активен · IPv4/IPv6 через TURN-реле VK Calls")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -134,65 +182,99 @@ class GhulakhVpnService : VpnService() {
             val tunReader = Thread({
                 try {
                     val buffer = ByteArray(MAX_IP_PACKET_SIZE)
-                    while (running.get()) {
+                    while (isCurrent(generation)) {
                         val length = input.read(buffer)
                         if (length < 0) {
-                            if (running.get()) {
+                            if (isCurrent(generation)) {
                                 throw IllegalStateException("Android TUN input reached end-of-stream")
                             }
                             break
                         }
                         if (length > 0) {
                             val version = (buffer[0].toInt() and 0xff) ushr 4
-                            if (version == 6) continue
-                            if (version != 4) {
+                            if (version != 4 && version != 6) {
                                 throw IllegalStateException("Android TUN returned an unsupported IP version")
                             }
                             if (!transport.nativeTurnSendPacket(handle, buffer.copyOf(length))) {
-                                throw IllegalStateException("TURN-транспорт отклонил IPv4-пакет")
+                                throw IllegalStateException("TURN-транспорт отклонил IP-пакет")
                             }
                         }
                     }
                 } catch (error: Throwable) {
-                    if (running.get()) failSession("Ошибка чтения Android TUN", error)
+                    if (isCurrent(generation)) failSession(generation, startId, "Ошибка чтения Android TUN", error)
                 }
             }, "ghulakh-tun-reader")
 
             val tunWriter = Thread({
                 try {
-                    while (running.get()) {
+                    while (isCurrent(generation)) {
                         val packet = transport.nativeTurnReceivePacket(handle)
                             ?: throw IllegalStateException("TURN transport returned an empty packet result")
                         output.write(packet)
                         output.flush()
                     }
                 } catch (error: Throwable) {
-                    if (running.get()) failSession("Ошибка приёма TURN-пакета", error)
+                    if (isCurrent(generation)) failSession(generation, startId, "Ошибка приёма TURN-пакета", error)
                 }
             }, "ghulakh-tun-writer")
 
             tunReader.start()
             tunWriter.start()
-            recoveryWorker = Thread({
-                recoverFailedPaths(profile, transport, handle, vkSessions)
-            }, "ghulakh-turn-recovery").apply { start() }
+            val token = AtomicBoolean(isCurrent(generation))
+            recoveryToken = token
+            synchronized(recoveryLock) {
+                if (isCurrent(generation)) recoveryTokens.add(token) else token.set(false)
+            }
+            val supervisor = Thread({
+                recoverFailedPaths(
+                    profile,
+                    transport,
+                    handle,
+                    establishedGroup.credentialBroker,
+                    token,
+                    generation,
+                )
+            }, "ghulakh-turn-recovery")
+            recoverySupervisor = supervisor
+            recoveryWorker = supervisor
+            supervisor.start()
             tunReader.join()
             tunWriter.join()
         } catch (error: Throwable) {
-            if (running.get()) {
+            if (isCurrent(generation)) {
                 Log.e(TAG, "VPN session failed", error)
                 updateNotification("Ошибка VPN · ${error.message ?: "соединение прервано"}")
             }
         } finally {
-            stopTunnel()
-            synchronized(vkSessions) {
-                vkSessions.forEach { calls ->
-                    runCatching { calls.finish() }
-                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls session", error) }
+            val ownsLifecycle = isCurrent(generation)
+            if (ownsLifecycle) stopTunnel(generation)
+            // The broker owns the VK Calls sessions used to obtain replacement
+            // credentials. Drain its supervisor and every per-path worker before
+            // finishing that broker, otherwise hangup can race an in-flight
+            // allocation handshake. This runs on the session worker, not main.
+            recoveryToken?.set(false)
+            awaitWorkerTermination(recoverySupervisor) {
+                val token = recoveryToken
+                if (token == null) {
+                    emptyList()
+                } else {
+                    synchronized(recoveryLock) {
+                        pathRecoveryThreads
+                            .filterKeys { it.first === token }
+                            .values
+                            .toList()
+                    }
                 }
-                vkSessions.clear()
             }
-            stopSelf()
+            synchronized(credentialGroups) {
+                credentialGroups.forEach { group ->
+                    runCatching { group.finish() }
+                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls credential group", error) }
+                }
+                credentialGroups.clear()
+            }
+            if (worker === Thread.currentThread()) worker = null
+            if (ownsLifecycle) stopSelfResult(startId)
         }
     }
 
@@ -201,89 +283,141 @@ class GhulakhVpnService : VpnService() {
         profile: ConnectionProfile,
         transport: NativeTransport,
         handle: Long,
-        vkSessions: MutableList<VkCallsSession>,
+        credentialBroker: VkCallsCredentialProvider.CredentialBroker,
+        recoveryToken: AtomicBoolean,
+        generation: Long,
     ) {
-        val failures = mutableMapOf<Int, Int>()
-        val nextAttemptAt = mutableMapOf<Int, Long>()
+        val failures = ConcurrentHashMap<Int, Int>()
+        val nextAttemptAt = ConcurrentHashMap<Int, Long>()
         val rejectedCredentials = linkedSetOf<String>()
-        while (running.get()) {
-            val failedPaths = runCatching { transport.nativeTurnFailedPaths(handle).toList() }
-                .getOrElse { error ->
-                    if (running.get()) Log.w(TAG, "Unable to inspect TURN path health", error)
-                    emptyList()
-                }
-            for (pathId in failedPaths) {
-                if (!running.get()) break
-                val now = SystemClock.elapsedRealtime()
-                if (now < (nextAttemptAt[pathId] ?: 0L)) continue
-                var callsSession: VkCallsSession? = null
-                try {
-                    val establishedSession = VkCallsCredentialProvider.obtain(profile.vkAccessToken)
-                    callsSession = establishedSession
-                    val credentialFingerprint =
-                        TurnQuotaRetryPolicy.fingerprint(establishedSession.turnCredentialsJson)
-                    if (TurnQuotaRetryPolicy.wasRejected(
-                            rejectedCredentials,
-                            credentialFingerprint,
-                        )
-                    ) {
-                        establishedSession.finish()
-                        callsSession = null
-                        throw IllegalStateException("VK Calls repeated credentials rejected by TURN quota")
-                    }
-                    if (!running.get()) {
-                        establishedSession.finish()
-                        return
-                    }
-                    check(transport.nativeTurnRecoverPath(
-                        this,
-                        handle,
-                        profile.host,
-                        profile.port,
-                        establishedSession.turnCredentialsJson,
-                        decodeHexKey(profile.pinnedServerPublicKeyHex),
-                        profile.credential,
-                        pathId,
-                    )) { "Native TURN path replacement was rejected" }
-                    val retained = synchronized(vkSessions) {
-                        if (running.get()) {
-                            vkSessions.add(establishedSession)
-                            true
+        try {
+            while (isCurrent(generation) && recoveryToken.get()) {
+                val failedPaths = runCatching {
+                    // The native handle can be closed by stopTunnel(). Keep even
+                    // read-only JNI handle access under the same lock as close().
+                    synchronized(nativeOperationLock) {
+                        if (!isCurrent(generation) || !recoveryToken.get()) {
+                            emptyList()
                         } else {
-                            false
+                            transport.nativeTurnFailedPaths(handle).toList()
                         }
                     }
-                    if (!retained) {
-                        establishedSession.finish()
-                        return
+                }.getOrElse { error ->
+                    if (isCurrent(generation) && recoveryToken.get()) {
+                        Log.w(TAG, "Unable to inspect TURN path health", error)
                     }
-                    callsSession = null
-                    failures.remove(pathId)
-                    nextAttemptAt.remove(pathId)
-                    updateNotification("VPN активен · TURN-путь $pathId восстановлен")
-                } catch (error: Throwable) {
-                    if (error.message == "TURN_ALLOCATION_QUOTA_486" && callsSession != null) {
-                        TurnQuotaRetryPolicy.rememberRejectedFingerprint(
-                            rejectedCredentials,
-                            TurnQuotaRetryPolicy.fingerprint(callsSession!!.turnCredentialsJson),
-                        )
+                    emptyList()
+                }
+                for (pathId in failedPaths) {
+                    if (!isCurrent(generation) || !recoveryToken.get()) break
+                    val now = SystemClock.elapsedRealtime()
+                    val recoveryKey = recoveryToken to pathId
+                    val recoveryThread = synchronized(recoveryLock) {
+                        if (!isCurrent(generation) || !recoveryToken.get() ||
+                            pathRecoveryThreads.containsKey(recoveryKey) ||
+                            now < (nextAttemptAt[pathId] ?: 0L)
+                        ) {
+                            null
+                        } else {
+                            Thread({
+                                recoverPath(
+                                    pathId,
+                                    profile,
+                                    transport,
+                                    handle,
+                                    credentialBroker,
+                                    failures,
+                                    nextAttemptAt,
+                                    rejectedCredentials,
+                                    recoveryToken,
+                                    generation,
+                                )
+                            }, "ghulakh-turn-recovery-$pathId").also {
+                                pathRecoveryThreads[recoveryKey] = it
+                            }
+                        }
                     }
-                    runCatching { callsSession?.finish() }
-                    val count = failures[pathId] ?: 0
-                    val jitterMillis = java.util.concurrent.ThreadLocalRandom.current().nextLong(0L, 501L)
-                    val delayMillis = TurnRecoveryBackoffPolicy.delayMillis(count, jitterMillis)
-                    failures[pathId] = count + 1
-                    nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delayMillis
-                    if (running.get()) {
-                        Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delayMillis}ms", error)
-                        updateNotification("VPN активен · восстановление TURN-пути $pathId")
+                    if (recoveryThread != null) {
+                        runCatching { recoveryThread.start() }.onFailure { error ->
+                            synchronized(recoveryLock) {
+                                if (pathRecoveryThreads[recoveryKey] === recoveryThread) {
+                                    pathRecoveryThreads.remove(recoveryKey)
+                                }
+                            }
+                            if (isCurrent(generation) && recoveryToken.get()) {
+                                Log.w(TAG, "Unable to start TURN path $pathId recovery worker", error)
+                            }
+                        }
                     }
                 }
+                try {
+                    Thread.sleep(1_000)
+                } catch (_: InterruptedException) {
+                    return
+                }
             }
-            try {
-                Thread.sleep(1_000)
-            } catch (_: InterruptedException) {
-                return
+        } finally {
+            synchronized(recoveryLock) { recoveryTokens.remove(recoveryToken) }
+        }
+    }
+
+    private fun recoverPath(
+        pathId: Int,
+        profile: ConnectionProfile,
+        transport: NativeTransport,
+        handle: Long,
+        credentialBroker: VkCallsCredentialProvider.CredentialBroker,
+        failures: ConcurrentHashMap<Int, Int>,
+        nextAttemptAt: ConcurrentHashMap<Int, Long>,
+        rejectedCredentials: LinkedHashSet<String>,
+        recoveryToken: AtomicBoolean,
+        generation: Long,
+    ) {
+        var credentialFingerprint: String? = null
+        try {
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            val credentialsJson = credentialBroker.obtainCredentials()
+            credentialFingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
+            val alreadyRejected = synchronized(recoveryLock) {
+                TurnQuotaRetryPolicy.wasRejected(rejectedCredentials, credentialFingerprint)
+            }
+            if (alreadyRejected) throw IllegalStateException("VK Calls returned credentials already rejected by TURN")
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            // Recovery performs network I/O and may outlive a stop request.
+            // The JNI layer retains an Arc to the native session and the path
+            // group rejects installation after close(), so do not hold the
+            // shutdown lock across the replacement handshake.
+            val recovered = transport.nativeTurnRecoverPath(
+                this, handle, profile.host, profile.port, credentialsJson,
+                decodeHexKey(profile.pinnedServerPublicKeyHex), profile.credential, pathId,
+            )
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            check(recovered) { "Native TURN path replacement was rejected" }
+            failures.remove(pathId)
+            nextAttemptAt.remove(pathId)
+            if (isCurrent(generation) && recoveryToken.get()) updateNotification("VPN активен · TURN-путь $pathId восстановлен")
+        } catch (error: Throwable) {
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            if (error.message == "TURN_ALLOCATION_QUOTA_486" && credentialFingerprint != null) {
+                synchronized(recoveryLock) {
+                    TurnQuotaRetryPolicy.rememberRejectedFingerprint(rejectedCredentials, credentialFingerprint)
+                }
+            }
+            val count = failures.compute(pathId) { _, previous -> (previous ?: 0) + 1 }!! - 1
+            val jitterMillis = java.util.concurrent.ThreadLocalRandom.current().nextLong(0L, 501L)
+            val delayMillis = TurnRecoveryBackoffPolicy.delayMillis(count, jitterMillis)
+            nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delayMillis
+            if (isCurrent(generation) && recoveryToken.get()) {
+                Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delayMillis}ms", error)
+                updateNotification("VPN активен · восстановление TURN-пути $pathId")
+            }
+        } finally {
+            synchronized(recoveryLock) {
+                val recoveryKey = recoveryToken to pathId
+                if (pathRecoveryThreads[recoveryKey] === Thread.currentThread()) {
+                    pathRecoveryThreads.remove(recoveryKey)
+                }
             }
         }
     }
@@ -297,34 +431,58 @@ class GhulakhVpnService : VpnService() {
         }
     }
 
-    private fun failSession(message: String, error: Throwable) {
+    private fun failSession(generation: Long, startId: Int, message: String, error: Throwable) {
+        if (!stopTunnel(generation)) return
         Log.e(TAG, message, error)
         updateNotification("$message: ${error.message ?: "ошибка"}")
-        stopTunnel()
-        stopSelf()
+        // Do not stop a service instance that has since received a newer start request.
+        stopSelfResult(startId)
     }
 
     @Synchronized
-    private fun stopTunnel() {
+    private fun stopTunnel(expectedGeneration: Long? = null): Boolean {
+        // A stale reader/recovery worker must never tear down a newer VPN run.
+        // The generation check and invalidation are one atomic transition.
+        val invalidated = if (expectedGeneration == null) {
+            lifecycleGeneration.invalidate()
+            true
+        } else {
+            lifecycleGeneration.invalidate(expectedGeneration)
+        }
+        if (!invalidated) return false
         running.set(false)
+        val activeWorker = worker
+        worker = null
+        if (activeWorker != null && activeWorker !== Thread.currentThread()) {
+            activeWorker.interrupt()
+        }
         recoveryWorker?.interrupt()
         recoveryWorker = null
+        val recoveryThreads = synchronized(recoveryLock) {
+            recoveryTokens.forEach { it.set(false) }
+            pathRecoveryThreads.values.toList()
+        }
+        recoveryThreads.forEach { it.interrupt() }
         try {
             tunnelDescriptor?.close()
         } catch (_: Exception) {
         }
         tunnelDescriptor = null
 
-        val handle = sessionHandle
-        sessionHandle = 0L
-        if (handle != 0L) {
-            try {
-                nativeTransport?.nativeTurnClose(handle)
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to close native TURN session", error)
+        synchronized(nativeOperationLock) {
+            val handle = sessionHandle
+            sessionHandle = 0L
+            val transport = nativeTransport
+            nativeTransport = null
+            if (handle != 0L) {
+                try {
+                    transport?.nativeTurnClose(handle)
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Failed to close native TURN session", error)
+                }
             }
         }
-        nativeTransport = null
+        return true
     }
 
     override fun onRevoke() {
@@ -336,7 +494,6 @@ class GhulakhVpnService : VpnService() {
     override fun onDestroy() {
         isActive = false
         stopTunnel()
-        worker?.interrupt()
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -376,6 +533,6 @@ class GhulakhVpnService : VpnService() {
         private const val MIN_TUN_MTU = 576
         private const val MAX_TUN_MTU = 1500
         private const val MAX_IP_PACKET_SIZE = 65_535
-        private const val DEFAULT_TURN_PATHS = 5
+        private const val DEFAULT_TURN_PATHS = 10
     }
 }

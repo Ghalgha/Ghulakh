@@ -5,16 +5,17 @@
 //! bidirectional IP dataplane. VK API credential acquisition remains external.
 
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, RwLock, Mutex as StdMutex,
     },
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use ghulakh_protocol::{DataDatagram, turn_path_context::TurnPathContext};
+use ghulakh_protocol::{ordered_datagram::SequencedDataDatagram, DataDatagram, turn_path_context::TurnPathContext};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -35,13 +36,83 @@ use crate::{
 
 pub const DEFAULT_TURN_CHANNEL: u16 = 0x4001;
 const APP_QUEUE_CAPACITY: usize = 128;
+const DOWNLINK_REORDER_GAP_TIMEOUT: Duration = Duration::from_millis(250);
+const DOWNLINK_REORDER_MAX_PENDING: usize = APP_QUEUE_CAPACITY * 2;
+
+#[derive(Default)]
+struct DownlinkReorderBuffer {
+    expected_sequence: u64,
+    pending: BTreeMap<u64, DataDatagram>,
+    ready: VecDeque<DataDatagram>,
+    gap_started: Option<Instant>,
+}
+
+impl DownlinkReorderBuffer {
+    fn push(&mut self, packet: SequencedDataDatagram, now: Instant) {
+        let Some(sequence) = packet.sequence else {
+            if self.pending.is_empty() && self.ready.is_empty() {
+                self.ready.push_back(packet.datagram);
+            }
+            return;
+        };
+        if sequence < self.expected_sequence {
+            return;
+        }
+        if sequence > self.expected_sequence && self.pending.len() >= DOWNLINK_REORDER_MAX_PENDING {
+            self.advance_gap(now);
+            if sequence < self.expected_sequence {
+                return;
+            }
+        }
+        if sequence == self.expected_sequence {
+            self.ready.push_back(packet.datagram);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+            self.drain(now);
+        } else {
+            self.pending.entry(sequence).or_insert(packet.datagram);
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn drain(&mut self, now: Instant) {
+        while let Some(packet) = self.pending.remove(&self.expected_sequence) {
+            self.ready.push_back(packet);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+        }
+        if self.pending.is_empty() {
+            self.gap_started = None;
+        } else {
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn gap_deadline(&self) -> Option<Instant> {
+        self.gap_started.map(|started| started + DOWNLINK_REORDER_GAP_TIMEOUT)
+    }
+
+    fn advance_gap(&mut self, now: Instant) {
+        if let Some((&next_sequence, _)) = self.pending.first_key_value() {
+            self.expected_sequence = next_sequence;
+            self.gap_started = None;
+            self.drain(now);
+        } else {
+            self.gap_started = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn pop_ready(&mut self) -> Option<DataDatagram> {
+        self.ready.pop_front()
+    }
+}
 
 /// Fully assembled client-side TURN VPN dataplane.
 pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     path_context: Option<TurnPathContext>,
-    uplink: mpsc::Sender<DataDatagram>,
-    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
+    uplink: mpsc::Sender<SequencedDataDatagram>,
+    next_uplink_sequence: tokio::sync::Mutex<u64>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
     shutdown_signal: watch::Sender<bool>,
@@ -122,7 +193,8 @@ impl TurnClientRuntime {
 
         let socket = TurnUdpSocket::from_protected_socket(protected_socket, relay_endpoint)
             .context("adopt protected VK Calls TURN socket")?;
-        let driver = TurnClientDriver::new(socket);
+        let driver = TurnClientDriver::new(socket)
+            .with_requested_relay_family(gateway_peer.is_ipv4());
         let provider = VkCallsTurnAuthProvider::from_credentials(credentials)
             .context("initialize VK Calls TURN authentication provider")?;
         let mut supervisor = TurnSessionSupervisor::new(driver, provider);
@@ -198,7 +270,7 @@ impl TurnClientRuntime {
             TurnDataReceiver::new(DEFAULT_TURN_CHANNEL, downlink_opener),
         );
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
-        let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
+        let (downlink_tx, downlink) = mpsc::channel::<SequencedDataDatagram>(APP_QUEUE_CAPACITY);
         let (maintenance_stopped_tx, mut maintenance_stopped_rx) = watch::channel(false);
         let (shutdown_signal, mut shutdown_rx) = watch::channel(false);
         let maintenance_task = tokio::spawn(async move {
@@ -258,6 +330,7 @@ impl TurnClientRuntime {
             config,
             path_context,
             uplink,
+            next_uplink_sequence: tokio::sync::Mutex::new(0),
             downlink: tokio::sync::Mutex::new(downlink),
             dataplane_task,
             maintenance_task,
@@ -274,10 +347,17 @@ impl TurnClientRuntime {
     }
 
     pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
-        self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
+        let mut next_sequence = self.next_uplink_sequence.lock().await;
+        let sequence = *next_sequence;
+        let following_sequence = sequence.checked_add(1)
+            .context("TURN uplink sequence space exhausted")?;
+        self.uplink.send(SequencedDataDatagram::new(sequence, packet)).await
+            .context("TURN VPN uplink queue closed")?;
+        *next_sequence = following_sequence;
+        Ok(())
     }
 
-    pub async fn receive_packet(&self) -> Result<DataDatagram> {
+    pub async fn receive_packet(&self) -> Result<SequencedDataDatagram> {
         self.downlink.lock().await.recv().await.context("TURN VPN downlink queue closed")
     }
 
@@ -362,15 +442,17 @@ impl TurnPathRecoveryPolicy {
 }
 
 /// One logical VPN tunnel backed by several independent authenticated TURN paths.
-/// Flow affinity keeps each IP flow on one path while preserving aggregate
-/// throughput across concurrent flows and avoiding packet reordering.
+/// Per-flowlet scheduling spreads sustained bulk traffic while keeping small
+/// latency-sensitive UDP flows pinned to one path.
 pub struct TurnClientPathGroup {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     paths: RwLock<Vec<Arc<TurnClientRuntime>>>,
     healthy: Vec<Arc<AtomicBool>>,
-    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
-    downlink_senders: StdMutex<mpsc::Sender<DataDatagram>>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
+    downlink_senders: StdMutex<mpsc::Sender<SequencedDataDatagram>>,
+    downlink_reorder: tokio::sync::Mutex<DownlinkReorderBuffer>,
     forwarders: StdMutex<Vec<JoinHandle<()>>>,
+    uplink_scheduler: StdMutex<UplinkScheduler>,
     uplink_queue_drops: AtomicU64,
     closed: AtomicBool,
     closed_signal: watch::Sender<bool>,
@@ -388,7 +470,7 @@ impl TurnClientPathGroup {
             .context("TURN path group contains a path without authenticated path context")?;
         let mut seen = std::collections::HashSet::new();
         for path in &paths {
-            anyhow::ensure!(path.config() == config, "TURN paths disagree on tunnel IPv4 or MTU");
+            anyhow::ensure!(path.config() == config, "TURN paths disagree on tunnel IPv4, IPv6, or MTU");
             let context = path.path_context()
                 .context("TURN path group contains a path without authenticated path context")?;
             context.validate().context("validate TURN path group member")?;
@@ -433,7 +515,9 @@ impl TurnClientPathGroup {
             healthy,
             downlink: tokio::sync::Mutex::new(downlink),
             downlink_senders: StdMutex::new(downlink_tx_for_group),
+            downlink_reorder: tokio::sync::Mutex::new(DownlinkReorderBuffer::default()),
             forwarders: StdMutex::new(forwarders),
+            uplink_scheduler: StdMutex::new(UplinkScheduler::default()),
             uplink_queue_drops: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             closed_signal,
@@ -466,7 +550,7 @@ impl TurnClientPathGroup {
 
     /// Atomically replace one failed path after a fresh authenticated TURN handshake.
     pub fn replace_path(&self, replacement: TurnClientRuntime) -> Result<()> {
-        anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4 or MTU");
+        anyhow::ensure!(replacement.config() == self.config, "replacement TURN path changed tunnel IPv4, IPv6, or MTU");
         let context = replacement.path_context()
             .context("replacement TURN path has no authenticated path context")?;
         context.validate().context("validate replacement TURN path context")?;
@@ -502,6 +586,10 @@ impl TurnClientPathGroup {
         forwarders[index].abort();
         old.close();
 
+        // Publish the slot as healthy before its watcher can run. If the
+        // replacement has already failed, the watcher must be the final
+        // writer and leave the slot unhealthy.
+        self.healthy[index].store(true, Ordering::Release);
         let path_health = Arc::clone(&self.healthy[index]);
         let forwarder = tokio::spawn(async move {
             while let Ok(packet) = replacement.receive_packet().await {
@@ -512,7 +600,6 @@ impl TurnClientPathGroup {
             path_health.store(false, Ordering::Release);
         });
         forwarders[index] = forwarder;
-        self.healthy[index].store(true, Ordering::Release);
         Ok(())
     }
 
@@ -527,54 +614,88 @@ impl TurnClientPathGroup {
             !self.closed.load(Ordering::Acquire) && !*closed.borrow(),
             "TURN path group is closed"
         );
-        let health: Vec<bool> = self.healthy.iter()
-            .map(|path| path.load(Ordering::Acquire))
-            .collect();
-        let Some(start) = select_path_index(&packet.packet, &health) else {
-            // Keep the TUN reader alive while the Android recovery worker
-            // recreates failed allocations; packets are dropped, never queued
-            // onto a different path out of order.
-            self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
-            return Ok(());
-        };
         let paths = self.paths.read()
             .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
-        for offset in 0..paths.len() {
-            let index = (start + offset) % paths.len();
-            if !self.healthy[index].load(Ordering::Acquire) {
-                continue;
-            }
-            let enqueue = enqueue_uplink_packet(
-                &paths[index].uplink,
-                packet.clone(),
-                &self.uplink_queue_drops,
-            );
-            match enqueue {
-                Ok(()) => return Ok(()),
-                // Do not move a congested flow to another path: packets already
-                // queued there would be overtaken. Drop newest and keep reading TUN.
-                Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
-                Err(mpsc::error::TrySendError::Closed(_)) => {
+        // close() publishes the closed flag before waiting for the write lock.
+        // Recheck after acquiring the read lock so a sender cannot slip past
+        // the initial check while shutdown is already in progress.
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "TURN path group is closed"
+        );
+        let now = Instant::now();
+        let mut scheduler = self.uplink_scheduler.lock()
+            .map_err(|_| anyhow::anyhow!("TURN uplink scheduler lock poisoned"))?;
+        let mut pending = packet;
+        let sequence = scheduler.next_sequence;
+        let next_sequence = sequence.checked_add(1)
+            .context("TURN uplink sequence space exhausted")?;
+        for _ in 0..paths.len() {
+            let healthy: Vec<bool> = self.healthy.iter()
+                .map(|path| path.load(Ordering::Acquire))
+                .collect();
+            let sendable: Vec<bool> = paths.iter().enumerate().map(|(index, path)| {
+                healthy[index] && !path.uplink.is_closed() && path.uplink.capacity() > 0
+            }).collect();
+            let Some(index) = scheduler.select(&healthy, &sendable, &pending.packet, now) else {
+                self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+                return Ok(());
+            };
+            match paths[index].uplink.try_send(SequencedDataDatagram::new(sequence, pending)) {
+                Ok(()) => {
+                    scheduler.next_sequence = next_sequence;
+                    return Ok(());
+                },
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // The queue filled after the capacity snapshot. Drop newest;
+                    // do not send it on another path and overtake queued packets.
+                    self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
+                }
+                Err(mpsc::error::TrySendError::Closed(returned)) => {
                     self.healthy[index].store(false, Ordering::Release);
+                    pending = returned.datagram;
                 }
             }
         }
-        // All slots failed between the health snapshot and enqueue. Keep
-        // the TUN pump alive so the platform recovery worker can restore them.
         self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     pub async fn receive_packet(&self) -> Result<DataDatagram> {
+        enum Event {
+            Packet(Option<SequencedDataDatagram>),
+            Gap,
+        }
         let mut closed = self.closed_signal.subscribe();
         if self.closed.load(Ordering::Acquire) || *closed.borrow() {
             anyhow::bail!("TURN path group is closed");
         }
         let mut downlink = self.downlink.lock().await;
-        tokio::select! {
-            biased;
-            _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
-            packet = downlink.recv() => packet.context("all TURN path downlink queues are closed"),
+        let mut reorder = self.downlink_reorder.lock().await;
+        loop {
+            if let Some(packet) = reorder.ready.pop_front() {
+                return Ok(packet);
+            }
+            let event = if let Some(deadline) = reorder.gap_deadline() {
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+                    packet = downlink.recv() => Event::Packet(packet),
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Event::Gap,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+                    packet = downlink.recv() => Event::Packet(packet),
+                }
+            };
+            match event {
+                Event::Packet(Some(packet)) => reorder.push(packet, Instant::now()),
+                Event::Packet(None) => anyhow::bail!("all TURN path downlink queues are closed"),
+                Event::Gap => reorder.advance_gap(Instant::now()),
+            }
         }
     }
 
@@ -593,12 +714,13 @@ impl TurnClientPathGroup {
         if !self.closed.swap(true, Ordering::AcqRel) {
             self.closed_signal.send_replace(true);
         }
-        if let Ok(tasks) = self.forwarders.lock() {
-            for task in tasks.iter() { task.abort(); }
-        }
-        if let Ok(paths) = self.paths.read() {
-            for path in paths.iter() { path.close(); }
-        }
+        // Keep the same lock order as replace_path(): path registry before
+        // forwarder registry. Reversing these locks can deadlock shutdown
+        // against a concurrent path replacement.
+        let paths = self.paths.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let forwarders = self.forwarders.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        for task in forwarders.iter() { task.abort(); }
+        for path in paths.iter() { path.close(); }
     }
 }
 
@@ -637,6 +759,236 @@ fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<
     (!addresses.is_empty()).then(|| addresses[usize::from(path_id) % addresses.len()])
 }
 
+const UPLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
+const UPLINK_BUCKET_CAPACITY: f64 = 10_500.0;
+const UPLINK_MAX_DEFICIT: f64 = -4_500.0;
+// Keep each flow on one allocation for a bounded 16 KiB burst, then rebalance at a flowlet boundary.
+const UPLINK_FLOW_BURST_BYTES: usize = 16 * 1024;
+const UPLINK_FLOW_TABLE_MAX: usize = 1024;
+const UPLINK_FLOW_EVICT_EVERY: u32 = 1024;
+const UPLINK_FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
+const UPLINK_SMALL_UDP_MAX_LEN: usize = 300;
+const UPLINK_SMALL_UDP_STICKY: Duration = Duration::from_secs(1);
+const UPLINK_PIN_WINDOW: Duration = Duration::from_millis(250);
+const UPLINK_PIN_WINDOW_MAX_BYTES: usize =
+    (UPLINK_RATE_BYTES_PER_SEC as usize) * 3 / 4 / 4;
+const UPLINK_BULK_HOLD: Duration = Duration::from_secs(2);
+
+#[derive(Clone, Copy)]
+struct UplinkFlowState {
+    path_index: usize,
+    last_seen: Instant,
+    burst_left: usize,
+    sticky_until: Option<Instant>,
+    window_start: Instant,
+    window_bytes: usize,
+    bulk_until: Option<Instant>,
+}
+
+impl UplinkFlowState {
+    fn new(path_index: usize, now: Instant, packet_len: usize, small_udp: bool) -> Self {
+        Self {
+            path_index,
+            last_seen: now,
+            burst_left: UPLINK_FLOW_BURST_BYTES.saturating_sub(packet_len),
+            sticky_until: small_udp.then_some(now + UPLINK_SMALL_UDP_STICKY),
+            window_start: now,
+            window_bytes: packet_len,
+            bulk_until: None,
+        }
+    }
+
+    fn keeps_pin(&mut self, now: Instant, packet_len: usize, small_udp: bool) -> bool {
+        if now.saturating_duration_since(self.window_start) >= UPLINK_PIN_WINDOW {
+            self.window_start = now;
+            self.window_bytes = 0;
+        }
+        self.window_bytes = self.window_bytes.saturating_add(packet_len);
+        if self.window_bytes > UPLINK_PIN_WINDOW_MAX_BYTES {
+            self.bulk_until = Some(now + UPLINK_BULK_HOLD);
+            self.sticky_until = None;
+        }
+        let bulk = self.bulk_until.is_some_and(|until| now < until);
+        if small_udp && !bulk {
+            self.sticky_until = Some(now + UPLINK_SMALL_UDP_STICKY);
+        }
+        self.sticky_until.is_some_and(|until| now < until)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct UplinkRateController {
+    rate: f64,
+    congested: bool,
+    last_adjust: Option<Instant>,
+}
+
+impl UplinkRateController {
+    fn new() -> Self {
+        Self {
+            rate: UPLINK_RATE_BYTES_PER_SEC,
+            congested: false,
+            last_adjust: None,
+        }
+    }
+
+    fn mark_congested(&mut self) {
+        self.congested = true;
+    }
+
+    fn tick(&mut self, now: Instant) {
+        let Some(last) = self.last_adjust else {
+            self.last_adjust = Some(now);
+            return;
+        };
+        if now.saturating_duration_since(last) < Duration::from_millis(100) {
+            return;
+        }
+        if self.congested {
+            self.rate = (self.rate * 0.85).max(150_000.0);
+            self.congested = false;
+        } else {
+            self.rate = (self.rate + 5_000.0).min(UPLINK_RATE_BYTES_PER_SEC);
+        }
+        self.last_adjust = Some(now);
+    }
+}
+
+#[derive(Default)]
+struct UplinkScheduler {
+    next_sequence: u64,
+    last_update: Option<Instant>,
+    tokens: Vec<f64>,
+    rates: Vec<UplinkRateController>,
+    cursor: usize,
+    flows: HashMap<ghulakh_protocol::ip_flow::IpFlowKey, UplinkFlowState>,
+    flow_evict_counter: u32,
+}
+
+impl UplinkScheduler {
+    fn update_tokens(&mut self, count: usize, now: Instant) {
+        if self.tokens.len() != count {
+            self.tokens.resize(count, UPLINK_BUCKET_CAPACITY);
+            self.rates.resize_with(count, UplinkRateController::new);
+            self.last_update = Some(now);
+            self.flows.clear();
+            self.flow_evict_counter = 0;
+        }
+        for rate in &mut self.rates {
+            rate.tick(now);
+        }
+        let start = self.last_update.unwrap_or(now);
+        let elapsed = now.saturating_duration_since(start).as_secs_f64();
+        if elapsed >= 0.0001 {
+            self.last_update = Some(now);
+            for (tokens, rate) in self.tokens.iter_mut().zip(self.rates.iter()) {
+                *tokens = (*tokens + elapsed * rate.rate).min(UPLINK_BUCKET_CAPACITY);
+            }
+        }
+    }
+
+    fn evict_flows(&mut self, now: Instant) {
+        self.flow_evict_counter = self.flow_evict_counter.wrapping_add(1);
+        if !self.flow_evict_counter.is_multiple_of(UPLINK_FLOW_EVICT_EVERY)
+            && self.flows.len() < UPLINK_FLOW_TABLE_MAX
+        {
+            return;
+        }
+        self.flows.retain(|_, state| {
+            now.saturating_duration_since(state.last_seen) < UPLINK_FLOW_IDLE_TTL
+        });
+        if self.flows.len() >= UPLINK_FLOW_TABLE_MAX {
+            self.flows.clear();
+        }
+    }
+
+    fn choose_path(&mut self, healthy: &[bool], sendable: &[bool]) -> Option<usize> {
+        let count = sendable.len();
+        if count == 0 {
+            return None;
+        }
+        let start = self.cursor.min(count - 1);
+        let mut best_index = None;
+        let mut best_tokens = f64::NEG_INFINITY;
+        for offset in 0..count {
+            let index = (start + offset) % count;
+            if !healthy[index] {
+                continue;
+            }
+            if !sendable[index] {
+                self.rates[index].mark_congested();
+                continue;
+            }
+            if self.tokens[index] > best_tokens {
+                best_tokens = self.tokens[index];
+                best_index = Some(index);
+            }
+        }
+        if let Some(index) = best_index {
+            self.cursor = (index + 1) % count;
+        }
+        best_index
+    }
+
+    fn charge(&mut self, index: usize, packet_len: usize) {
+        self.tokens[index] =
+            (self.tokens[index] - packet_len as f64).max(UPLINK_MAX_DEFICIT);
+    }
+
+    fn select(
+        &mut self,
+        healthy: &[bool],
+        sendable: &[bool],
+        packet: &[u8],
+        now: Instant,
+    ) -> Option<usize> {
+        let count = sendable.len();
+        if count == 0 || healthy.len() != count {
+            return None;
+        }
+        self.update_tokens(count, now);
+        let packet_len = packet.len();
+        let Some(key) = ghulakh_protocol::ip_flow::ip_flow_key(packet) else {
+            let index = self.choose_path(healthy, sendable)?;
+            self.charge(index, packet_len);
+            return Some(index);
+        };
+
+        self.evict_flows(now);
+        let small_udp = key.protocol() == 17 && packet_len <= UPLINK_SMALL_UDP_MAX_LEN;
+        if let Some(mut state) = self.flows.get(&key).copied() {
+            state.last_seen = now;
+            let sticky = state.keeps_pin(now, packet_len, small_udp);
+            let assigned_sendable = state.path_index < count
+                && healthy[state.path_index]
+                && sendable[state.path_index];
+            if assigned_sendable && (sticky || state.burst_left >= packet_len) {
+                let index = state.path_index;
+                state.burst_left = state.burst_left.saturating_sub(packet_len);
+                self.flows.insert(key, state);
+                self.charge(index, packet_len);
+                return Some(index);
+            }
+
+            let index = self.choose_path(healthy, sendable)?;
+            state.path_index = index;
+            state.burst_left = UPLINK_FLOW_BURST_BYTES.saturating_sub(packet_len);
+            self.flows.insert(key, state);
+            self.charge(index, packet_len);
+            return Some(index);
+        }
+
+        let index = self.choose_path(healthy, sendable)?;
+        self.flows.insert(
+            key,
+            UplinkFlowState::new(index, now, packet_len, small_udp),
+        );
+        self.charge(index, packet_len);
+        Some(index)
+    }
+}
+
+#[cfg(test)]
 fn enqueue_uplink_packet(
     sender: &mpsc::Sender<DataDatagram>,
     packet: DataDatagram,
@@ -650,16 +1002,6 @@ fn enqueue_uplink_packet(
         }
         Err(error) => Err(error),
     }
-}
-
-fn select_path_index(packet: &[u8], healthy: &[bool]) -> Option<usize> {
-    if healthy.is_empty() {
-        return None;
-    }
-    let start = (ghulakh_protocol::ip_flow::flow_hash(packet) as usize) % healthy.len();
-    (0..healthy.len())
-        .map(|offset| (start + offset) % healthy.len())
-        .find(|index| healthy[*index])
 }
 
 #[cfg(test)]
@@ -744,18 +1086,119 @@ mod path_group_tests {
         assert_eq!(delays, vec![1, 2, 4, 5, 5, 5, 5]);
     }
 
-    #[test]
-    fn flow_selection_is_stable_and_uses_other_healthy_paths_on_failure() {
-        let healthy = [true, true, true, true];
-        let first = select_path_index(&packet(12000), &healthy).unwrap();
-        let second = select_path_index(&packet(12000), &healthy).unwrap();
-        assert_eq!(first, second);
+    fn bulk_packet(source_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 1_300];
+        packet[0] = 0x45;
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet
+    }
 
+    #[test]
+    fn small_udp_flow_remains_pinned_to_one_healthy_path() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let packet = packet(12000);
+        let start = Instant::now();
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
+        for offset in 1..50 {
+            let selected = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet,
+                start + Duration::from_millis(offset),
+            ).unwrap();
+            assert_eq!(selected, first);
+        }
+    }
+
+    #[test]
+    fn sustained_bulk_flow_is_distributed_at_bounded_flowlet_boundaries() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let packet = bulk_packet(12000);
+        let flow = ghulakh_protocol::ip_flow::ip_flow_key(&packet).unwrap();
+        let start = Instant::now();
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
+        let mut selected_paths = [false; 10];
+        selected_paths[first] = true;
+        let mut path_changes = 0;
+
+        for offset in 1..4_000u64 {
+            let previous = scheduler.flows.get(&flow).copied().unwrap();
+            let selected = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet,
+                start + Duration::from_micros(offset * 520),
+            ).unwrap();
+            if selected != previous.path_index {
+                assert!(
+                    previous.burst_left < packet.len(),
+                    "a healthy bulk flow may change paths only after its current 16 KiB flowlet",
+                );
+                path_changes += 1;
+            }
+            selected_paths[selected] = true;
+        }
+
+        assert!(path_changes > 1, "a sustained bulk uplink must use multiple TURN allocations");
+        assert!(selected_paths.iter().filter(|selected| **selected).count() > 1);
+    }
+
+    #[test]
+    fn independent_flows_are_distributed_across_healthy_paths() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 10];
+        let sendable = [true; 10];
+        let start = Instant::now();
+        let mut selected = [false; 10];
+        for source_port in 10_000..11_000 {
+            let index = scheduler.select(
+                &healthy,
+                &sendable,
+                &packet(source_port),
+                start,
+            ).unwrap();
+            selected[index] = true;
+        }
+        assert!(selected.into_iter().all(|path| path));
+    }
+
+    #[test]
+    fn failed_or_backpressured_path_is_not_selected_for_new_flowlet() {
+        let mut scheduler = UplinkScheduler::default();
+        let healthy = [true; 4];
+        let sendable = [true; 4];
+        let packet = packet(12000);
+        let start = Instant::now();
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
         let mut degraded = healthy;
         degraded[first] = false;
-        let fallback = select_path_index(&packet(12000), &degraded).unwrap();
-        assert_ne!(fallback, first);
-        assert_eq!(select_path_index(&packet(12000), &[false; 4]), None);
+        let replacement = scheduler.select(
+            &degraded,
+            &sendable,
+            &packet,
+            start + Duration::from_millis(1),
+        ).unwrap();
+        assert_ne!(replacement, first);
+        let mut backpressured = [true; 4];
+        backpressured[replacement] = false;
+        let next = scheduler.select(
+            &healthy,
+            &backpressured,
+            &packet,
+            start + Duration::from_millis(2),
+        ).unwrap();
+        assert_ne!(next, replacement);
+        assert_eq!(scheduler.select(&[false; 4], &[false; 4], &packet, start), None);
     }
 
     #[tokio::test]
@@ -796,6 +1239,53 @@ mod path_group_tests {
     }
 
     #[tokio::test]
+    async fn concurrent_path_replacement_and_close_complete_without_deadlock() {
+        for attempt in 0..16u8 {
+            let group_id = [attempt.saturating_add(1); 16];
+            let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
+            let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+            let group = Arc::new(TurnClientPathGroup::new(vec![path_a, path_b]).unwrap());
+            drop(downlink_b);
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while group.failed_path_ids() != vec![1] {
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+
+            let (replacement, _replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
+            let barrier = Arc::new(std::sync::Barrier::new(3));
+            let runtime = tokio::runtime::Handle::current();
+            let replace_group = Arc::clone(&group);
+            let replace_barrier = Arc::clone(&barrier);
+            let replace_runtime = runtime.clone();
+            let replace_thread = std::thread::spawn(move || {
+                let _entered = replace_runtime.enter();
+                replace_barrier.wait();
+                replace_group.replace_path(replacement)
+            });
+            let close_group = Arc::clone(&group);
+            let close_barrier = Arc::clone(&barrier);
+            let close_thread = std::thread::spawn(move || {
+                close_barrier.wait();
+                close_group.close();
+            });
+            barrier.wait();
+
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while (!replace_thread.is_finished() || !close_thread.is_finished())
+                && Instant::now() < deadline
+            {
+                tokio::task::yield_now().await;
+            }
+            assert!(replace_thread.is_finished(), "path replacement deadlocked with close()");
+            assert!(close_thread.is_finished(), "close() deadlocked with path replacement");
+            let _ = replace_thread.join().unwrap();
+            close_thread.join().unwrap();
+            assert!(group.is_closed());
+        }
+    }
+
+    #[tokio::test]
     async fn failed_path_can_be_replaced_without_rebuilding_the_group() {
         let group_id = [0x6b; 16];
         let (path_a, _uplink_a, downlink_a) = mock_path(0, group_id);
@@ -804,12 +1294,11 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
 
         drop(downlink_b);
-        for _ in 0..20 {
-            if group.active_paths() == 1 { break; }
-            tokio::task::yield_now().await;
-        }
-        assert_eq!(group.active_paths(), 1);
-        assert_eq!(group.failed_path_ids(), vec![1]);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
         assert_eq!(group.path_context(1).unwrap().group_id, group_id);
 
         let (replacement, mut replacement_uplink, _replacement_downlink) = mock_path(1, group_id);
@@ -818,18 +1307,54 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
 
-        let packet = (10000..10100)
-            .map(packet)
-            .find(|bytes| ghulakh_protocol::ip_flow::flow_hash(bytes) as usize % 2 == 1)
-            .unwrap();
+        // Prove the replacement remains usable after the other allocation fails.
+        drop(downlink_a);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![0] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let packet = packet(10000);
         group.send_packet(DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet.clone(),
         }).await.unwrap();
-        assert_eq!(replacement_uplink.recv().await.unwrap().packet, packet);
-        drop(downlink_a);
+        let received = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            replacement_uplink.recv(),
+        ).await.unwrap().unwrap();
+        assert_eq!(received.sequence, Some(0));
+        assert_eq!(received.datagram.packet, packet);
     }
 
+
+    #[tokio::test]
+    async fn replacement_that_fails_immediately_is_marked_unhealthy() {
+        let group_id = [0x7e; 16];
+        let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+
+        // First establish that the slot is failed; then make the replacement
+        // fail immediately so its watcher must publish the unhealthy state.
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let (replacement, _replacement_uplink, replacement_downlink) = mock_path(1, group_id);
+        drop(replacement_downlink);
+        group.replace_path(replacement).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(group.active_paths(), 1);
+    }
 
     #[tokio::test]
     async fn simultaneous_path_failures_can_all_be_replaced_in_place() {
@@ -858,29 +1383,31 @@ mod path_group_tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
 
-        let mut selected = [None, None];
-        for source_port in 10000..10100 {
-            let bytes = packet(source_port);
-            let index = ghulakh_protocol::ip_flow::flow_hash(&bytes) as usize % 2;
-            selected[index].get_or_insert(bytes);
-            if selected.iter().all(Option::is_some) {
-                break;
-            }
-        }
-        let selected = selected.map(Option::unwrap);
-        for (index, bytes) in selected.into_iter().enumerate() {
+        let mut selected_paths = [false, false];
+        for source_port in 10000..10002 {
             let datagram = DataDatagram {
                 kind: ghulakh_protocol::IpPacketKind::Ipv4,
-                packet: bytes,
+                packet: packet(source_port),
             };
             group.send_packet(datagram.clone()).await.unwrap();
-            let received = if index == 0 {
-                replacement_uplink_a.recv().await.unwrap()
-            } else {
-                replacement_uplink_b.recv().await.unwrap()
-            };
-            assert_eq!(received, datagram);
+            let (path_index, received) = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                async {
+                    loop {
+                        if let Ok(received) = replacement_uplink_a.try_recv() {
+                            break (0, received);
+                        }
+                        if let Ok(received) = replacement_uplink_b.try_recv() {
+                            break (1, received);
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                },
+            ).await.unwrap();
+            assert_eq!(received.datagram, datagram);
+            selected_paths[path_index] = true;
         }
+        assert!(selected_paths.into_iter().all(|selected| selected));
         group.close();
     }
 
@@ -929,8 +1456,8 @@ mod path_group_tests {
         group_id: [u8; 16],
     ) -> (
         TurnClientRuntime,
-        mpsc::Receiver<DataDatagram>,
-        mpsc::Sender<DataDatagram>,
+        mpsc::Receiver<SequencedDataDatagram>,
+        mpsc::Sender<SequencedDataDatagram>,
     ) {
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
@@ -946,6 +1473,7 @@ mod path_group_tests {
             TurnClientRuntime {
                 config: ghulakh_protocol::session_handshake::TurnSessionConfig {
                     virtual_ipv4: "10.77.0.2".parse().unwrap(),
+                    virtual_ipv6: "fd77::2".parse().unwrap(),
                     mtu: 1100,
                 },
                 path_context: Some(TurnPathContext {
@@ -954,6 +1482,7 @@ mod path_group_tests {
                     path_count: 2,
                 }),
                 uplink,
+                next_uplink_sequence: tokio::sync::Mutex::new(0),
                 downlink: tokio::sync::Mutex::new(downlink),
                 dataplane_task: pending_dataplane,
                 maintenance_task: pending_maintenance,
@@ -965,6 +1494,127 @@ mod path_group_tests {
     }
 
     #[tokio::test]
+    async fn uplink_sequence_remains_monotonic_across_path_failover() {
+        let group_id = [0x72; 16];
+        let (path_a, mut uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, mut uplink_b, _downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        let datagram = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(23457),
+        };
+
+        group.send_packet(datagram.clone()).await.unwrap();
+        let first = uplink_a.recv().await.unwrap();
+        assert_eq!(first.sequence, Some(0));
+        assert_eq!(first.datagram, datagram);
+
+        drop(downlink_a);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![0] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        group.send_packet(datagram.clone()).await.unwrap();
+        let second = uplink_b.recv().await.unwrap();
+        assert_eq!(second.sequence, Some(1));
+        assert_eq!(second.datagram, datagram);
+        group.close();
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_restores_sequence_across_paths() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let make_datagram = |port| DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(port),
+        };
+        buffer.push(SequencedDataDatagram::new(2, make_datagram(12002)), now);
+        buffer.push(SequencedDataDatagram::new(0, make_datagram(12000)), now);
+        buffer.push(SequencedDataDatagram::new(1, make_datagram(12001)), now);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12000u16.to_be_bytes());
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12002u16.to_be_bytes());
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_restores_same_flow_order_across_bulk_burst_boundary() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let flow_packet = |marker: u16| {
+            let mut bytes = vec![0u8; 28];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&marker.to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
+            bytes[12..16].copy_from_slice(&[203, 0, 113, 8]);
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 2]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+            DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: bytes,
+            }
+        };
+        let flow_key = ghulakh_protocol::ip_flow::ip_flow_key(&flow_packet(0).packet)
+            .expect("test packet must identify a UDP flow");
+        for marker in 0..=13u16 {
+            let packet = flow_packet(marker);
+            assert_eq!(
+                ghulakh_protocol::ip_flow::ip_flow_key(&packet.packet),
+                Some(flow_key),
+                "all burst-boundary packets must belong to one UDP flow",
+            );
+        }
+
+        // Model the final packet of the next flowlet arriving before the
+        // earlier packets still in flight on the previous TURN allocation.
+        buffer.push(SequencedDataDatagram::new(13, flow_packet(13)), now);
+        for sequence in 0..13u64 {
+            buffer.push(SequencedDataDatagram::new(sequence, flow_packet(sequence as u16)), now);
+        }
+        for sequence in 0..14u16 {
+            let received = buffer.pop_ready().expect("burst-boundary packet must be ready");
+            assert_eq!(
+                u16::from_be_bytes([received.packet[4], received.packet[5]]),
+                sequence,
+                "one UDP flow must retain packet order across TURN path changes",
+            );
+        }
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_skips_lost_sequence_and_drops_late_packet() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let make_datagram = |port| DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(port),
+        };
+        buffer.push(SequencedDataDatagram::new(1, make_datagram(12001)), now);
+        buffer.push(SequencedDataDatagram::new(3, make_datagram(12003)), now);
+        assert!(buffer.pop_ready().is_none());
+        let first_gap_deadline = now + DOWNLINK_REORDER_GAP_TIMEOUT;
+        buffer.advance_gap(first_gap_deadline);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
+        assert_eq!(
+            buffer.gap_deadline(),
+            Some(first_gap_deadline + DOWNLINK_REORDER_GAP_TIMEOUT),
+        );
+        buffer.advance_gap(first_gap_deadline + DOWNLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12003u16.to_be_bytes());
+        buffer.push(SequencedDataDatagram::new(0, make_datagram(12000)), first_gap_deadline);
+        buffer.push(SequencedDataDatagram::new(2, make_datagram(12002)), first_gap_deadline);
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[tokio::test]
     async fn path_group_dispatches_merges_downlink_and_degrades_after_path_loss() {
         let group_id = [0x5a; 16];
         let (path_a, mut uplink_a, downlink_a) = mock_path(0, group_id);
@@ -972,35 +1622,40 @@ mod path_group_tests {
         let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
         assert_eq!(group.active_paths(), 2);
 
-        // Uplink flow affinity must keep a flow on one path while distinct
-        // flows can be distributed across the independent path queues.
-        let mut selected_flows = [None, None];
+        // Distinct small UDP flows are spread over the independent path queues.
+        let mut selected_paths = [false; 2];
         for source_port in 10000..10100 {
-            let bytes = packet(source_port);
-            let path = select_path_index(&bytes, &[true, true]).unwrap();
-            if selected_flows[path].is_none() {
-                selected_flows[path] = Some((path, bytes));
+            let datagram = DataDatagram {
+                kind: ghulakh_protocol::IpPacketKind::Ipv4,
+                packet: packet(source_port),
+            };
+            group.send_packet(datagram.clone()).await.unwrap();
+            if let Ok(received) = uplink_a.try_recv() {
+                assert_eq!(received.datagram, datagram);
+                selected_paths[0] = true;
+            } else if let Ok(received) = uplink_b.try_recv() {
+                assert_eq!(received.datagram, datagram);
+                selected_paths[1] = true;
             }
-            if selected_flows.iter().all(Option::is_some) {
+            if selected_paths.iter().all(|selected| *selected) {
                 break;
             }
         }
-        let selected_flows = selected_flows.map(Option::unwrap);
-        for (expected_path, bytes) in selected_flows {
-            let datagram = DataDatagram {
-                kind: ghulakh_protocol::IpPacketKind::Ipv4,
-                packet: bytes.clone(),
-            };
-            group.send_packet(datagram.clone()).await.unwrap();
-            let received = if expected_path == 0 {
-                uplink_a.recv().await.unwrap()
-            } else {
-                uplink_b.recv().await.unwrap()
-            };
-            assert_eq!(received, datagram);
-            let other = if expected_path == 0 { &mut uplink_b } else { &mut uplink_a };
-            assert!(other.try_recv().is_err());
-        }
+        assert!(selected_paths.into_iter().all(|selected| selected));
+
+        // Sequenced packets arriving on independent paths are resequenced before TUN delivery.
+        let ordered_a = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(13000),
+        };
+        let ordered_b = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(13001),
+        };
+        downlink_a.send(SequencedDataDatagram::new(1, ordered_b.clone())).await.unwrap();
+        downlink_b.send(SequencedDataDatagram::new(0, ordered_a.clone())).await.unwrap();
+        assert_eq!(group.receive_packet().await.unwrap(), ordered_a);
+        assert_eq!(group.receive_packet().await.unwrap(), ordered_b);
 
         // The downlink fan-in accepts packets from either independent path.
         let down_a = DataDatagram {
@@ -1011,8 +1666,8 @@ mod path_group_tests {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet(12002),
         };
-        downlink_a.send(down_a.clone()).await.unwrap();
-        downlink_b.send(down_b.clone()).await.unwrap();
+        downlink_a.send(SequencedDataDatagram::unsequenced(down_a.clone())).await.unwrap();
+        downlink_b.send(SequencedDataDatagram::unsequenced(down_b.clone())).await.unwrap();
         let mut merged = vec![
             group.receive_packet().await.unwrap(),
             group.receive_packet().await.unwrap(),
@@ -1032,21 +1687,12 @@ mod path_group_tests {
             },
         ).await.unwrap();
 
-        let mut failed_path_flow = None;
-        for source_port in 20000..20100 {
-            let bytes = packet(source_port);
-            if select_path_index(&bytes, &[true, true]) == Some(0) {
-                failed_path_flow = Some(bytes);
-                break;
-            }
-        }
-        let bytes = failed_path_flow.expect("a flow assigned to path zero exists");
         let datagram = DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
-            packet: bytes,
+            packet: packet(20000),
         };
         group.send_packet(datagram.clone()).await.unwrap();
-        assert_eq!(uplink_b.recv().await.unwrap(), datagram);
+        assert_eq!(uplink_b.recv().await.unwrap().datagram, datagram);
         assert!(uplink_a.try_recv().is_err());
 
         group.close();
@@ -1059,43 +1705,31 @@ mod path_group_tests {
         let (path_b, mut uplink_b, _downlink_b) = mock_path(1, group_id);
         let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
 
-        let packet_bytes = packet(23456);
-        let selected = select_path_index(&packet_bytes, &[true, true]).unwrap();
         let datagram = DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
-            packet: packet_bytes,
+            packet: packet(23456),
         };
 
-        for _ in 0..APP_QUEUE_CAPACITY {
+        // The source scheduler changes paths at a flowlet boundary when the
+        // current allocation's bounded outbound queue is full.
+        for _ in 0..(APP_QUEUE_CAPACITY * 2) {
             group.send_packet(datagram.clone()).await.unwrap();
         }
         assert_eq!(group.uplink_queue_drops(), 0);
+        assert_eq!(uplink_a.len(), APP_QUEUE_CAPACITY);
+        assert_eq!(uplink_b.len(), APP_QUEUE_CAPACITY);
 
-        // A full flow-affine queue drops the newest packet; it must not move
-        // that flow to another path and overtake packets already queued there.
+        // Once every path queue is full, the newest packet is dropped.
         group.send_packet(datagram.clone()).await.unwrap();
         assert_eq!(group.uplink_queue_drops(), 1);
 
-        let (selected_rx, other_rx) = if selected == 0 {
-            (&mut uplink_a, &mut uplink_b)
-        } else {
-            (&mut uplink_b, &mut uplink_a)
-        };
         for _ in 0..APP_QUEUE_CAPACITY {
-            assert_eq!(selected_rx.recv().await.unwrap(), datagram);
+            assert_eq!(uplink_a.recv().await.unwrap().datagram, datagram);
+            assert_eq!(uplink_b.recv().await.unwrap().datagram, datagram);
         }
-        assert!(selected_rx.try_recv().is_err());
-        assert!(other_rx.try_recv().is_err());
+        assert!(uplink_a.try_recv().is_err());
+        assert!(uplink_b.try_recv().is_err());
         group.close();
     }
 
-    #[test]
-    fn different_flows_can_select_different_paths() {
-        let healthy = [true, true, true, true];
-        let selections: std::collections::HashSet<usize> =
-            (10000..10064)
-                .map(|port| select_path_index(&packet(port), &healthy).unwrap())
-                .collect();
-        assert!(selections.len() > 1);
-    }
 }

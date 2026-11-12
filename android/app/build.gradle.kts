@@ -5,6 +5,7 @@ plugins {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.14.1")
     // Use a real JSON implementation in local JVM tests instead of Android SDK stub methods.
     testImplementation("org.json:json:20240303")
 }
@@ -25,5 +26,8 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
+    }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
 }

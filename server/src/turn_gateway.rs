@@ -6,10 +6,10 @@
 //! or destination addresses carried only inside an unauthenticated payload.
 
 use std::{
-    collections::HashMap,
-    net::{Ipv4Addr, SocketAddr},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -17,6 +17,7 @@ use std::{
 
 use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
+    ordered_datagram::SequencedDataDatagram,
     secure_frame::{protected_frame_session_id, FrameOpener, FrameSealer},
     DataDatagram, IpPacketKind,
     turn_path_context::TurnPathContext,
@@ -33,18 +34,278 @@ const UDP_BUFFER_SIZE: usize = 65_507;
 const DATAGRAM_DISPATCH_SHARDS: usize = 8;
 const DATAGRAM_DISPATCH_CAPACITY: usize = 256;
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+// Client authenticated keepalive cadence is 15 seconds with a 45-second failure deadline.
+const PATH_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const UPLINK_REORDER_GAP_TIMEOUT: Duration = Duration::from_millis(250);
+const UPLINK_REORDER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(25);
+const UPLINK_REORDER_MAX_PENDING: usize = 512;
+const DOWNLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
+const DOWNLINK_MIN_RATE_BYTES_PER_SEC: f64 = 150_000.0;
+const DOWNLINK_ADJUST_INTERVAL: Duration = Duration::from_millis(100);
+const DOWNLINK_RATE_RECOVERY_STEP: f64 = 5_000.0;
+const DOWNLINK_QUEUE_CAPACITY: usize = 128;
+const DOWNLINK_BUCKET_CAPACITY: f64 = 10_500.0;
+const DOWNLINK_MAX_DEFICIT: f64 = -4_500.0;
+const FLOW_TABLE_MAX: usize = 1024;
+const FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
+const FLOW_EVICT_EVERY: u32 = 1024;
+// Keep latency-sensitive UDP flows on one relay path, but let sustained bulk
+// flows use bounded flowlet bursts across independent TURN allocations.
+const FLOW_BURST_BYTES: usize = 16 * 1024;
+const SMALL_UDP_MAX_LEN: usize = 300;
+const SMALL_UDP_STICKY: Duration = Duration::from_secs(1);
+const PIN_WINDOW: Duration = Duration::from_millis(250);
+const PIN_WINDOW_MAX_BYTES: usize = (DOWNLINK_RATE_BYTES_PER_SEC as usize) * 3 / 4 / 4;
+const BULK_HOLD: Duration = Duration::from_secs(2);
 
-fn datagram_dispatch_shard(datagram: &[u8]) -> usize {
-    let Ok(session_id) = protected_frame_session_id(datagram) else {
-        // Handshake and malformed traffic share a bounded lane; established
-        // sessions never contend with one another unless their shard hashes collide.
-        return 0;
-    };
-    let hash = session_id.iter().fold(0x811c_9dc5u32, |state, byte| {
+#[derive(Clone, Copy)]
+struct DownlinkFlowState {
+    session_id: [u8; 8],
+    last_seen: Instant,
+    burst_left: usize,
+    sticky_until: Option<Instant>,
+    window_start: Instant,
+    window_bytes: usize,
+    bulk_until: Option<Instant>,
+}
+
+#[derive(Clone, Copy)]
+struct DownlinkRateController {
+    rate: f64,
+    congested: bool,
+    last_adjust: Option<Instant>,
+}
+
+impl DownlinkRateController {
+    fn new() -> Self {
+        Self { rate: DOWNLINK_RATE_BYTES_PER_SEC, congested: false, last_adjust: None }
+    }
+
+    fn mark_congested(&mut self) {
+        self.congested = true;
+    }
+
+    fn tick(&mut self, now: Instant) {
+        let Some(last) = self.last_adjust else {
+            self.last_adjust = Some(now);
+            return;
+        };
+        if now.saturating_duration_since(last) < DOWNLINK_ADJUST_INTERVAL {
+            return;
+        }
+        if self.congested {
+            self.rate = (self.rate * 0.85).max(DOWNLINK_MIN_RATE_BYTES_PER_SEC);
+            self.congested = false;
+        } else {
+            self.rate = (self.rate + DOWNLINK_RATE_RECOVERY_STEP)
+                .min(DOWNLINK_RATE_BYTES_PER_SEC);
+        }
+        self.last_adjust = Some(now);
+    }
+}
+
+struct DownlinkScheduler {
+    tokens: HashMap<[u8; 8], f64>,
+    last_update: HashMap<[u8; 8], Instant>,
+    rates: HashMap<[u8; 8], DownlinkRateController>,
+    flows: HashMap<(IpAddr, ghulakh_protocol::ip_flow::IpFlowKey), DownlinkFlowState>,
+    cursor: usize,
+    evict_counter: u32,
+}
+
+impl DownlinkScheduler {
+    fn new() -> Self {
+        Self {
+            tokens: HashMap::new(),
+            last_update: HashMap::new(),
+            rates: HashMap::new(),
+            flows: HashMap::new(),
+            cursor: 0,
+            evict_counter: 0,
+        }
+    }
+
+    fn remove_session(&mut self, session_id: [u8; 8]) {
+        self.tokens.remove(&session_id);
+        self.last_update.remove(&session_id);
+        self.rates.remove(&session_id);
+    }
+
+    fn mark_congested(&mut self, session_id: [u8; 8]) {
+        self.rates.entry(session_id).or_insert_with(DownlinkRateController::new)
+            .mark_congested();
+    }
+
+    fn refill(&mut self, id: [u8; 8], now: Instant) {
+        let rate = {
+            let controller = self.rates.entry(id).or_insert_with(DownlinkRateController::new);
+            controller.tick(now);
+            controller.rate
+        };
+        let previous = self.last_update.insert(id, now).unwrap_or(now);
+        let elapsed = now.saturating_duration_since(previous).as_secs_f64();
+        let tokens = self.tokens.entry(id).or_insert(DOWNLINK_BUCKET_CAPACITY);
+        *tokens = (*tokens + elapsed * rate).min(DOWNLINK_BUCKET_CAPACITY);
+    }
+
+    fn choose(
+        &mut self,
+        active: &[[u8; 8]],
+        sendable: &[bool],
+        now: Instant,
+        len: usize,
+    ) -> Option<[u8; 8]> {
+        if active.is_empty() || sendable.len() != active.len() {
+            return None;
+        }
+        let start = self.cursor % active.len();
+        let mut best = None;
+        let mut best_tokens = f64::NEG_INFINITY;
+        for offset in 0..active.len() {
+            let index = (start + offset) % active.len();
+            let id = active[index];
+            self.refill(id, now);
+            if !sendable[index] {
+                self.mark_congested(id);
+                continue;
+            }
+            let tokens = self.tokens.get(&id).copied().unwrap_or(0.0);
+            if tokens >= len as f64 {
+                self.cursor = (index + 1) % active.len();
+                return Some(id);
+            }
+            if tokens > best_tokens {
+                best_tokens = tokens;
+                best = Some((index, id));
+            }
+        }
+        let (index, id) = best?;
+        self.cursor = (index + 1) % active.len();
+        Some(id)
+    }
+
+    fn select_sendable(
+        &mut self,
+        active: &[[u8; 8]],
+        sendable: &[bool],
+        client_ip: impl Into<IpAddr>,
+        packet: &[u8],
+        now: Instant,
+    ) -> Option<[u8; 8]> {
+        if active.is_empty() || sendable.len() != active.len() {
+            return None;
+        }
+        self.evict_counter = self.evict_counter.wrapping_add(1);
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY)
+            || self.flows.len() >= FLOW_TABLE_MAX
+        {
+            self.flows.retain(|_, state| {
+                now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL
+            });
+            if self.flows.len() >= FLOW_TABLE_MAX {
+                self.flows.clear();
+            }
+        }
+
+        let Some(flow) = ghulakh_protocol::ip_flow::ip_flow_key(packet) else {
+            let id = self.choose(active, sendable, now, packet.len())?;
+            self.refill(id, now);
+            if let Some(tokens) = self.tokens.get_mut(&id) {
+                *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
+            }
+            return Some(id);
+        };
+        let key = (client_ip.into(), flow);
+        let small_udp = flow.protocol() == 17 && packet.len() <= SMALL_UDP_MAX_LEN;
+        let selected = if let Some(mut state) = self.flows.get(&key).copied() {
+            state.last_seen = now;
+            if now.saturating_duration_since(state.window_start) >= PIN_WINDOW {
+                state.window_start = now;
+                state.window_bytes = 0;
+            }
+            state.window_bytes = state.window_bytes.saturating_add(packet.len());
+            if state.window_bytes > PIN_WINDOW_MAX_BYTES {
+                state.bulk_until = Some(now + BULK_HOLD);
+                state.sticky_until = None;
+            }
+            let bulk = state.bulk_until.is_some_and(|until| now < until);
+            if small_udp && !bulk {
+                state.sticky_until = Some(now + SMALL_UDP_STICKY);
+            }
+            let sticky = state.sticky_until.is_some_and(|until| now < until);
+            let assigned_sendable = active.iter().position(|id| *id == state.session_id)
+                .is_some_and(|index| sendable[index]);
+            if assigned_sendable && (sticky || state.burst_left >= packet.len()) {
+                state.burst_left = state.burst_left.saturating_sub(packet.len());
+                let id = state.session_id;
+                self.flows.insert(key, state);
+                id
+            } else {
+                let id = self.choose(active, sendable, now, packet.len())?;
+                state.session_id = id;
+                state.burst_left = FLOW_BURST_BYTES.saturating_sub(packet.len());
+                self.flows.insert(key, state);
+                id
+            }
+        } else {
+            let id = self.choose(active, sendable, now, packet.len())?;
+            self.flows.insert(key, DownlinkFlowState {
+                session_id: id,
+                last_seen: now,
+                burst_left: FLOW_BURST_BYTES.saturating_sub(packet.len()),
+                sticky_until: small_udp.then_some(now + SMALL_UDP_STICKY),
+                window_start: now,
+                window_bytes: packet.len(),
+                bulk_until: None,
+            });
+            id
+        };
+        self.refill(selected, now);
+        if let Some(tokens) = self.tokens.get_mut(&selected) {
+            *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
+        }
+        Some(selected)
+    }
+
+    #[cfg(test)]
+    fn select(
+        &mut self,
+        active: &[[u8; 8]],
+        client_ip: impl Into<IpAddr>,
+        packet: &[u8],
+        now: Instant,
+    ) -> [u8; 8] {
+        let sendable = vec![true; active.len()];
+        self.select_sendable(active, &sendable, client_ip, packet, now)
+            .expect("test scheduler requires at least one sendable path")
+    }
+}
+
+
+
+fn dispatch_shard_for_key(key: &[u8]) -> usize {
+    let hash = key.iter().fold(0x811c_9dc5u32, |state, byte| {
         (state ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
     });
     hash as usize % DATAGRAM_DISPATCH_SHARDS
+}
+
+fn session_dispatch_shard(session_id: [u8; 8], group_id: Option<[u8; 16]>) -> usize {
+    match group_id {
+        Some(group_id) => dispatch_shard_for_key(&group_id),
+        None => dispatch_shard_for_key(&session_id),
+    }
+}
+
+struct SessionRegistration {
+    session_id: [u8; 8],
+    client_ipv4: Ipv4Addr,
+    client_ipv6: Ipv6Addr,
+    relay_peer: SocketAddr,
+    opener: FrameOpener,
+    sealer: FrameSealer,
+    path_lease: Option<(TurnPathContext, Option<[u8; 16]>)>,
 }
 
 struct SessionCrypto {
@@ -52,19 +313,134 @@ struct SessionCrypto {
     sealer: FrameSealer,
 }
 
+fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
+    let octets = address.octets();
+    let host = (u16::from(octets[2]) << 8) | u16::from(octets[3]);
+    Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
+}
+
+#[derive(Default)]
+struct UplinkReorderBuffer {
+    expected_sequence: u64,
+    pending: BTreeMap<u64, DataDatagram>,
+    ready: VecDeque<DataDatagram>,
+    gap_started: Option<Instant>,
+}
+
+impl UplinkReorderBuffer {
+    fn push(&mut self, packet: SequencedDataDatagram, now: Instant) -> Vec<DataDatagram> {
+        let Some(sequence) = packet.sequence else {
+            if self.pending.is_empty() && self.ready.is_empty() {
+                return vec![packet.datagram];
+            }
+            return Vec::new();
+        };
+        if sequence < self.expected_sequence {
+            return Vec::new();
+        }
+        if sequence > self.expected_sequence && self.pending.len() >= UPLINK_REORDER_MAX_PENDING {
+            self.advance_gap(now);
+            if sequence < self.expected_sequence {
+                return self.take_ready();
+            }
+        }
+        if sequence == self.expected_sequence {
+            self.ready.push_back(packet.datagram);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+            self.drain(now);
+        } else {
+            self.pending.entry(sequence).or_insert(packet.datagram);
+            self.gap_started.get_or_insert(now);
+        }
+        self.take_ready()
+    }
+
+    fn drain(&mut self, now: Instant) {
+        while let Some(packet) = self.pending.remove(&self.expected_sequence) {
+            self.ready.push_back(packet);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+        }
+        if self.pending.is_empty() {
+            self.gap_started = None;
+        } else {
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn advance_gap(&mut self, now: Instant) {
+        if let Some((&next_sequence, _)) = self.pending.first_key_value() {
+            self.expected_sequence = next_sequence;
+            self.gap_started = None;
+            self.drain(now);
+        } else {
+            self.gap_started = None;
+        }
+    }
+
+    fn expire_gap(&mut self, now: Instant) -> Vec<DataDatagram> {
+        if self.gap_started.is_some_and(|started| {
+            now.saturating_duration_since(started) >= UPLINK_REORDER_GAP_TIMEOUT
+        }) {
+            self.advance_gap(now);
+        }
+        self.take_ready()
+    }
+
+    fn take_ready(&mut self) -> Vec<DataDatagram> {
+        self.ready.drain(..).collect()
+    }
+}
+
+/// Apply a reorder-buffer transition and synchronously enqueue every packet it releases.
+///
+/// The mutex deliberately remains held through delivery: otherwise a concurrent
+/// gap-expiry task can enqueue an older batch after a packet-processing task has
+/// already enqueued a newer sequence. The delivery callback must be non-blocking.
+fn update_and_deliver_uplink(
+    reorder: &Mutex<UplinkReorderBuffer>,
+    update: impl FnOnce(&mut UplinkReorderBuffer) -> Vec<DataDatagram>,
+    mut deliver: impl FnMut(DataDatagram),
+) -> bool {
+    let Ok(mut reorder) = reorder.lock() else {
+        return false;
+    };
+    let ready = update(&mut reorder);
+    for packet in ready {
+        deliver(packet);
+    }
+    true
+}
+
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
+    client_ipv6: Ipv6Addr,
     relay_peer: SocketAddr,
     path_context: Option<TurnPathContext>,
     lease_generation: Option<[u8; 16]>,
     crypto: Mutex<SessionCrypto>,
     last_activity: Mutex<Instant>,
+    downlink_sender: mpsc::Sender<Vec<u8>>,
+    downlink_failed: Arc<AtomicBool>,
+    downlink_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    uplink_reorder: Arc<Mutex<UplinkReorderBuffer>>,
+}
+
+impl Drop for GatewaySession {
+    fn drop(&mut self) {
+        if let Ok(worker) = self.downlink_worker.lock() {
+            if let Some(worker) = worker.as_ref() {
+                worker.abort();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
 struct ClientRoute {
     group_id: Option<[u8; 16]>,
     sessions: Vec<[u8; 8]>,
+    next_downlink_sequence: Arc<AtomicU64>,
+    uplink_reorder: Arc<Mutex<UplinkReorderBuffer>>,
 }
 
 #[derive(Default)]
@@ -75,7 +451,7 @@ struct Counters {
     rejected_session: AtomicU64,
     rejected_packet: AtomicU64,
     queue_drops: AtomicU64,
-    downlink_sent: AtomicU64,
+    downlink_sent: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -93,10 +469,11 @@ pub struct TurnGatewayStats {
 pub struct TurnGateway {
     socket: Arc<UdpSocket>,
     sessions: RwLock<HashMap<[u8; 8], Arc<GatewaySession>>>,
-    clients: RwLock<HashMap<Ipv4Addr, ClientRoute>>,
+    clients: RwLock<HashMap<IpAddr, ClientRoute>>,
     tun_ingress: mpsc::Sender<DataDatagram>,
     handshake: AsyncMutex<Option<super::turn_handshake_service::TurnHandshakeService>>,
     counters: Counters,
+    downlink_scheduler: Mutex<DownlinkScheduler>,
 }
 
 impl TurnGateway {
@@ -113,6 +490,7 @@ impl TurnGateway {
                 tun_ingress,
                 handshake: AsyncMutex::new(None),
                 counters: Counters::default(),
+                downlink_scheduler: Mutex::new(DownlinkScheduler::new()),
             }),
             tun_receiver,
         ))
@@ -159,6 +537,7 @@ impl TurnGateway {
         // after commit it receives the exact cached response.
         if let Some(established) = established {
             let client_ipv4 = established.config.virtual_ipv4;
+            let client_ipv6 = established.config.virtual_ipv6;
             let handshake_id = established.handshake_id;
             let session_id = established.frame_keys.session_id();
             let (opener, sealer) = established.frame_keys.into_server_codecs();
@@ -180,14 +559,15 @@ impl TurnGateway {
                 return Err(error).context("commit ServerAck replay protection before gateway registration");
             }
 
-            if let Err(error) = self.register_session_with_path_generation(
+            if let Err(error) = self.register_session_with_path_generation(SessionRegistration {
                 session_id,
                 client_ipv4,
-                established.relay_peer,
+                client_ipv6,
+                relay_peer: established.relay_peer,
                 opener,
                 sealer,
-                path_context.map(|context| (context, Some(handshake_id))),
-            ).await {
+                path_lease: path_context.map(|context| (context, Some(handshake_id))),
+            }).await {
                 let service = handshake.as_mut().context("TURN handshake service is not installed")?;
                 let cache_rollback = service.remove_cached_response(payload, relay_peer);
                 // Keep the staged keys and path lease for a retry of this exact
@@ -234,24 +614,35 @@ impl TurnGateway {
         sealer: FrameSealer,
         path_context: Option<TurnPathContext>,
     ) -> Result<()> {
-        self.register_session_with_path_generation(
-            session_id, client_ipv4, relay_peer, opener, sealer, path_context.map(|context| (context, None)),
-        ).await
+        self.register_session_with_path_generation(SessionRegistration {
+            session_id,
+            client_ipv4,
+            client_ipv6: ipv6_for_virtual_ipv4(client_ipv4),
+            relay_peer,
+            opener,
+            sealer,
+            path_lease: path_context.map(|context| (context, None)),
+        }).await
     }
 
     async fn register_session_with_path_generation(
         &self,
-        session_id: [u8; 8],
-        client_ipv4: Ipv4Addr,
-        relay_peer: SocketAddr,
-        opener: FrameOpener,
-        sealer: FrameSealer,
-        path_lease: Option<(TurnPathContext, Option<[u8; 16]>)>,
+        registration: SessionRegistration,
     ) -> Result<()> {
+        let SessionRegistration {
+            session_id,
+            client_ipv4,
+            client_ipv6,
+            relay_peer,
+            opener,
+            sealer,
+            path_lease,
+        } = registration;
         let path_context = path_lease.map(|(context, _)| context);
         let lease_generation = path_lease.and_then(|(_, generation)| generation);
         ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
         ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
+        ensure!(!client_ipv6.is_unspecified() && !client_ipv6.is_multicast(), "client IPv6 address is invalid");
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
         ensure!(opener.session_id() == session_id, "opener session identifier mismatch");
         ensure!(sealer.session_id() == session_id, "sealer session identifier mismatch");
@@ -263,35 +654,88 @@ impl TurnGateway {
         let mut clients = self.clients.write().await;
         ensure!(!sessions.contains_key(&session_id), "TURN session already exists");
         let group_id = path_context.map(|context| context.group_id);
-        if let Some(route) = clients.get_mut(&client_ipv4) {
-            ensure!(group_id.is_some() && route.group_id == group_id,
+        let mut replaced_sessions = Vec::new();
+        let ipv4_key = IpAddr::V4(client_ipv4);
+        let ipv6_key = IpAddr::V6(client_ipv6);
+        let uplink_reorder = if clients.contains_key(&ipv4_key) {
+            ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == Some(group_id),
                 "client IPv4 address is already owned by another tunnel group");
-            ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
-            let context = path_context.context("multipath route requires path context")?;
-            let replaced: Vec<[u8; 8]> = route.sessions.iter().copied().filter(|id| {
-                sessions.get(id).and_then(|entry| entry.path_context)
-                    .is_some_and(|existing| existing.path_id == context.path_id)
-            }).collect();
-            for old_id in replaced {
-                sessions.remove(&old_id);
-                route.sessions.retain(|id| *id != old_id);
-            }
-            route.sessions.push(session_id);
+            ensure!(clients.get(&ipv6_key).is_some_and(|route| route.group_id == group_id),
+                "client IPv6 address is already owned by another tunnel group");
+            let updated_route = {
+                let route = clients.get_mut(&ipv4_key).expect("checked IPv4 route");
+                ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
+                let context = path_context.context("multipath route requires path context")?;
+                let replaced: Vec<[u8; 8]> = route.sessions.iter().copied().filter(|id| {
+                    sessions.get(id).and_then(|entry| entry.path_context)
+                        .is_some_and(|existing| existing.path_id == context.path_id)
+                }).collect();
+                for old_id in replaced {
+                    sessions.remove(&old_id);
+                    route.sessions.retain(|id| *id != old_id);
+                    replaced_sessions.push(old_id);
+                }
+                route.sessions.push(session_id);
+                route.clone()
+            };
+            let reorder = Arc::clone(&updated_route.uplink_reorder);
+            clients.insert(ipv6_key, updated_route);
+            reorder
         } else {
-            clients.insert(client_ipv4, ClientRoute {
+            ensure!(!clients.contains_key(&ipv6_key), "client IPv6 address is already assigned");
+            let reorder = Arc::new(Mutex::new(UplinkReorderBuffer::default()));
+            let route = ClientRoute {
                 group_id,
                 sessions: vec![session_id],
-            });
-        }
+                next_downlink_sequence: Arc::new(AtomicU64::new(0)),
+                uplink_reorder: Arc::clone(&reorder),
+            };
+            clients.insert(ipv4_key, route.clone());
+            clients.insert(ipv6_key, route);
+            reorder
+        };
+        let (downlink_sender, mut downlink_receiver) =
+            mpsc::channel::<Vec<u8>>(DOWNLINK_QUEUE_CAPACITY);
+        let downlink_failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = Arc::clone(&downlink_failed);
+        let socket = Arc::clone(&self.socket);
+        let sent_counter = Arc::clone(&self.counters.downlink_sent);
+        let downlink_worker = tokio::spawn(async move {
+            while let Some(encoded) = downlink_receiver.recv().await {
+                match socket.send_to(&encoded, relay_peer).await {
+                    Ok(sent) if sent == encoded.len() => {
+                        worker_failed.store(false, Ordering::Release);
+                        sent_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        worker_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+        });
         let session = Arc::new(GatewaySession {
             client_ipv4,
+            client_ipv6,
             relay_peer,
             path_context,
             lease_generation,
             crypto: Mutex::new(SessionCrypto { opener, sealer }),
             last_activity: Mutex::new(Instant::now()),
+            downlink_sender,
+            downlink_failed,
+            downlink_worker: Mutex::new(Some(downlink_worker)),
+            uplink_reorder,
         });
         sessions.insert(session_id, session);
+        drop(clients);
+        drop(sessions);
+        if !replaced_sessions.is_empty() {
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                for old_id in replaced_sessions {
+                    scheduler.remove_session(old_id);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -301,19 +745,24 @@ impl TurnGateway {
             let mut clients = self.clients.write().await;
             if let Some(session) = sessions.remove(&session_id) {
                 let mut group_empty = false;
-                if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                let ipv4_key = IpAddr::V4(session.client_ipv4);
+                let ipv6_key = IpAddr::V6(session.client_ipv6);
+                let updated = if let Some(route) = clients.get_mut(&ipv4_key) {
                     route.sessions.retain(|id| *id != session_id);
                     group_empty = route.sessions.is_empty();
-                }
-                if group_empty {
-                    clients.remove(&session.client_ipv4);
-                }
+                    (!group_empty).then(|| route.clone())
+                } else { None };
+                if let Some(route) = updated { clients.insert(ipv6_key, route); }
+                if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
                 Some((session.client_ipv4, session.path_context, session.lease_generation, group_empty))
             } else {
                 None
             }
         };
         if let Some((address, path_context, generation, group_empty)) = removed {
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                scheduler.remove_session(session_id);
+            }
             self.release_session_lease(address, path_context, generation, group_empty).await;
             true
         } else {
@@ -337,20 +786,25 @@ impl TurnGateway {
             for session_id in expired_ids {
                 if let Some(session) = sessions.remove(&session_id) {
                     let mut group_empty = false;
-                    if let Some(route) = clients.get_mut(&session.client_ipv4) {
+                    let ipv4_key = IpAddr::V4(session.client_ipv4);
+                    let ipv6_key = IpAddr::V6(session.client_ipv6);
+                    let updated = if let Some(route) = clients.get_mut(&ipv4_key) {
                         route.sessions.retain(|id| *id != session_id);
                         group_empty = route.sessions.is_empty();
-                    }
-                    if group_empty {
-                        clients.remove(&session.client_ipv4);
-                    }
-                    leases.push((session.client_ipv4, session.path_context, session.lease_generation, group_empty));
+                        (!group_empty).then(|| route.clone())
+                    } else { None };
+                    if let Some(route) = updated { clients.insert(ipv6_key, route); }
+                    if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
+                    leases.push((session_id, session.client_ipv4, session.path_context, session.lease_generation, group_empty));
                 }
             }
             leases
         };
         let mut released = Vec::new();
-        for (address, path_context, generation, group_empty) in expired {
+        for (session_id, address, path_context, generation, group_empty) in expired {
+            if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
+                scheduler.remove_session(session_id);
+            }
             self.release_session_lease(address, path_context, generation, group_empty).await;
             if group_empty {
                 released.push(address);
@@ -375,6 +829,38 @@ impl TurnGateway {
         }
     }
 
+    async fn session_dispatch_shard(&self, datagram: &[u8]) -> usize {
+        let Ok(session_id) = protected_frame_session_id(datagram) else {
+            return 0;
+        };
+        let session = self.sessions.read().await.get(&session_id).cloned();
+        let group_id = session.and_then(|session| session.path_context.map(|context| context.group_id));
+        session_dispatch_shard(session_id, group_id)
+    }
+
+    async fn flush_expired_uplink_gaps(&self, now: Instant) {
+        let routes: Vec<ClientRoute> = self.clients.read().await.values().cloned().collect();
+        let mut seen = HashSet::new();
+        for route in routes {
+            let identity = Arc::as_ptr(&route.uplink_reorder) as usize;
+            if !seen.insert(identity) {
+                continue;
+            }
+            update_and_deliver_uplink(
+                &route.uplink_reorder,
+                |reorder| reorder.expire_gap(now),
+                |packet| match self.tun_ingress.try_send(packet) {
+                    Ok(()) => {
+                        self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                    }
+                },
+            );
+        }
+    }
+
     /// Receive relay datagrams continuously. A fixed set of bounded shards
     /// preserves FIFO for each session while processing unrelated sessions in parallel.
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -395,17 +881,21 @@ impl TurnGateway {
 
         let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
         let mut maintenance = tokio::time::interval(SESSION_MAINTENANCE_INTERVAL);
+        let mut reorder_maintenance = tokio::time::interval(UPLINK_REORDER_MAINTENANCE_INTERVAL);
         loop {
             tokio::select! {
                 received = self.socket.recv_from(&mut buffer) => {
                     let (length, source) = received.context("receive TURN relay datagram")?;
                     let datagram = buffer[..length].to_vec();
-                    let shard = datagram_dispatch_shard(&datagram);
+                    let shard = self.session_dispatch_shard(&datagram).await;
                     if senders[shard].try_send((datagram, source)).is_err() {
                         // Drop newest under pressure; never block socket intake or
                         // move a packet to another shard, which could reorder a session.
                         self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+                _ = reorder_maintenance.tick() => {
+                    self.flush_expired_uplink_gaps(Instant::now()).await;
                 }
                 _ = maintenance.tick() => {
                     self.expire_idle_sessions(Instant::now(), SESSION_IDLE_TIMEOUT).await;
@@ -469,6 +959,7 @@ impl TurnGateway {
             if let Ok(mut last_activity) = session.last_activity.lock() {
                 *last_activity = Instant::now();
             }
+            session.downlink_failed.store(false, Ordering::Release);
             let nonce = u64::from_be_bytes(plaintext[4..12].try_into().expect("validated keepalive length"));
             let response = {
                 let mut crypto = match session.crypto.lock() {
@@ -491,69 +982,109 @@ impl TurnGateway {
             }
             return;
         }
-        let packet = match DataDatagram::decode(&plaintext) {
-            Ok(packet) if packet.kind == IpPacketKind::Ipv4 => packet,
-            _ => {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
+        let packet = match SequencedDataDatagram::decode(&plaintext) {
+            Ok(packet) => packet,
+            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
         };
+        let datagram = &packet.datagram;
         if let Ok(mut last_activity) = session.last_activity.lock() {
             *last_activity = Instant::now();
         }
-        if packet.packet.len() < 20
-            || Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])
-                != session.client_ipv4
-        {
+        session.downlink_failed.store(false, Ordering::Release);
+        let source_ip = match datagram.kind {
+            IpPacketKind::Ipv4 if datagram.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(datagram.packet[12], datagram.packet[13], datagram.packet[14], datagram.packet[15])),
+            IpPacketKind::Ipv6 if datagram.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&datagram.packet[8..24]).expect("validated IPv6 source length"))),
+            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
+        };
+        if source_ip != IpAddr::V4(session.client_ipv4) && source_ip != IpAddr::V6(session.client_ipv6) {
             self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        match self.tun_ingress.try_send(packet) {
-            Ok(()) => {
-                self.counters.accepted.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => {
-                self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
-            }
+        if !update_and_deliver_uplink(
+            &session.uplink_reorder,
+            |reorder| reorder.push(packet, Instant::now()),
+            |packet| match self.tun_ingress.try_send(packet) {
+                Ok(()) => {
+                    self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                }
+            },
+        ) {
+            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
         }
     }
 
     /// Route a packet read from server TUN to the registered client whose
     /// virtual IPv4 address is the packet destination.
     pub async fn send_downlink(&self, packet: &DataDatagram) -> Result<()> {
-        ensure!(packet.kind == IpPacketKind::Ipv4, "TURN gateway currently supports IPv4 only");
-        ensure!(packet.packet.len() >= 20, "IPv4 packet is truncated");
-        let destination = Ipv4Addr::new(
-            packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19],
-        );
+        let destination = match packet.kind {
+            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19])),
+            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet.packet[24..40]).expect("validated IPv6 destination length"))),
+            IpPacketKind::Ipv4 => anyhow::bail!("IPv4 packet is truncated"),
+            IpPacketKind::Ipv6 => anyhow::bail!("IPv6 packet is truncated"),
+        };
         let route = self.clients.read().await.get(&destination).cloned()
             .context("no active TURN session group for packet destination")?;
         let now = Instant::now();
         let sessions = self.sessions.read().await;
-        let active_paths: Vec<Arc<GatewaySession>> = route.sessions.iter()
+        let active_paths: Vec<([u8; 8], Arc<GatewaySession>)> = route.sessions.iter()
             .filter_map(|session_id| {
                 let session = sessions.get(session_id)?.clone();
                 let last_activity = *session.last_activity.lock().ok()?;
-                (now.saturating_duration_since(last_activity) < SESSION_IDLE_TIMEOUT)
-                    .then_some(session)
+                (now.saturating_duration_since(last_activity) < PATH_HEALTH_TIMEOUT)
+                    .then_some((*session_id, session))
             })
             .collect();
         drop(sessions);
         ensure!(!active_paths.is_empty(), "TURN session group has no recently authenticated paths");
-        let selected = ghulakh_protocol::ip_flow::flow_hash(&packet.packet) as usize % active_paths.len();
-        let session = Arc::clone(&active_paths[selected]);
+        let active_ids: Vec<[u8; 8]> = active_paths.iter().map(|(id, _)| *id).collect();
+        let sendable: Vec<bool> = active_paths.iter().map(|(_, session)| {
+            !session.downlink_failed.load(Ordering::Acquire)
+                && session.downlink_sender.capacity() > 0
+        }).collect();
+        let selected_id = {
+            self.downlink_scheduler.lock()
+                .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
+                .select_sendable(&active_ids, &sendable, destination, &packet.packet, now)
+        };
+        let Some(selected_id) = selected_id else {
+            self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
+        let session = active_paths.iter().find(|(id, _)| *id == selected_id)
+            .map(|(_, session)| Arc::clone(session))
+            .context("selected TURN downlink path disappeared")?;
+        let sequence = route.next_downlink_sequence.try_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ).map_err(|_| anyhow::anyhow!("TURN downlink sequence space exhausted"))?;
+        let ordered_packet = SequencedDataDatagram::new(sequence, packet.clone())
+            .encode().context("encode ordered downlink IP packet")?;
         let encoded = {
-            let mut crypto = session.crypto.lock().map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
-            crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
+            let mut crypto = session.crypto.lock()
+                .map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
+            crypto.sealer.seal(&ordered_packet)
                 .context("protect TURN downlink frame")?
         };
-        let sent = self.socket.send_to(&encoded, session.relay_peer).await
-            .context("send raw downlink payload to observed TURN relay peer")?;
-        ensure!(sent == encoded.len(), "partial TURN gateway UDP datagram send");
-        // Only authenticated client traffic refreshes path liveness. A local
-        // UDP send succeeding does not prove the TURN allocation is still alive.
-        self.counters.downlink_sent.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        match session.downlink_sender.try_send(encoded) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Drop newest rather than moving it to another path after the
+                // capacity snapshot; this preserves FIFO for the selected flowlet.
+                self.downlink_scheduler.lock()
+                    .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
+                    .mark_congested(selected_id);
+                self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                session.downlink_failed.store(true, Ordering::Release);
+                Err(anyhow::anyhow!("selected TURN downlink path queue is closed"))
+            }
+        }
     }
 
     pub fn stats(&self) -> TurnGatewayStats {
@@ -582,6 +1113,71 @@ mod tests {
     const CLIENT_PREFIX: [u8; 4] = [0x31; 4];
     const SERVER_PREFIX: [u8; 4] = [0x42; 4];
 
+    #[test]
+    fn uplink_reorder_buffer_restores_sequence_across_paths() {
+        let now = Instant::now();
+        let make_packet = |marker: u8| {
+            let mut bytes = vec![0u8; 28];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&u16::from(marker).to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
+            bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 3]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        };
+        let mut reorder = UplinkReorderBuffer::default();
+        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        let ready = reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now);
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].packet[5], 2);
+        assert_eq!(ready[1].packet[5], 3);
+    }
+
+    #[test]
+    fn uplink_reorder_buffer_skips_expired_gap_and_drops_late_packet() {
+        let now = Instant::now();
+        let make_packet = |marker: u8| {
+            let mut bytes = vec![0u8; 28];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&u16::from(marker).to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
+            bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 3]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
+            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        };
+        let mut reorder = UplinkReorderBuffer::default();
+        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        let ready = reorder.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].packet[5], 3);
+        assert!(reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now + UPLINK_REORDER_GAP_TIMEOUT).is_empty());
+    }
+
+    #[test]
+    fn downlink_rate_controller_reduces_on_congestion_and_recovers_gradually() {
+        let start = Instant::now();
+        let mut controller = DownlinkRateController::new();
+        controller.tick(start);
+        controller.mark_congested();
+        controller.tick(start + DOWNLINK_ADJUST_INTERVAL);
+        let reduced = DOWNLINK_RATE_BYTES_PER_SEC * 0.85;
+        assert!((controller.rate - reduced).abs() < 0.001);
+        assert!(!controller.congested);
+
+        controller.tick(start + DOWNLINK_ADJUST_INTERVAL * 2);
+        assert!((controller.rate - (reduced + DOWNLINK_RATE_RECOVERY_STEP)).abs() < 0.001);
+    }
+
     fn packet(source: Ipv4Addr, destination: Ipv4Addr) -> DataDatagram {
         let mut bytes = vec![0u8; 20];
         bytes[0] = 0x45;
@@ -604,8 +1200,8 @@ mod tests {
         use ghulakh_protocol::stun::{
             append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
             decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
-            ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
+            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
+            ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
             METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
         };
         use ghulakh_protocol::turn_channel_data::{decode_channel_data, encode_channel_data};
@@ -657,6 +1253,7 @@ mod tests {
                             match request.method {
                                 METHOD_ALLOCATE => {
                                     assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                    assert_eq!(request.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
                                     attributes.push(StunAttribute {
                                         kind: ATTR_XOR_RELAYED_ADDRESS,
                                         value: encode_xor_address(peer_addr, &request.transaction_id),
@@ -735,26 +1332,30 @@ mod tests {
 
 
     #[test]
-    fn datagram_dispatch_keeps_each_session_on_one_fifo_shard() {
-        use ghulakh_protocol::secure_frame::{FrameDirection, FrameSealer};
+    fn path_group_sessions_share_one_fifo_dispatch_shard() {
+        let group_id = [0x91; 16];
+        assert_eq!(
+            session_dispatch_shard([0x11; 8], Some(group_id)),
+            session_dispatch_shard([0x22; 8], Some(group_id)),
+        );
+    }
 
+    #[test]
+    fn dispatch_keeps_each_session_on_one_fifo_shard() {
         let session_a = [0x11; 8];
         let session_b = [0x22; 8];
-        let mut sealer_a = FrameSealer::new(
-            [0x31; 32], [0x41; 4], session_a, FrameDirection::ClientToServer,
-        );
-        let frame_a1 = sealer_a.seal(b"first").unwrap();
-        let frame_a2 = sealer_a.seal(b"second").unwrap();
-        let mut sealer_b = FrameSealer::new(
-            [0x32; 32], [0x42; 4], session_b, FrameDirection::ClientToServer,
-        );
-        let frame_b = sealer_b.seal(b"other session").unwrap();
+        let shard_a = session_dispatch_shard(session_a, None);
+        let shard_b = session_dispatch_shard(session_b, None);
 
-        assert_eq!(datagram_dispatch_shard(&frame_a1), datagram_dispatch_shard(&frame_a2));
-        assert!(datagram_dispatch_shard(&frame_a1) < DATAGRAM_DISPATCH_SHARDS);
-        assert!(datagram_dispatch_shard(&frame_b) < DATAGRAM_DISPATCH_SHARDS);
-        assert_eq!(datagram_dispatch_shard(b"GHHS-invalid"), 0);
-        assert_eq!(datagram_dispatch_shard(b"malformed"), 0);
+        assert_eq!(shard_a, session_dispatch_shard(session_a, None));
+        assert!(shard_a < DATAGRAM_DISPATCH_SHARDS);
+        assert!(shard_b < DATAGRAM_DISPATCH_SHARDS);
+
+        let group_id = [0x91; 16];
+        let path_a = session_dispatch_shard(session_a, Some(group_id));
+        let path_b = session_dispatch_shard(session_b, Some(group_id));
+        assert_eq!(path_a, path_b);
+        assert!(path_a < DATAGRAM_DISPATCH_SHARDS);
     }
 
     #[tokio::test]
@@ -786,16 +1387,16 @@ mod tests {
             Some(context_b),
         ).await.unwrap();
 
-        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
         assert_eq!(route.group_id, Some(group_id));
         assert_eq!(route.sessions.len(), 2);
 
         assert!(gateway.unregister_session(session_a).await);
-        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
-        assert!(!gateway.clients.read().await.contains_key(&CLIENT_IP));
+        assert!(!gateway.clients.read().await.contains_key(&IpAddr::V4(CLIENT_IP)));
     }
 
     #[tokio::test]
@@ -824,7 +1425,7 @@ mod tests {
 
         let stale = gateway.sessions.read().await.get(&session_a).cloned().unwrap();
         *stale.last_activity.lock().unwrap() =
-            Instant::now() - SESSION_IDLE_TIMEOUT - Duration::from_secs(1);
+            Instant::now() - PATH_HEALTH_TIMEOUT - Duration::from_secs(1);
 
         let outbound = packet(Ipv4Addr::new(203, 0, 113, 10), CLIENT_IP);
         gateway.send_downlink(&outbound).await.unwrap();
@@ -957,7 +1558,7 @@ mod tests {
             } else {
                 opener_b.open(&buffer[..length]).unwrap()
             };
-            assert_eq!(DataDatagram::decode(&plaintext).unwrap(), flow);
+            assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, flow);
             let other = if expected_path == 0 { &relay_b } else { &relay_a };
             assert!(timeout(Duration::from_millis(25), other.recv_from(&mut buffer)).await.is_err());
         }
@@ -979,8 +1580,8 @@ mod tests {
             stun::{
                 append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
                 decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-                ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
-                ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
+                ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
+                ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
                 METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
             },
             turn_channel_data::{decode_channel_data, encode_channel_data},
@@ -1069,6 +1670,7 @@ mod tests {
                                 match request.method {
                                     METHOD_ALLOCATE => {
                                         assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                        assert_eq!(request.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
                                         attributes.push(StunAttribute {
                                             kind: ATTR_XOR_RELAYED_ADDRESS,
                                             value: encode_xor_address(peer_addr, &request.transaction_id),
@@ -1155,7 +1757,8 @@ mod tests {
         gateway.send_downlink(&downlink).await.unwrap();
         let received_downlink = timeout(Duration::from_secs(2), client.receive_packet())
             .await.unwrap().unwrap();
-        assert_eq!(received_downlink, downlink);
+        assert_eq!(received_downlink.sequence, Some(0));
+        assert_eq!(received_downlink.datagram, downlink);
         assert_eq!(gateway.stats().accepted, 1);
 
         client.close();
@@ -1360,7 +1963,7 @@ mod tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
         assert_eq!(
-            gateway.clients.read().await.get(&CLIENT_IP).unwrap().sessions.len(),
+            gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).unwrap().sessions.len(),
             2,
             "gateway must contain exactly the two newly authenticated paths",
         );
@@ -1525,7 +2128,7 @@ mod tests {
         assert_eq!(source, gateway_addr);
         let mut client_rx = FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient);
         let plaintext = client_rx.open(&buffer[..length]).unwrap();
-        assert_eq!(DataDatagram::decode(&plaintext).unwrap(), downlink);
+        assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, downlink);
 
         assert_eq!(gateway.stats().accepted, 1);
         assert_eq!(gateway.stats().downlink_sent, 1);
@@ -1593,7 +2196,7 @@ mod tests {
             Instant::now(),
             Duration::from_secs(60),
         ).await;
-        assert_eq!(expired, vec![CLIENT_IP]);
+        assert_eq!(expired, vec![IpAddr::V4(CLIENT_IP)]);
         assert!(gateway.sessions.read().await.is_empty());
         assert!(gateway.clients.read().await.is_empty());
     }
@@ -1674,4 +2277,374 @@ mod tests {
         assert_eq!(gateway.stats().rejected_packet, 1);
         gateway_task.abort();
     }
+
+    fn scheduler_udp_flow(source_port: u16, total_len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; total_len];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        bytes[9] = 17;
+        bytes[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        bytes[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn downlink_scheduler_fallback_considers_paths_before_cursor() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x11; 8], [0x22; 8], [0x33; 8]];
+        scheduler.cursor = 1;
+        scheduler.tokens.insert(active[0], 5.0);
+        scheduler.tokens.insert(active[1], 1.0);
+        scheduler.tokens.insert(active[2], 1.0);
+
+        assert_eq!(scheduler.choose(&active, &[true, true, true], Instant::now(), 100), Some(active[0]));
+    }
+
+    #[test]
+    fn downlink_scheduler_keeps_token_state_isolated_between_client_groups() {
+        let mut scheduler = DownlinkScheduler::new();
+        let first_group = [[0xa1; 8], [0xa2; 8]];
+        let second_group = [[0xb1; 8], [0xb2; 8]];
+        let now = Instant::now();
+
+        // Initialize accounting for every path in the group before comparing
+        // snapshots; select() only refills the path it actually chooses.
+        for id in first_group {
+            scheduler.refill(id, now);
+        }
+        scheduler.select(&first_group, CLIENT_IP, &scheduler_udp_flow(16_101, 1200), now);
+        let first_group_tokens = first_group.map(|id| scheduler.tokens[&id]);
+        for id in second_group {
+            scheduler.refill(id, now + Duration::from_millis(1));
+        }
+        scheduler.select(
+            &second_group,
+            Ipv4Addr::new(10, 77, 0, 3),
+            &scheduler_udp_flow(16_102, 1200),
+            now + Duration::from_millis(1),
+        );
+
+        for (id, expected) in first_group.into_iter().zip(first_group_tokens) {
+            assert_eq!(scheduler.tokens.get(&id), Some(&expected));
+            assert!(scheduler.last_update.contains_key(&id));
+        }
+        for id in second_group {
+            assert!(scheduler.tokens.contains_key(&id));
+        }
+
+        scheduler.remove_session(first_group[0]);
+        assert!(!scheduler.tokens.contains_key(&first_group[0]));
+        assert!(!scheduler.last_update.contains_key(&first_group[0]));
+    }
+
+    #[test]
+    fn downlink_scheduler_reassigns_flow_after_path_loss_and_expires_idle_state() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x61; 8], [0x62; 8]];
+        let start = Instant::now();
+        let flow = scheduler_udp_flow(16_000, 1200);
+        let original = scheduler.select(&active, CLIENT_IP, &flow, start);
+        let surviving = if original == active[0] { active[1] } else { active[0] };
+        assert_eq!(scheduler.select(&[surviving], CLIENT_IP, &flow, start + Duration::from_millis(1)), surviving);
+
+        scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
+        let expired_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
+        scheduler.select(&[surviving], CLIENT_IP, &scheduler_udp_flow(16_001, 1200), expired_at);
+        let key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap());
+        assert!(!scheduler.flows.contains_key(&key));
+    }
+
+    #[test]
+    fn downlink_scheduler_distributes_distinct_flows_between_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x11; 8], [0x22; 8]];
+        let now = Instant::now();
+        let first = scheduler.select(&active, CLIENT_IP, &scheduler_udp_flow(10001, 1200), now);
+        let second = scheduler.select(&active, CLIENT_IP, &scheduler_udp_flow(10002, 1200), now);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn downlink_scheduler_balances_independent_flows_across_ten_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
+        let start = Instant::now();
+        let mut per_path = HashMap::<[u8; 8], usize>::new();
+
+        for flow_index in 0..1_000u16 {
+            let flow = scheduler_udp_flow(20_000 + flow_index, 1200);
+            let first_at = start + Duration::from_micros(u64::from(flow_index) * 1_000);
+            let selected = scheduler.select(&active, CLIENT_IP, &flow, first_at);
+            *per_path.entry(selected).or_default() += 1;
+
+            // Every packet within the current 16 KiB burst must retain the
+            // same allocation, even while other flows are being scheduled.
+            for packet_index in 1..10u64 {
+                let now = first_at + Duration::from_micros(packet_index * 100);
+                assert_eq!(
+                    scheduler.select(&active, CLIENT_IP, &flow, now),
+                    selected,
+                    "flow {flow_index} changed allocation inside its burst",
+                );
+            }
+        }
+
+        assert_eq!(
+            per_path.len(),
+            active.len(),
+            "independent flows must reach every configured path: {per_path:?}",
+        );
+    }
+
+    #[test]
+    fn downlink_scheduler_clears_full_flow_table_after_expiry_sweep() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x41; 8], [0x42; 8]];
+        let start = Instant::now();
+
+        for (index, port) in (10_000..10_000 + FLOW_TABLE_MAX as u16).enumerate() {
+            let flow = scheduler_udp_flow(port, 1200);
+            scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
+        }
+        assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
+
+        let overflow = scheduler_udp_flow(30_000, 1200);
+        let selected = scheduler.select(
+            &active,
+            IpAddr::V4(CLIENT_IP),
+            &overflow,
+            start + Duration::from_micros(FLOW_TABLE_MAX as u64),
+        );
+
+        assert!(active.contains(&selected));
+        assert_eq!(scheduler.flows.len(), 1);
+        assert!(scheduler.flows.contains_key(&(
+            IpAddr::V4(CLIENT_IP),
+            ghulakh_protocol::ip_flow::ip_flow_key(&overflow).unwrap(),
+        )));
+    }
+
+    #[test]
+    fn downlink_scheduler_reclaims_expired_flow_at_capacity() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x43; 8], [0x44; 8]];
+        let start = Instant::now();
+
+        for (index, port) in (10_000..10_000 + FLOW_TABLE_MAX as u16).enumerate() {
+            let flow = scheduler_udp_flow(port, 1200);
+            scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
+        }
+        let expired_key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
+        let sweep_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
+        for (key, state) in &mut scheduler.flows {
+            state.last_seen = if *key == expired_key { start } else { sweep_at };
+        }
+        scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
+        let new_flow = scheduler_udp_flow(30_001, 1200);
+        scheduler.select(&active, CLIENT_IP, &new_flow, sweep_at);
+
+        assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
+        assert!(!scheduler.flows.contains_key(&expired_key));
+        assert!(scheduler.flows.contains_key(&(IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap())));
+    }
+
+    #[test]
+    fn downlink_scheduler_scopes_identical_flows_to_virtual_clients() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x51; 8], [0x52; 8]];
+        let flow = scheduler_udp_flow(15_000, 1200);
+        scheduler.select(&active, CLIENT_IP, &flow, Instant::now());
+        scheduler.select(&active, Ipv4Addr::new(10, 77, 0, 3), &flow, Instant::now());
+        assert_eq!(scheduler.flows.len(), 2);
+    }
+
+    #[test]
+    fn downlink_scheduler_keeps_each_flow_on_one_path() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x31; 8], [0x32; 8]];
+        let start = Instant::now();
+        let game_flow = scheduler_udp_flow(12000, 120);
+        let game_path = scheduler.select(&active, CLIENT_IP, &game_flow, start);
+        for index in 1..250 {
+            let now = start + Duration::from_micros(index * 100);
+            assert_eq!(scheduler.select(&active, CLIENT_IP, &game_flow, now), game_path);
+        }
+
+        let another_flow = scheduler_udp_flow(12002, 1200);
+        let another_path = scheduler.select(&active, CLIENT_IP, &another_flow, start);
+        assert_ne!(another_path, game_path);
+    }
+
+    // A 1,300-byte bulk flow stays pinned through its 16 KiB burst, then moves.
+    #[test]
+    fn downlink_scheduler_switches_bulk_flow_only_at_burst_boundary() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x31; 8], [0x32; 8]];
+        let start = Instant::now();
+        let packet = scheduler_udp_flow(12_001, 1_300);
+        let first_path = scheduler.select(&active, CLIENT_IP, &packet, start);
+        for index in 1..12 {
+            let now = start + Duration::from_micros(index * 520);
+            assert_eq!(scheduler.select(&active, CLIENT_IP, &packet, now), first_path);
+        }
+        let boundary = start + Duration::from_micros(12 * 520);
+        let next_path = scheduler.select(&active, CLIENT_IP, &packet, boundary);
+        assert_ne!(next_path, first_path);
+    }
+
+    #[test]
+    fn downlink_scheduler_distributes_sustained_bulk_udp_across_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
+        let start = Instant::now();
+        // Model a sustained QUIC-like download: large UDP datagrams arrive
+        // continuously, while each flowlet remains on one allocation.
+        let flow = scheduler_udp_flow(12_001, 1300);
+        let mut per_path = HashMap::<[u8; 8], usize>::new();
+
+        for index in 0..4_000u64 {
+            let now = start + Duration::from_micros(index * 520);
+            let path = scheduler.select(&active, CLIENT_IP, &flow, now);
+            *per_path.entry(path).or_default() += 1;
+        }
+
+        assert_eq!(
+            per_path.len(),
+            active.len(),
+            "bulk flow should use every active path: {per_path:?}",
+        );
+        let busiest = per_path.values().copied().max().unwrap_or_default();
+        assert!(
+            busiest < 800,
+            "bulk flow remains pinned to too few paths: {per_path:?}",
+        );
+    }
+
+
+    #[test]
+    fn downlink_scheduler_excludes_unavailable_and_backpressured_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[1u8; 8], [2u8; 8]];
+        let packet = scheduler_udp_flow(12000, 120);
+        let now = Instant::now();
+
+        assert_eq!(
+            scheduler.select_sendable(&active, &[false, true], CLIENT_IP, &packet, now),
+            Some(active[1]),
+        );
+        assert_eq!(
+            scheduler.select_sendable(&active, &[false, false], CLIENT_IP, &packet, now),
+            None,
+        );
+    }
+
+    #[test]
+    fn downlink_scheduler_moves_a_pinned_flow_off_a_backpressured_path() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[3u8; 8], [4u8; 8]];
+        let packet = scheduler_udp_flow(12001, 120);
+        let now = Instant::now();
+        let first = scheduler.select_sendable(&active, &[true, true], CLIENT_IP, &packet, now).unwrap();
+        let next = scheduler.select_sendable(
+            &active,
+            &[first != active[0], first != active[1]],
+            IpAddr::V4(CLIENT_IP),
+            &packet,
+            now + Duration::from_millis(1),
+        ).unwrap();
+        assert_ne!(first, next);
+    }
+
+    #[test]
+    fn downlink_rate_controller_reduces_rate_on_congestion_and_recovers() {
+        let now = Instant::now();
+        let mut controller = DownlinkRateController::new();
+        controller.tick(now);
+        controller.mark_congested();
+        controller.tick(now + Duration::from_millis(100));
+        assert_eq!(controller.rate, DOWNLINK_RATE_BYTES_PER_SEC * 0.85);
+        controller.tick(now + Duration::from_millis(200));
+        assert_eq!(
+            controller.rate,
+            DOWNLINK_RATE_BYTES_PER_SEC * 0.85 + DOWNLINK_RATE_RECOVERY_STEP,
+        );
+    }
+
+    #[tokio::test]
+    async fn forwards_authenticated_ipv6_uplink_and_downlink() {
+        let (gateway, mut tun_rx) =
+            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let gateway_addr = gateway.local_addr().unwrap();
+        // Use an independently assigned IPv6 address rather than deriving it
+        // from IPv4. The authenticated handshake carries this exact address.
+        let client_ipv6: Ipv6Addr = "fd77:77::beef".parse().unwrap();
+
+        gateway.register_session_with_path_generation(SessionRegistration {
+            session_id: SESSION,
+            client_ipv4: CLIENT_IP,
+            client_ipv6,
+            relay_peer: relay_addr,
+            opener: FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            sealer: FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+            path_lease: None,
+        }).await.unwrap();
+
+        let gateway_task = {
+            let gateway = Arc::clone(&gateway);
+            tokio::spawn(async move { gateway.run().await })
+        };
+
+        let ipv6_packet = |source: Ipv6Addr, destination: Ipv6Addr| {
+            let mut bytes = vec![0u8; 40];
+            bytes[0] = 0x60;
+            bytes[6] = 59;
+            bytes[7] = 64;
+            bytes[8..24].copy_from_slice(&source.octets());
+            bytes[24..40].copy_from_slice(&destination.octets());
+            DataDatagram { kind: IpPacketKind::Ipv6, packet: bytes }
+        };
+
+        let mut client_tx = FrameSealer::new(
+            CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
+        );
+        let spoofed = ipv6_packet("fd77:77::99".parse().unwrap(), "2001:db8::99".parse().unwrap());
+        let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
+        relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(tun_rx.try_recv().is_err());
+        assert_eq!(gateway.stats().rejected_packet, 1);
+
+        let uplink = ipv6_packet(client_ipv6, "2001:db8::99".parse().unwrap());
+        let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
+        relay.send_to(&protected, gateway_addr).await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            uplink,
+        );
+
+        let downlink = ipv6_packet("2001:db8::99".parse().unwrap(), client_ipv6);
+        gateway.send_downlink(&downlink).await.unwrap();
+        let mut buffer = [0u8; 1500];
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await.unwrap().unwrap();
+        assert_eq!(source, gateway_addr);
+        let mut server_rx = FrameOpener::new(
+            SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient,
+        );
+        let plaintext = server_rx.open(&buffer[..length]).unwrap();
+        let ordered = ghulakh_protocol::ordered_datagram::SequencedDataDatagram::decode(&plaintext).unwrap();
+        assert_eq!(ordered.datagram, downlink);
+        assert_eq!(ordered.sequence, Some(0));
+
+        gateway_task.abort();
+    }
+
 }
+
+#[cfg(test)]
+#[path = "turn_gateway_path_tests.rs"]
+mod path_tests;
