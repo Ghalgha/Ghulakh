@@ -1844,14 +1844,14 @@ mod tests {
         let active = [[0x41; 8], [0x42; 8]];
         let start = Instant::now();
 
-        for port in 10_000..10_000 + FLOW_TABLE_MAX as u16 {
+        for (index, port) in (10_000..10_000 + FLOW_TABLE_MAX as u16).enumerate() {
             let flow = scheduler_udp_flow(port, 1200);
-            scheduler.select(&active, CLIENT_IP, &flow, start);
+            scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
         }
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
 
         let new_flow = scheduler_udp_flow(30_000, 1200);
-        scheduler.select(&active, CLIENT_IP, &new_flow, start + Duration::from_millis(1));
+        scheduler.select(&active, CLIENT_IP, &new_flow, start + Duration::from_micros(FLOW_TABLE_MAX as u64));
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
         assert!(!scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&scheduler_udp_flow(10_000, 1200)))));
