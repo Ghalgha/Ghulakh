@@ -25,7 +25,7 @@ TURN allocation credentials authorize use of a relay. They do not authenticate a
 - The network integration still needs source admission/rate limiting and must cache the response before attempting network send.
 - The server credential verifier is supplied by the caller. It must use the existing credential store with constant-time digest comparison, expiry/revocation and rate limiting.
 - The server static key pair persistence/rotation and secure client pin distribution are not integrated.
-- The gateway session registry is not yet populated from a completed Noise handshake.
+- Server TURN handshake service completes Noise XX, validates the device credential, creates the encrypted session acknowledgement, and registers the authenticated session before the acknowledgement is sent. The mock integration suite covers this ordering; live VK relay compatibility remains unverified.
 - Snow 0.10.0 implements the Noise framework but its own project documentation states it has not received a formal security audit. Treat the integration as research-stage pending dependency review and protocol audit.
 - The current implementation has unit tests for pinned server identity, credential rejection, encrypted server acknowledgement and both directional frame keys. These tests do not establish UDP handshake reliability or VK Calls compatibility.
 
