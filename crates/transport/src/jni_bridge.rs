@@ -390,7 +390,11 @@ fn receive_turn_packet_impl(handle: jlong) -> Result<Vec<u8>> {
 fn turn_client_config_impl(handle: jlong) -> Result<(String, String, jint)> {
     let session = turn_session(handle)?;
     let config = session.client.config();
-    Ok((config.virtual_ipv4.to_string(), config.virtual_ipv6.to_string(), jint::from(config.mtu)))
+    Ok((
+        config.virtual_ipv4.to_string(),
+        config.virtual_ipv6.to_string(),
+        jint::from(config.mtu),
+    ))
 }
 
 fn close_turn_impl(handle: jlong) -> Result<()> {
