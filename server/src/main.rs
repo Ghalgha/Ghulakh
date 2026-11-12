@@ -651,6 +651,12 @@ async fn main() -> Result<()> {
             ipv6_forward.trim() == "1",
             "Linux IPv6 forwarding is disabled; set net.ipv6.conf.all.forwarding=1"
         );
+        let ipv6_default_forward = fs::read_to_string("/proc/sys/net/ipv6/conf/default/forwarding")
+            .context("read default Linux IPv6 forwarding state")?;
+        anyhow::ensure!(
+            ipv6_default_forward.trim() == "1",
+            "default Linux IPv6 forwarding is disabled; set net.ipv6.conf.default.forwarding=1 before creating the TUN interface"
+        );
     }
 
     let mut turn_ingress_task = None;
@@ -673,8 +679,8 @@ async fn main() -> Result<()> {
             }));
         }
         eprintln!(
-            "TUN interface {} is active at {}/16 with MTU {}",
-            name, TUN_SERVER_IPV4, TUN_MTU
+            "Dual-stack TUN interface {} is active at {}/16 and {}/64 with MTU {}",
+            name, TUN_SERVER_IPV4, TUN_SERVER_IPV6, TUN_MTU
         );
         (sender, writer_task, reader_task)
     } else {
