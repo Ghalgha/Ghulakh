@@ -726,6 +726,11 @@ mod path_group_tests {
     }
 
     #[test]
+    fn recovery_backoff_rejects_zero_custom_cap() {
+        assert!(TurnPathRecoveryPolicy::new(std::time::Duration::ZERO).is_err());
+    }
+
+    #[test]
     fn recovery_backoff_custom_cap_cannot_exceed_android_limit() {
         let mut policy = TurnPathRecoveryPolicy::new(std::time::Duration::from_secs(120)).unwrap();
         let delays: Vec<_> = (0..8).map(|_| policy.record_failure().as_secs()).collect();
