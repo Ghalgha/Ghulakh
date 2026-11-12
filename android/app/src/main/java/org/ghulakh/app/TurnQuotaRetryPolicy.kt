@@ -1,6 +1,9 @@
 package org.ghulakh.app
 
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.security.MessageDigest
+import org.json.JSONObject
 
 /**
  * Bounded handling for an authenticated TURN Allocate 486 response.
@@ -26,8 +29,30 @@ internal object TurnQuotaRetryPolicy {
     ): Boolean = fingerprint in rejected
 
     fun fingerprint(credentialsJson: String): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-            .digest(credentialsJson.toByteArray(Charsets.UTF_8))
+        val root = JSONObject(credentialsJson)
+        val turnServer = root.optJSONObject("turn_server") ?: root
+        val username = turnServer.getString("username")
+        val credential = turnServer.getString("credential")
+        require(username.isNotBlank() && credential.isNotBlank()) {
+            "TURN credential identity is incomplete"
+        }
+        val urls = turnServer.getJSONArray("urls")
+        require(urls.length() in 1..16) { "TURN credential endpoint count is invalid" }
+        val endpoints = (0 until urls.length()).map { index ->
+            urls.getString(index).also { require(it.isNotBlank()) { "TURN endpoint is empty" } }
+        }.distinct().sorted()
+
+        // Hash only credential identity, not JSON formatting or unrelated response metadata.
+        // Length-prefixing makes the canonical byte sequence unambiguous.
+        val canonical = ByteArrayOutputStream()
+        DataOutputStream(canonical).use { output ->
+            (listOf(username, credential) + endpoints).forEach { value ->
+                val bytes = value.toByteArray(Charsets.UTF_8)
+                output.writeInt(bytes.size)
+                output.write(bytes)
+            }
+        }
+        val digest = MessageDigest.getInstance("SHA-256").digest(canonical.toByteArray())
         return digest.joinToString("") { byte -> "%02x".format(byte) }
     }
 

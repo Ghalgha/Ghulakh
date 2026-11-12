@@ -10,8 +10,12 @@ class TurnQuotaRetryPolicyTest {
     @Test
     fun retriesOnlyWithNewCredentialFingerprintsAndWithinBound() {
         val rejected = mutableSetOf<String>()
-        val first = TurnQuotaRetryPolicy.fingerprint("""{"username":"first","credential":"secret-a"}""")
-        val second = TurnQuotaRetryPolicy.fingerprint("""{"username":"second","credential":"secret-b"}""")
+        val first = TurnQuotaRetryPolicy.fingerprint(
+            """{"turn_server":{"username":"first","credential":"secret-a","urls":["turn:relay.example:3478"]}}""",
+        )
+        val second = TurnQuotaRetryPolicy.fingerprint(
+            """{"turn_server":{"username":"second","credential":"secret-b","urls":["turn:relay.example:3478"]}}""",
+        )
 
         assertTrue(TurnQuotaRetryPolicy.shouldRetry(0, first, rejected))
         assertFalse(TurnQuotaRetryPolicy.shouldRetry(1, first, rejected))
@@ -27,12 +31,20 @@ class TurnQuotaRetryPolicyTest {
 
     @Test
     fun fingerprintsAreStableAndDoNotExposeCredentialText() {
-        val credentials = """{"username":"user","credential":"private-value"}"""
+        val credentials = """{"turn_server":{"username":"user","credential":"private-value","urls":["turn:relay.example:3478","turn:backup.example:3478"]}}"""
+        val reordered = """{"metadata":"rotated","turn_server":{"urls":["turn:backup.example:3478","turn:relay.example:3478"],"credential":"private-value","username":"user"}}"""
         val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentials)
 
         assertEquals(fingerprint, TurnQuotaRetryPolicy.fingerprint(credentials))
+        assertEquals(fingerprint, TurnQuotaRetryPolicy.fingerprint(reordered))
         assertNotEquals(credentials, fingerprint)
         assertFalse(fingerprint.contains("private-value"))
+        assertNotEquals(
+            fingerprint,
+            TurnQuotaRetryPolicy.fingerprint(
+                """{"turn_server":{"username":"user","credential":"different-secret","urls":["turn:relay.example:3478","turn:backup.example:3478"]}}""",
+            ),
+        )
     }
 
     @Test
