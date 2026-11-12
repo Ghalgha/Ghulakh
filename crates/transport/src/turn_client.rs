@@ -640,21 +640,6 @@ fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<
     (!addresses.is_empty()).then(|| addresses[usize::from(path_id) % addresses.len()])
 }
 
-fn enqueue_uplink_packet(
-    sender: &mpsc::Sender<DataDatagram>,
-    packet: DataDatagram,
-    dropped: &AtomicU64,
-) -> std::result::Result<(), mpsc::error::TrySendError<DataDatagram>> {
-    match sender.try_send(packet) {
-        Ok(()) => Ok(()),
-        Err(error @ mpsc::error::TrySendError::Full(_)) => {
-            dropped.fetch_add(1, Ordering::Relaxed);
-            Err(error)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 const UPLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
 const UPLINK_BUCKET_CAPACITY: f64 = 10_500.0;
 const UPLINK_MAX_DEFICIT: f64 = -4_500.0;
