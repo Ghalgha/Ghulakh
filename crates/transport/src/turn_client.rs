@@ -739,7 +739,8 @@ fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<
 const UPLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
 const UPLINK_BUCKET_CAPACITY: f64 = 10_500.0;
 const UPLINK_MAX_DEFICIT: f64 = -4_500.0;
-const UPLINK_FLOW_BURST_BYTES: usize = 16 * 1024;
+// Keep each uplink flow on one TURN allocation; downlink striping is sequenced and reordered.
+const UPLINK_FLOW_BURST_BYTES: usize = usize::MAX;
 const UPLINK_FLOW_TABLE_MAX: usize = 1024;
 const UPLINK_FLOW_EVICT_EVERY: u32 = 1024;
 const UPLINK_FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
@@ -1094,24 +1095,22 @@ mod path_group_tests {
     }
 
     #[test]
-    fn sustained_bulk_flow_rotates_between_paths_in_bounded_flowlets() {
+    fn sustained_bulk_flow_remains_pinned_across_burst_boundaries() {
         let mut scheduler = UplinkScheduler::default();
         let healthy = [true; 10];
         let sendable = [true; 10];
         let packet = bulk_packet(12000);
         let start = Instant::now();
-        let mut counts = [0usize; 10];
-        for offset in 0..4_000u64 {
+        let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
+        for offset in 1..4_000u64 {
             let selected = scheduler.select(
                 &healthy,
                 &sendable,
                 &packet,
                 start + Duration::from_micros(offset * 520),
             ).unwrap();
-            counts[selected] += 1;
+            assert_eq!(selected, first, "one uplink flow must not switch paths at a burst boundary");
         }
-        assert!(counts.iter().all(|count| *count > 0), "all paths should carry bulk flowlets: {counts:?}");
-        assert!(counts.iter().copied().max().unwrap() < 800, "bulk flow should not remain on one path: {counts:?}");
     }
 
     #[test]
