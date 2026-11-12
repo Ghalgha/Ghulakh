@@ -6,7 +6,7 @@
 //! or destination addresses carried only inside an unauthenticated payload.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -37,6 +37,9 @@ const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 // Client authenticated keepalive cadence is 15 seconds with a 45-second failure deadline.
 const PATH_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
+const UPLINK_REORDER_GAP_TIMEOUT: Duration = Duration::from_millis(250);
+const UPLINK_REORDER_MAINTENANCE_INTERVAL: Duration = Duration::from_millis(25);
+const UPLINK_REORDER_MAX_PENDING: usize = 512;
 const DOWNLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
 const DOWNLINK_MIN_RATE_BYTES_PER_SEC: f64 = 150_000.0;
 const DOWNLINK_ADJUST_INTERVAL: Duration = Duration::from_millis(100);
@@ -316,6 +319,78 @@ fn ipv6_for_virtual_ipv4(address: Ipv4Addr) -> Ipv6Addr {
     Ipv6Addr::new(0xfd77, 0x77, 0, 0, 0, 0, 0, host)
 }
 
+#[derive(Default)]
+struct UplinkReorderBuffer {
+    expected_sequence: u64,
+    pending: BTreeMap<u64, DataDatagram>,
+    ready: VecDeque<DataDatagram>,
+    gap_started: Option<Instant>,
+}
+
+impl UplinkReorderBuffer {
+    fn push(&mut self, packet: SequencedDataDatagram, now: Instant) -> Vec<DataDatagram> {
+        let Some(sequence) = packet.sequence else {
+            if self.pending.is_empty() && self.ready.is_empty() {
+                return vec![packet.datagram];
+            }
+            return Vec::new();
+        };
+        if sequence < self.expected_sequence {
+            return Vec::new();
+        }
+        if sequence > self.expected_sequence && self.pending.len() >= UPLINK_REORDER_MAX_PENDING {
+            self.advance_gap(now);
+            if sequence < self.expected_sequence {
+                return self.take_ready();
+            }
+        }
+        if sequence == self.expected_sequence {
+            self.ready.push_back(packet.datagram);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+            self.drain(now);
+        } else {
+            self.pending.entry(sequence).or_insert(packet.datagram);
+            self.gap_started.get_or_insert(now);
+        }
+        self.take_ready()
+    }
+
+    fn drain(&mut self, now: Instant) {
+        while let Some(packet) = self.pending.remove(&self.expected_sequence) {
+            self.ready.push_back(packet);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+        }
+        if self.pending.is_empty() {
+            self.gap_started = None;
+        } else {
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn advance_gap(&mut self, now: Instant) {
+        if let Some((&next_sequence, _)) = self.pending.first_key_value() {
+            self.expected_sequence = next_sequence;
+            self.gap_started = None;
+            self.drain(now);
+        } else {
+            self.gap_started = None;
+        }
+    }
+
+    fn expire_gap(&mut self, now: Instant) -> Vec<DataDatagram> {
+        if self.gap_started.is_some_and(|started| {
+            now.saturating_duration_since(started) >= UPLINK_REORDER_GAP_TIMEOUT
+        }) {
+            self.advance_gap(now);
+        }
+        self.take_ready()
+    }
+
+    fn take_ready(&mut self) -> Vec<DataDatagram> {
+        self.ready.drain(..).collect()
+    }
+}
+
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
     client_ipv6: Ipv6Addr,
@@ -327,6 +402,7 @@ struct GatewaySession {
     downlink_sender: mpsc::Sender<Vec<u8>>,
     downlink_failed: Arc<AtomicBool>,
     downlink_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    uplink_reorder: Arc<Mutex<UplinkReorderBuffer>>,
 }
 
 impl Drop for GatewaySession {
@@ -344,6 +420,7 @@ struct ClientRoute {
     group_id: Option<[u8; 16]>,
     sessions: Vec<[u8; 8]>,
     next_downlink_sequence: Arc<AtomicU64>,
+    uplink_reorder: Arc<Mutex<UplinkReorderBuffer>>,
 }
 
 #[derive(Default)]
@@ -560,7 +637,7 @@ impl TurnGateway {
         let mut replaced_sessions = Vec::new();
         let ipv4_key = IpAddr::V4(client_ipv4);
         let ipv6_key = IpAddr::V6(client_ipv6);
-        if clients.contains_key(&ipv4_key) {
+        let uplink_reorder = if clients.contains_key(&ipv4_key) {
             ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == Some(group_id),
                 "client IPv4 address is already owned by another tunnel group");
             ensure!(clients.get(&ipv6_key).is_some_and(|route| route.group_id == group_id),
@@ -581,13 +658,22 @@ impl TurnGateway {
                 route.sessions.push(session_id);
                 route.clone()
             };
+            let reorder = Arc::clone(&updated_route.uplink_reorder);
             clients.insert(ipv6_key, updated_route);
+            reorder
         } else {
             ensure!(!clients.contains_key(&ipv6_key), "client IPv6 address is already assigned");
-            let route = ClientRoute { group_id, sessions: vec![session_id], next_downlink_sequence: Arc::new(AtomicU64::new(0)) };
+            let reorder = Arc::new(Mutex::new(UplinkReorderBuffer::default()));
+            let route = ClientRoute {
+                group_id,
+                sessions: vec![session_id],
+                next_downlink_sequence: Arc::new(AtomicU64::new(0)),
+                uplink_reorder: Arc::clone(&reorder),
+            };
             clients.insert(ipv4_key, route.clone());
             clients.insert(ipv6_key, route);
-        }
+            reorder
+        };
         let (downlink_sender, mut downlink_receiver) =
             mpsc::channel::<Vec<u8>>(DOWNLINK_QUEUE_CAPACITY);
         let downlink_failed = Arc::new(AtomicBool::new(false));
@@ -618,6 +704,7 @@ impl TurnGateway {
             downlink_sender,
             downlink_failed,
             downlink_worker: Mutex::new(Some(downlink_worker)),
+            uplink_reorder,
         });
         sessions.insert(session_id, session);
         drop(clients);
@@ -731,6 +818,30 @@ impl TurnGateway {
         session_dispatch_shard(session_id, group_id)
     }
 
+    async fn flush_expired_uplink_gaps(&self, now: Instant) {
+        let routes: Vec<ClientRoute> = self.clients.read().await.values().cloned().collect();
+        let mut seen = HashSet::new();
+        for route in routes {
+            let identity = Arc::as_ptr(&route.uplink_reorder) as usize;
+            if !seen.insert(identity) {
+                continue;
+            }
+            let ready = route.uplink_reorder.lock()
+                .map(|mut reorder| reorder.expire_gap(now))
+                .unwrap_or_default();
+            for packet in ready {
+                match self.tun_ingress.try_send(packet) {
+                    Ok(()) => {
+                        self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+    }
+
     /// Receive relay datagrams continuously. A fixed set of bounded shards
     /// preserves FIFO for each session while processing unrelated sessions in parallel.
     pub async fn run(self: Arc<Self>) -> Result<()> {
@@ -751,6 +862,7 @@ impl TurnGateway {
 
         let mut buffer = vec![0u8; UDP_BUFFER_SIZE];
         let mut maintenance = tokio::time::interval(SESSION_MAINTENANCE_INTERVAL);
+        let mut reorder_maintenance = tokio::time::interval(UPLINK_REORDER_MAINTENANCE_INTERVAL);
         loop {
             tokio::select! {
                 received = self.socket.recv_from(&mut buffer) => {
@@ -762,6 +874,9 @@ impl TurnGateway {
                         // move a packet to another shard, which could reorder a session.
                         self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
                     }
+                }
+                _ = reorder_maintenance.tick() => {
+                    self.flush_expired_uplink_gaps(Instant::now()).await;
                 }
                 _ = maintenance.tick() => {
                     self.expire_idle_sessions(Instant::now(), SESSION_IDLE_TIMEOUT).await;
@@ -848,29 +963,39 @@ impl TurnGateway {
             }
             return;
         }
-        let packet = match DataDatagram::decode(&plaintext) {
+        let packet = match SequencedDataDatagram::decode(&plaintext) {
             Ok(packet) => packet,
             _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
         };
+        let datagram = &packet.datagram;
         if let Ok(mut last_activity) = session.last_activity.lock() {
             *last_activity = Instant::now();
         }
         session.downlink_failed.store(false, Ordering::Release);
-        let source_ip = match packet.kind {
-            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])),
-            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet.packet[8..24]).expect("validated IPv6 source length"))),
+        let source_ip = match datagram.kind {
+            IpPacketKind::Ipv4 if datagram.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(datagram.packet[12], datagram.packet[13], datagram.packet[14], datagram.packet[15])),
+            IpPacketKind::Ipv6 if datagram.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&datagram.packet[8..24]).expect("validated IPv6 source length"))),
             _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
         };
         if source_ip != IpAddr::V4(session.client_ipv4) && source_ip != IpAddr::V6(session.client_ipv6) {
             self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        match self.tun_ingress.try_send(packet) {
-            Ok(()) => {
-                self.counters.accepted.fetch_add(1, Ordering::Relaxed);
-            }
+        let ready = match session.uplink_reorder.lock() {
+            Ok(mut reorder) => reorder.push(packet, Instant::now()),
             Err(_) => {
-                self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+        };
+        for packet in ready {
+            match self.tun_ingress.try_send(packet) {
+                Ok(()) => {
+                    self.counters.accepted.fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -971,6 +1096,44 @@ mod tests {
     const SERVER_KEY: [u8; 32] = [0x22; 32];
     const CLIENT_PREFIX: [u8; 4] = [0x31; 4];
     const SERVER_PREFIX: [u8; 4] = [0x42; 4];
+
+    #[test]
+    fn uplink_reorder_buffer_restores_sequence_across_paths() {
+        let now = Instant::now();
+        let make_packet = |marker: u8| {
+            let mut bytes = vec![0u8; 20];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&20u16.to_be_bytes());
+            bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
+            bytes[16..20].copy_from_slice(&[10, 77, 0, marker]);
+            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        };
+        let mut reorder = UplinkReorderBuffer::default();
+        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        let ready = reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now);
+        assert_eq!(ready.len(), 2);
+        assert_eq!(ready[0].packet[19], 2);
+        assert_eq!(ready[1].packet[19], 3);
+    }
+
+    #[test]
+    fn uplink_reorder_buffer_skips_expired_gap_and_drops_late_packet() {
+        let now = Instant::now();
+        let make_packet = |marker: u8| {
+            let mut bytes = vec![0u8; 20];
+            bytes[0] = 0x45;
+            bytes[2..4].copy_from_slice(&20u16.to_be_bytes());
+            bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
+            bytes[16..20].copy_from_slice(&[10, 77, 0, marker]);
+            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        };
+        let mut reorder = UplinkReorderBuffer::default();
+        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        let ready = reorder.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].packet[19], 3);
+        assert!(reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now + UPLINK_REORDER_GAP_TIMEOUT).is_empty());
+    }
 
     #[test]
     fn downlink_rate_controller_reduces_on_congestion_and_recovers_gradually() {

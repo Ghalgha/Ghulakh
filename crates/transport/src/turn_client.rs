@@ -110,7 +110,7 @@ impl DownlinkReorderBuffer {
 pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     path_context: Option<TurnPathContext>,
-    uplink: mpsc::Sender<DataDatagram>,
+    uplink: mpsc::Sender<SequencedDataDatagram>,
     downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
@@ -344,7 +344,7 @@ impl TurnClientRuntime {
         self.path_context
     }
 
-    pub async fn send_packet(&self, packet: DataDatagram) -> Result<()> {
+    pub async fn send_packet(&self, packet: SequencedDataDatagram) -> Result<()> {
         self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
     }
 
@@ -611,6 +611,9 @@ impl TurnClientPathGroup {
         let mut scheduler = self.uplink_scheduler.lock()
             .map_err(|_| anyhow::anyhow!("TURN uplink scheduler lock poisoned"))?;
         let mut pending = packet;
+        let sequence = scheduler.next_sequence;
+        let next_sequence = sequence.checked_add(1)
+            .context("TURN uplink sequence space exhausted")?;
         for _ in 0..paths.len() {
             let healthy: Vec<bool> = self.healthy.iter()
                 .map(|path| path.load(Ordering::Acquire))
@@ -622,8 +625,11 @@ impl TurnClientPathGroup {
                 self.uplink_queue_drops.fetch_add(1, Ordering::Relaxed);
                 return Ok(());
             };
-            match paths[index].uplink.try_send(pending) {
-                Ok(()) => return Ok(()),
+            match paths[index].uplink.try_send(SequencedDataDatagram::new(sequence, pending)) {
+                Ok(()) => {
+                    scheduler.next_sequence = next_sequence;
+                    return Ok(());
+                },
                 Err(mpsc::error::TrySendError::Full(_)) => {
                     // The queue filled after the capacity snapshot. Drop newest;
                     // do not send it on another path and overtake queued packets.
@@ -632,7 +638,7 @@ impl TurnClientPathGroup {
                 }
                 Err(mpsc::error::TrySendError::Closed(returned)) => {
                     self.healthy[index].store(false, Ordering::Release);
-                    pending = returned;
+                    pending = returned.datagram;
                 }
             }
         }
@@ -834,6 +840,7 @@ impl UplinkRateController {
 
 #[derive(Default)]
 struct UplinkScheduler {
+    next_sequence: u64,
     last_update: Option<Instant>,
     tokens: Vec<f64>,
     rates: Vec<UplinkRateController>,
@@ -1364,7 +1371,7 @@ mod path_group_tests {
                     }
                 },
             ).await.unwrap();
-            assert_eq!(received, datagram);
+            assert_eq!(received.datagram, datagram);
             selected_paths[path_index] = true;
         }
         assert!(selected_paths.into_iter().all(|selected| selected));
@@ -1416,7 +1423,7 @@ mod path_group_tests {
         group_id: [u8; 16],
     ) -> (
         TurnClientRuntime,
-        mpsc::Receiver<DataDatagram>,
+        mpsc::Receiver<SequencedDataDatagram>,
         mpsc::Sender<SequencedDataDatagram>,
     ) {
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
@@ -1450,6 +1457,36 @@ mod path_group_tests {
             uplink_rx,
             downlink_tx,
         )
+    }
+
+    #[tokio::test]
+    async fn uplink_sequence_remains_monotonic_across_path_failover() {
+        let group_id = [0x72; 16];
+        let (path_a, mut uplink_a, downlink_a) = mock_path(0, group_id);
+        let (path_b, mut uplink_b, _downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        let datagram = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(23457),
+        };
+
+        group.send_packet(datagram.clone()).await.unwrap();
+        let first = uplink_a.recv().await.unwrap();
+        assert_eq!(first.sequence, Some(0));
+        assert_eq!(first.datagram, datagram);
+
+        drop(downlink_a);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![0] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        group.send_packet(datagram.clone()).await.unwrap();
+        let second = uplink_b.recv().await.unwrap();
+        assert_eq!(second.sequence, Some(1));
+        assert_eq!(second.datagram, datagram);
+        group.close();
     }
 
     #[test]
@@ -1511,10 +1548,10 @@ mod path_group_tests {
             };
             group.send_packet(datagram.clone()).await.unwrap();
             if let Ok(received) = uplink_a.try_recv() {
-                assert_eq!(received, datagram);
+                assert_eq!(received.datagram, datagram);
                 selected_paths[0] = true;
             } else if let Ok(received) = uplink_b.try_recv() {
-                assert_eq!(received, datagram);
+                assert_eq!(received.datagram, datagram);
                 selected_paths[1] = true;
             }
             if selected_paths.iter().all(|selected| *selected) {
@@ -1572,7 +1609,7 @@ mod path_group_tests {
             packet: packet(20000),
         };
         group.send_packet(datagram.clone()).await.unwrap();
-        assert_eq!(uplink_b.recv().await.unwrap(), datagram);
+        assert_eq!(uplink_b.recv().await.unwrap().datagram, datagram);
         assert!(uplink_a.try_recv().is_err());
 
         group.close();
@@ -1604,8 +1641,8 @@ mod path_group_tests {
         assert_eq!(group.uplink_queue_drops(), 1);
 
         for _ in 0..APP_QUEUE_CAPACITY {
-            assert_eq!(uplink_a.recv().await.unwrap(), datagram);
-            assert_eq!(uplink_b.recv().await.unwrap(), datagram);
+            assert_eq!(uplink_a.recv().await.unwrap().datagram, datagram);
+            assert_eq!(uplink_b.recv().await.unwrap().datagram, datagram);
         }
         assert!(uplink_a.try_recv().is_err());
         assert!(uplink_b.try_recv().is_err());

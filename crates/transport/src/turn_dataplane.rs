@@ -61,7 +61,7 @@ impl TurnDataPlane {
     /// Invalid/authentication-failed frames are dropped and counted, not fatal.
     pub async fn run(
         mut self,
-        mut uplink: mpsc::Receiver<DataDatagram>,
+        mut uplink: mpsc::Receiver<SequencedDataDatagram>,
         downlink: mpsc::Sender<SequencedDataDatagram>,
     ) -> Result<TurnDataPlaneStats> {
         let mut stats = TurnDataPlaneStats::default();
@@ -116,8 +116,8 @@ impl TurnDataPlane {
                     let Some(packet) = packet else {
                         return Ok(stats);
                     };
-                    let datagram = self.sender.encode_packet(&packet)
-                        .context("encode protected TURN uplink frame")?;
+                    let datagram = self.sender.encode_sequenced_packet(&packet)
+                        .context("encode sequenced protected TURN uplink frame")?;
                     self.actor.send_datagram(datagram).await
                         .context("send protected TURN uplink frame")?;
                     stats.sent_frames = stats.sent_frames.saturating_add(1);
@@ -185,7 +185,7 @@ mod tests {
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
             .await.unwrap();
         let (actor, receivers) = TurnSocketActor::spawn(socket);
-        let (uplink_tx, uplink_rx) = mpsc::channel(4);
+        let (uplink_tx, uplink_rx) = mpsc::channel::<SequencedDataDatagram>(4);
         let (downlink_tx, mut downlink_rx) = mpsc::channel(4);
 
         let plane = TurnDataPlane::new(
@@ -212,7 +212,14 @@ mod tests {
                 CHANNEL,
                 FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
             );
-            let uplink_packet = gateway_rx.decode_packet(&buffer[..length]).unwrap();
+            let uplink_payload = gateway_rx.decode_payload(&buffer[..length]).unwrap();
+            let uplink_packet = match uplink_payload {
+                crate::turn_data::TurnDataPayload::Packet(packet) => {
+                    assert_eq!(packet.sequence, Some(0));
+                    packet.datagram
+                }
+                crate::turn_data::TurnDataPayload::KeepaliveAck(_) => panic!("unexpected keepalive acknowledgement"),
+            };
             assert_eq!(uplink_packet, packet());
 
             let mut gateway_tx = TurnDataSender::new(
@@ -224,7 +231,7 @@ mod tests {
         });
 
         let plane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
-        uplink_tx.send(packet()).await.unwrap();
+        uplink_tx.send(SequencedDataDatagram::new(0, packet())).await.unwrap();
         let returned = timeout(Duration::from_secs(2), downlink_rx.recv())
             .await.unwrap().unwrap();
         assert_eq!(returned.datagram, packet());

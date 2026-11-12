@@ -30,6 +30,14 @@ impl TurnDataSender {
             .context("encode TURN ChannelData")
     }
 
+    /// Encode a sequenced IP packet for a multipath uplink.
+    pub fn encode_sequenced_packet(&mut self, packet: &SequencedDataDatagram) -> Result<Vec<u8>> {
+        let encoded_packet = packet.encode().context("encode sequenced IP datagram")?;
+        let protected = self.sealer.seal(&encoded_packet).context("protect tunnel frame")?;
+        encode_channel_data(self.channel_number, &protected)
+            .context("encode TURN ChannelData")
+    }
+
     /// Encode an authenticated path-health probe without injecting an IP packet.
     pub fn encode_keepalive(&mut self, nonce: u64) -> Result<Vec<u8>> {
         let payload = ghulakh_protocol::secure_frame::keepalive_request(nonce);
