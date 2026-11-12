@@ -1,3 +1,5 @@
+#![cfg_attr(not(test), allow(dead_code))]
+
 pub mod turn_gateway;
 pub mod turn_handshake_service;
 
@@ -7,7 +9,7 @@ use ghulakh_protocol::{
     validate_envelope, validate_message, ControlEnvelope, ControlMessage, DataDatagram,
     IpPacketKind, MAX_CONTROL_BODY, MAX_DATAGRAM_SIZE, PROTOCOL_VERSION,
 };
-use quinn::{crypto::rustls::QuicServerConfig, Connection, Endpoint};
+use quinn::{crypto::rustls::QuicServerConfig, Connection};
 use rand::{rngs::OsRng, RngCore};
 use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
@@ -561,7 +563,6 @@ async fn main() -> Result<()> {
     let credential_hashes = Arc::new(load_credential_hashes(&credential_path)?);
 
     let sessions: SessionMap = Arc::new(RwLock::new(HashMap::new()));
-    let ip_allocator = Arc::new(IpAllocator::new());
     let tun_enabled = env::var("GHULAKH_TUN_ENABLED")
         .unwrap_or_else(|_| "false".to_string())
         .eq_ignore_ascii_case("true");
@@ -768,6 +769,7 @@ mod tests {
     #[tokio::test]
     async fn native_client_authenticates_and_sends_quic_datagram() {
         use ghulakh_transport::{ClientOptions, QuicClient};
+        use quinn::Endpoint;
 
         let certificate = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
         let directory = tempfile::tempdir().unwrap();
