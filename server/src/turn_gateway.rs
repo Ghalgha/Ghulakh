@@ -391,6 +391,26 @@ impl UplinkReorderBuffer {
     }
 }
 
+/// Apply a reorder-buffer transition and synchronously enqueue every packet it releases.
+///
+/// The mutex deliberately remains held through delivery: otherwise a concurrent
+/// gap-expiry task can enqueue an older batch after a packet-processing task has
+/// already enqueued a newer sequence. The delivery callback must be non-blocking.
+fn update_and_deliver_uplink(
+    reorder: &Mutex<UplinkReorderBuffer>,
+    update: impl FnOnce(&mut UplinkReorderBuffer) -> Vec<DataDatagram>,
+    mut deliver: impl FnMut(DataDatagram),
+) -> bool {
+    let Ok(mut reorder) = reorder.lock() else {
+        return false;
+    };
+    let ready = update(&mut reorder);
+    for packet in ready {
+        deliver(packet);
+    }
+    true
+}
+
 struct GatewaySession {
     client_ipv4: Ipv4Addr,
     client_ipv6: Ipv6Addr,
@@ -826,19 +846,18 @@ impl TurnGateway {
             if !seen.insert(identity) {
                 continue;
             }
-            let ready = route.uplink_reorder.lock()
-                .map(|mut reorder| reorder.expire_gap(now))
-                .unwrap_or_default();
-            for packet in ready {
-                match self.tun_ingress.try_send(packet) {
+            update_and_deliver_uplink(
+                &route.uplink_reorder,
+                |reorder| reorder.expire_gap(now),
+                |packet| match self.tun_ingress.try_send(packet) {
                     Ok(()) => {
                         self.counters.accepted.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(_) => {
                         self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
                     }
-                }
-            }
+                },
+            );
         }
     }
 
@@ -981,22 +1000,19 @@ impl TurnGateway {
             self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             return;
         }
-        let ready = match session.uplink_reorder.lock() {
-            Ok(mut reorder) => reorder.push(packet, Instant::now()),
-            Err(_) => {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
-        };
-        for packet in ready {
-            match self.tun_ingress.try_send(packet) {
+        if !update_and_deliver_uplink(
+            &session.uplink_reorder,
+            |reorder| reorder.push(packet, Instant::now()),
+            |packet| match self.tun_ingress.try_send(packet) {
                 Ok(()) => {
                     self.counters.accepted.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(_) => {
                     self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
                 }
-            }
+            },
+        ) {
+            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
         }
     }
 
