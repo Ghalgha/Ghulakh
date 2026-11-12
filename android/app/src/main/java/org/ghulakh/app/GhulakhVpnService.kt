@@ -81,23 +81,39 @@ class GhulakhVpnService : VpnService() {
                 if (!isCurrent(generation)) return
                 val candidate = VkCallsCredentialProvider.obtainGroup(profile.vkAccessToken, DEFAULT_TURN_PATHS)
                 // Credential acquisition performs blocking HTTPS requests. The VPN may be
-                // stopped while they are in flight, so do not create a native TURN session
-                // for a lifecycle generation that no longer owns the service.
-                if (!isCurrent(generation)) {
-                    runCatching { candidate.finish() }
-                        .onFailure { error -> Log.w(TAG, "Failed to finish stale VK Calls credential group", error) }
-                    return
-                }
+                // stopped while they are in flight, so serialize the generation check,
+                // native connect and handle publication with native shutdown.
                 try {
-                    val connectedHandle = transport.nativeTurnConnect(
-                        this,
-                        profile.host,
-                        profile.port,
-                        candidate.turnCredentialsJson,
-                        decodeHexKey(profile.pinnedServerPublicKeyHex),
-                        profile.credential,
-                        DEFAULT_TURN_PATHS,
-                    )
+                    val connectedHandle = synchronized(nativeOperationLock) {
+                        if (!isCurrent(generation)) {
+                            null
+                        } else {
+                            val connected = transport.nativeTurnConnect(
+                                this,
+                                profile.host,
+                                profile.port,
+                                candidate.turnCredentialsJson,
+                                decodeHexKey(profile.pinnedServerPublicKeyHex),
+                                profile.credential,
+                                DEFAULT_TURN_PATHS,
+                            )
+                            check(connected != 0L) { "Native TURN connect returned an invalid handle" }
+                            if (!isCurrent(generation)) {
+                                runCatching { transport.nativeTurnClose(connected) }
+                                    .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session", closeError) }
+                                null
+                            } else {
+                                nativeTransport = transport
+                                sessionHandle = connected
+                                connected
+                            }
+                        }
+                    }
+                    if (connectedHandle == null) {
+                        runCatching { candidate.finish() }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                        return
+                    }
                     handle = connectedHandle
                     callsSession = candidate
                     break
@@ -119,22 +135,10 @@ class GhulakhVpnService : VpnService() {
             }
             val establishedGroup = checkNotNull(callsSession)
             credentialGroups.add(establishedGroup)
-            val retained = synchronized(this) {
-                if (isCurrent(generation)) {
-                    nativeTransport = transport
-                    sessionHandle = handle
-                    true
-                } else {
-                    false
-                }
+            val (clientAddress, mtu) = synchronized(nativeOperationLock) {
+                if (!isCurrent(generation)) return
+                transport.nativeTurnClientIpv4(handle) to transport.nativeTurnMtu(handle)
             }
-            if (!retained) {
-                synchronized(nativeOperationLock) { transport.nativeTurnClose(handle) }
-                return
-            }
-
-            val clientAddress = transport.nativeTurnClientIpv4(handle)
-            val mtu = transport.nativeTurnMtu(handle)
             require(mtu in MIN_TUN_MTU..MAX_TUN_MTU) { "Сервер передал недопустимый MTU" }
             val descriptor = Builder()
                 .setSession("Ghulakh")
@@ -411,17 +415,17 @@ class GhulakhVpnService : VpnService() {
         }
         tunnelDescriptor = null
 
-        val handle = sessionHandle
-        sessionHandle = 0L
-        val transport = nativeTransport
-        nativeTransport = null
-        if (handle != 0L) {
-            try {
-                synchronized(nativeOperationLock) {
+        synchronized(nativeOperationLock) {
+            val handle = sessionHandle
+            sessionHandle = 0L
+            val transport = nativeTransport
+            nativeTransport = null
+            if (handle != 0L) {
+                try {
                     transport?.nativeTurnClose(handle)
+                } catch (error: Throwable) {
+                    Log.w(TAG, "Failed to close native TURN session", error)
                 }
-            } catch (error: Throwable) {
-                Log.w(TAG, "Failed to close native TURN session", error)
             }
         }
     }
