@@ -121,6 +121,36 @@ class TurnQuotaRetryPolicyTest {
 
 class VkCallsSessionIdempotenceTest {
     @Test
+    fun credentialBrokerRejectsDuplicateCredentialsAcrossConcurrentAllocations() {
+        val initial = """{"turn_server":{"username":"owner","credential":"owner-secret","urls":["turn:relay.example:3478"]}}"""
+        val repeated = """{"turn_server":{"username":"worker","credential":"worker-secret","urls":["turn:relay.example:3478"]}}"""
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "test-token",
+            conversationId = "test-conversation",
+            initialCredentialsJson = initial,
+            credentialFetcher = { repeated },
+        )
+        val accepted = java.util.concurrent.atomic.AtomicInteger()
+        val rejected = java.util.concurrent.atomic.AtomicInteger()
+        val callers = List(16) {
+            Thread {
+                try {
+                    broker.obtainCredentials()
+                    accepted.incrementAndGet()
+                } catch (_: IllegalArgumentException) {
+                    rejected.incrementAndGet()
+                }
+            }
+        }
+
+        callers.forEach(Thread::start)
+        callers.forEach(Thread::join)
+
+        assertEquals(1, accepted.get())
+        assertEquals(15, rejected.get())
+    }
+
+    @Test
     fun concurrentFinishRequestsRunCleanupOnlyOnce() {
         val session = VkCallsSession(
             turnCredentialsJson = "{}",

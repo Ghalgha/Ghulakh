@@ -173,7 +173,7 @@ object VkCallsCredentialProvider {
 
         fun obtainCredentials(): String {
             val credentialsJson = credentialFetcher?.invoke()
-                ?: obtainConversationCredentials(accessToken, conversationId)
+                ?: VkCallsCredentialProvider.obtainConversationCredentials(accessToken, conversationId)
             val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
             val unique = synchronized(issuedFingerprints) { issuedFingerprints.add(fingerprint) }
             require(unique) { "VK Calls returned a repeated TURN credential set" }
