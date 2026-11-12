@@ -53,6 +53,7 @@ class TurnQuotaRetryPolicyTest {
         val first = """{"turn_server":{"username":"u1","credential":"p1","urls":["turn:a.example:3478"]}}"""
         val second = """{"turn_server":{"username":"u2","credential":"p2","urls":["turn:b.example:3478"]}}"""
         val third = """{"turn_server":{"username":"u3","credential":"p3","urls":["turn:c.example:3478"]}}"""
+        val fourth = """{"turn_server":{"username":"u4","credential":"p4","urls":["turn:d.example:3478"]}}"""
         val group = "[$first,$second]"
         val reordered = "[$second,$first]"
         assertEquals(
@@ -63,7 +64,21 @@ class TurnQuotaRetryPolicyTest {
         val rejected = mutableSetOf<String>()
         assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(0, group, rejected))
         assertFalse(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$first]", rejected))
-        assertFalse(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$second]", rejected))
+        assertEquals(
+            setOf(
+                TurnQuotaRetryPolicy.fingerprint(first),
+                TurnQuotaRetryPolicy.fingerprint(second),
+            ),
+            rejected,
+        )
+        assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$fourth]", rejected))
+        assertFalse(
+            TurnQuotaRetryPolicy.shouldRetryGroup(
+                TurnQuotaRetryPolicy.MAX_CONNECT_ATTEMPTS - 1,
+                "[$first,$second]",
+                mutableSetOf(),
+            ),
+        )
     }
 
     @Test

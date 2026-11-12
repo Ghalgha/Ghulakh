@@ -34,7 +34,7 @@ QUIC runtime не является транспортом пользовател
 
 Один Tokio multi-thread runtime выполняет параллельную настройку путей. У каждого пути собственный socket actor и bounded queues. Один Android TUN reader и один writer обслуживают общую tunnel group. Flow affinity сохраняет порядок внутри потока; packet round-robin внутри одного flow не используется. Переполнение очереди выбранного пути приводит к drop-newest и счётчику, но не к миграции уже начатого flow на другой путь.
 
-Отказ allocation обнаруживается по отсутствию authenticated keepalive acknowledgement. Восстановление создаёт новый protected socket, получает свежие credentials, выполняет новую allocation и Noise handshake, затем заменяет только соответствующий path slot. Отклонённые по TURN quota credentials учитываются общим bounded fingerprint set на время VPN-сессии, чтобы другой recovery worker не повторял ту же credential.
+Отказ allocation обнаруживается по отсутствию authenticated keepalive acknowledgement. Восстановление создаёт новый protected socket, получает свежие credentials, выполняет новую allocation и Noise handshake, затем заменяет только соответствующий path slot. Отклонённые по TURN quota credentials учитываются общим bounded fingerprint set на время VPN-сессии, чтобы другой recovery worker не повторял ту же credential. При первоначальном подключении один Calls conversation обслуживает группу независимых путей: отдельные anonymous account sessions запрашивают `vchat.getConversationParams` для одного conversation ID, а каждый путь получает свой TURN credential set. Повторяющиеся наборы отвергаются до создания allocations; при 486 вся группа заменяется целиком, не переиспользуя частично отклонённые credentials.
 
 ## TURN control plane
 
