@@ -61,7 +61,7 @@ struct DownlinkFlowState {
 struct DownlinkScheduler {
     tokens: HashMap<[u8; 8], f64>,
     last_update: HashMap<[u8; 8], Instant>,
-    flows: HashMap<u64, DownlinkFlowState>,
+    flows: HashMap<(Ipv4Addr, u64), DownlinkFlowState>,
     cursor: usize,
     evict_counter: u32,
 }
@@ -102,17 +102,28 @@ impl DownlinkScheduler {
         best
     }
 
-    fn select(&mut self, active: &[[u8; 8]], packet: &[u8], now: Instant) -> [u8; 8] {
+    fn select(&mut self, active: &[[u8; 8]], client_ipv4: Ipv4Addr, packet: &[u8], now: Instant) -> [u8; 8] {
         debug_assert!(!active.is_empty());
         self.tokens.retain(|id, _| active.contains(id));
         self.last_update.retain(|id, _| active.contains(id));
         self.evict_counter = self.evict_counter.wrapping_add(1);
-        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX {
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) {
             self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
-            if self.flows.len() >= FLOW_TABLE_MAX { self.flows.clear(); }
         }
 
-        let key = ghulakh_protocol::ip_flow::flow_hash(packet);
+        // Flow hashes are scoped to the virtual client so identical five-tuples
+        // belonging to different tunnel groups never share scheduler state.
+        let key = (client_ipv4, ghulakh_protocol::ip_flow::flow_hash(packet));
+        if !self.flows.contains_key(&key) && self.flows.len() >= FLOW_TABLE_MAX {
+            // Preserve active affinity state: evict only the least recently seen
+            // flow instead of clearing the complete table under sustained load.
+            if let Some(oldest) = self.flows.iter()
+                .min_by_key(|(_, state)| state.last_seen)
+                .map(|(key, _)| *key)
+            {
+                self.flows.remove(&oldest);
+            }
+        }
         let len = packet.len();
         let small_udp = Self::is_small_udp(packet);
         let selected = if let Some(mut state) = self.flows.get(&key).copied() {
@@ -668,7 +679,7 @@ impl TurnGateway {
         let active_ids: Vec<[u8; 8]> = active_paths.iter().map(|(id, _)| *id).collect();
         let selected_id = self.downlink_scheduler.lock()
             .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
-            .select(&active_ids, &packet.packet, now);
+            .select(&active_ids, destination, &packet.packet, now);
         let session = active_paths.iter().find(|(id, _)| *id == selected_id)
             .map(|(_, session)| Arc::clone(session))
             .context("selected TURN downlink path disappeared")?;
@@ -1822,9 +1833,40 @@ mod tests {
         let mut scheduler = DownlinkScheduler::new();
         let active = [[0x11; 8], [0x22; 8]];
         let now = Instant::now();
-        let first = scheduler.select(&active, &scheduler_udp_flow(10001, 1200), now);
-        let second = scheduler.select(&active, &scheduler_udp_flow(10002, 1200), now);
+        let first = scheduler.select(&active, CLIENT_IP, &scheduler_udp_flow(10001, 1200), now);
+        let second = scheduler.select(&active, CLIENT_IP, &scheduler_udp_flow(10002, 1200), now);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn downlink_scheduler_evicts_only_one_old_flow_at_capacity() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x41; 8], [0x42; 8]];
+        let start = Instant::now();
+
+        for port in 10_000..10_000 + FLOW_TABLE_MAX as u16 {
+            let flow = scheduler_udp_flow(port, 1200);
+            scheduler.select(&active, CLIENT_IP, &flow, start);
+        }
+        assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
+
+        let new_flow = scheduler_udp_flow(30_000, 1200);
+        scheduler.select(&active, CLIENT_IP, &new_flow, start + Duration::from_millis(1));
+
+        assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
+        assert!(!scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&scheduler_udp_flow(10_000, 1200)))));
+        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&scheduler_udp_flow(10_001, 1200)))));
+        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::flow_hash(&new_flow))));
+    }
+
+    #[test]
+    fn downlink_scheduler_scopes_identical_flows_to_virtual_clients() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x51; 8], [0x52; 8]];
+        let flow = scheduler_udp_flow(15_000, 1200);
+        scheduler.select(&active, CLIENT_IP, &flow, Instant::now());
+        scheduler.select(&active, Ipv4Addr::new(10, 77, 0, 3), &flow, Instant::now());
+        assert_eq!(scheduler.flows.len(), 2);
     }
 
     #[test]
@@ -1833,17 +1875,17 @@ mod tests {
         let active = [[0x31; 8], [0x32; 8]];
         let start = Instant::now();
         let game_flow = scheduler_udp_flow(12000, 120);
-        let game_path = scheduler.select(&active, &game_flow, start);
+        let game_path = scheduler.select(&active, CLIENT_IP, &game_flow, start);
         for index in 1..250 {
             let now = start + Duration::from_micros(index * 100);
-            assert_eq!(scheduler.select(&active, &game_flow, now), game_path);
+            assert_eq!(scheduler.select(&active, CLIENT_IP, &game_flow, now), game_path);
         }
 
         let bulk_flow = scheduler_udp_flow(12001, 64);
         let mut selected = std::collections::HashSet::new();
         for index in 0..1500 {
             let now = start + Duration::from_micros(index * 100);
-            selected.insert(scheduler.select(&active, &bulk_flow, now));
+            selected.insert(scheduler.select(&active, CLIENT_IP, &bulk_flow, now));
         }
         assert_eq!(selected.len(), 2, "high-rate short-packet UDP must leave sticky pinning and use both paths");
     }
