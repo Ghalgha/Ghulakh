@@ -1891,6 +1891,41 @@ mod tests {
     }
 
     #[test]
+    fn downlink_scheduler_balances_independent_flows_across_ten_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
+        let start = Instant::now();
+        let mut per_path = HashMap::<[u8; 8], usize>::new();
+
+        for flow_index in 0..1_000u16 {
+            let flow = scheduler_udp_flow(20_000 + flow_index, 1200);
+            let first_at = start + Duration::from_micros(u64::from(flow_index));
+            let selected = scheduler.select(&active, CLIENT_IP, &flow, first_at);
+            *per_path.entry(selected).or_default() += 1;
+
+            // Every packet within the current 16 KiB burst must retain the
+            // same allocation, even while other flows are being scheduled.
+            for packet_index in 1..10u64 {
+                let now = first_at + Duration::from_micros(packet_index * 100);
+                assert_eq!(
+                    scheduler.select(&active, CLIENT_IP, &flow, now),
+                    selected,
+                    "flow {flow_index} changed allocation inside its burst",
+                );
+            }
+        }
+
+        assert_eq!(per_path.len(), active.len(), "all allocations must receive flows: {per_path:?}");
+        for path in &active {
+            let assigned = per_path.get(path).copied().unwrap_or_default();
+            assert!(
+                (90..=110).contains(&assigned),
+                "flow distribution is unbalanced for {path:?}: {per_path:?}",
+            );
+        }
+    }
+
+    #[test]
     fn downlink_scheduler_preserves_active_affinity_at_capacity() {
         let mut scheduler = DownlinkScheduler::new();
         let active = [[0x41; 8], [0x42; 8]];
