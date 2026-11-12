@@ -366,6 +366,27 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_ipv6_payload_length() {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&1u16.to_be_bytes());
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv6,
+            packet,
+        };
+        assert_eq!(datagram.encode(), Err(DatagramError::InvalidIpPacket));
+    }
+
+    #[test]
+    fn rejects_truncated_ipv6_header() {
+        let datagram = DataDatagram {
+            kind: IpPacketKind::Ipv6,
+            packet: vec![0x60; 39],
+        };
+        assert_eq!(datagram.encode(), Err(DatagramError::InvalidIpPacket));
+    }
+
+    #[test]
     fn rejects_oversized_datagram() {
         let datagram = DataDatagram {
             kind: IpPacketKind::Ipv4,
