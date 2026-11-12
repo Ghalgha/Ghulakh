@@ -107,7 +107,7 @@ impl DownlinkScheduler {
         self.tokens.retain(|id, _| active.contains(id));
         self.last_update.retain(|id, _| active.contains(id));
         self.evict_counter = self.evict_counter.wrapping_add(1);
-        if self.evict_counter % FLOW_EVICT_EVERY == 0 || self.flows.len() >= FLOW_TABLE_MAX {
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX {
             self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
             if self.flows.len() >= FLOW_TABLE_MAX { self.flows.clear(); }
         }
