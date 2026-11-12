@@ -128,7 +128,15 @@ class VkCallsSessionIdempotenceTest {
             accessToken = "test-token",
             conversationId = "test-conversation",
             initialCredentialsJson = initial,
-            credentialFetcher = { repeated },
+            sessionFetcher = {
+                VkCallsSession(
+                    turnCredentialsJson = repeated,
+                    apiUrl = "https://calls.example.invalid/fb.do",
+                    sessionKey = "test-session-key",
+                    conversationId = "test-conversation",
+                    finishAction = {},
+                )
+            },
         )
         val accepted = java.util.concurrent.atomic.AtomicInteger()
         val rejected = java.util.concurrent.atomic.AtomicInteger()
