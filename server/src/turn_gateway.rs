@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -35,6 +35,10 @@ const DATAGRAM_DISPATCH_CAPACITY: usize = 256;
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const DOWNLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
+const DOWNLINK_MIN_RATE_BYTES_PER_SEC: f64 = 150_000.0;
+const DOWNLINK_ADJUST_INTERVAL: Duration = Duration::from_millis(100);
+const DOWNLINK_RATE_RECOVERY_STEP: f64 = 5_000.0;
+const DOWNLINK_QUEUE_CAPACITY: usize = 128;
 const DOWNLINK_BUCKET_CAPACITY: f64 = 10_500.0;
 const DOWNLINK_MAX_DEFICIT: f64 = -4_500.0;
 const FLOW_TABLE_MAX: usize = 1024;
@@ -60,9 +64,45 @@ struct DownlinkFlowState {
     bulk_until: Option<Instant>,
 }
 
+#[derive(Clone, Copy)]
+struct DownlinkRateController {
+    rate: f64,
+    congested: bool,
+    last_adjust: Option<Instant>,
+}
+
+impl DownlinkRateController {
+    fn new() -> Self {
+        Self { rate: DOWNLINK_RATE_BYTES_PER_SEC, congested: false, last_adjust: None }
+    }
+
+    fn mark_congested(&mut self) {
+        self.congested = true;
+    }
+
+    fn tick(&mut self, now: Instant) {
+        let Some(last) = self.last_adjust else {
+            self.last_adjust = Some(now);
+            return;
+        };
+        if now.saturating_duration_since(last) < DOWNLINK_ADJUST_INTERVAL {
+            return;
+        }
+        if self.congested {
+            self.rate = (self.rate * 0.85).max(DOWNLINK_MIN_RATE_BYTES_PER_SEC);
+            self.congested = false;
+        } else {
+            self.rate = (self.rate + DOWNLINK_RATE_RECOVERY_STEP)
+                .min(DOWNLINK_RATE_BYTES_PER_SEC);
+        }
+        self.last_adjust = Some(now);
+    }
+}
+
 struct DownlinkScheduler {
     tokens: HashMap<[u8; 8], f64>,
     last_update: HashMap<[u8; 8], Instant>,
+    rates: HashMap<[u8; 8], DownlinkRateController>,
     flows: HashMap<(Ipv4Addr, ghulakh_protocol::ip_flow::IpFlowKey), DownlinkFlowState>,
     cursor: usize,
     evict_counter: u32,
@@ -70,62 +110,105 @@ struct DownlinkScheduler {
 
 impl DownlinkScheduler {
     fn new() -> Self {
-        Self { tokens: HashMap::new(), last_update: HashMap::new(), flows: HashMap::new(), cursor: 0, evict_counter: 0 }
+        Self {
+            tokens: HashMap::new(),
+            last_update: HashMap::new(),
+            rates: HashMap::new(),
+            flows: HashMap::new(),
+            cursor: 0,
+            evict_counter: 0,
+        }
     }
 
     fn remove_session(&mut self, session_id: [u8; 8]) {
         self.tokens.remove(&session_id);
         self.last_update.remove(&session_id);
+        self.rates.remove(&session_id);
+    }
+
+    fn mark_congested(&mut self, session_id: [u8; 8]) {
+        self.rates.entry(session_id).or_insert_with(DownlinkRateController::new)
+            .mark_congested();
     }
 
     fn refill(&mut self, id: [u8; 8], now: Instant) {
+        let rate = {
+            let controller = self.rates.entry(id).or_insert_with(DownlinkRateController::new);
+            controller.tick(now);
+            controller.rate
+        };
         let previous = self.last_update.insert(id, now).unwrap_or(now);
         let elapsed = now.saturating_duration_since(previous).as_secs_f64();
         let tokens = self.tokens.entry(id).or_insert(DOWNLINK_BUCKET_CAPACITY);
-        *tokens = (*tokens + elapsed * DOWNLINK_RATE_BYTES_PER_SEC).min(DOWNLINK_BUCKET_CAPACITY);
+        *tokens = (*tokens + elapsed * rate).min(DOWNLINK_BUCKET_CAPACITY);
     }
 
-    fn choose(&mut self, active: &[[u8; 8]], now: Instant, len: usize) -> [u8; 8] {
+    fn choose(
+        &mut self,
+        active: &[[u8; 8]],
+        sendable: &[bool],
+        now: Instant,
+        len: usize,
+    ) -> Option<[u8; 8]> {
+        if active.is_empty() || sendable.len() != active.len() {
+            return None;
+        }
         let start = self.cursor % active.len();
+        let mut best = None;
+        let mut best_tokens = f64::NEG_INFINITY;
         for offset in 0..active.len() {
             let index = (start + offset) % active.len();
-            self.refill(active[index], now);
-            if self.tokens.get(&active[index]).copied().unwrap_or(0.0) >= len as f64 {
+            let id = active[index];
+            self.refill(id, now);
+            if !sendable[index] {
+                self.mark_congested(id);
+                continue;
+            }
+            let tokens = self.tokens.get(&id).copied().unwrap_or(0.0);
+            if tokens >= len as f64 {
                 self.cursor = (index + 1) % active.len();
-                return active[index];
+                return Some(id);
+            }
+            if tokens > best_tokens {
+                best_tokens = tokens;
+                best = Some((index, id));
             }
         }
-        let mut best = active[start];
-        for offset in 1..active.len() {
-            let id = active[(start + offset) % active.len()];
-            if self.tokens.get(&id).copied().unwrap_or(0.0) > self.tokens.get(&best).copied().unwrap_or(0.0) {
-                best = id;
-            }
-        }
-        self.cursor = (active.iter().position(|id| *id == best).unwrap_or(start) + 1) % active.len();
-        best
+        let (index, id) = best?;
+        self.cursor = (index + 1) % active.len();
+        Some(id)
     }
 
-    fn select(&mut self, active: &[[u8; 8]], client_ipv4: Ipv4Addr, packet: &[u8], now: Instant) -> [u8; 8] {
-        debug_assert!(!active.is_empty());
+    fn select_sendable(
+        &mut self,
+        active: &[[u8; 8]],
+        sendable: &[bool],
+        client_ipv4: Ipv4Addr,
+        packet: &[u8],
+        now: Instant,
+    ) -> Option<[u8; 8]> {
+        if active.is_empty() || sendable.len() != active.len() {
+            return None;
+        }
         self.evict_counter = self.evict_counter.wrapping_add(1);
-        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX {
-            self.flows.retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY)
+            || self.flows.len() >= FLOW_TABLE_MAX
+        {
+            self.flows.retain(|_, state| {
+                now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL
+            });
             if self.flows.len() >= FLOW_TABLE_MAX {
                 self.flows.clear();
             }
         }
 
-        // Scope collision-safe flow identities to the virtual client so
-        // identical tuples from separate tunnel groups cannot share state.
         let Some(flow) = ghulakh_protocol::ip_flow::ip_flow_key(packet) else {
-            // Malformed/truncated IPv4 packets get no persistent affinity.
-            let id = self.choose(active, now, packet.len());
+            let id = self.choose(active, sendable, now, packet.len())?;
             self.refill(id, now);
             if let Some(tokens) = self.tokens.get_mut(&id) {
                 *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
             }
-            return id;
+            return Some(id);
         };
         let key = (client_ipv4, flow);
         let small_udp = flow.protocol() == 17 && packet.len() <= SMALL_UDP_MAX_LEN;
@@ -145,24 +228,22 @@ impl DownlinkScheduler {
                 state.sticky_until = Some(now + SMALL_UDP_STICKY);
             }
             let sticky = state.sticky_until.is_some_and(|until| now < until);
-            if active.contains(&state.session_id) && (sticky || state.burst_left >= packet.len()) {
+            let assigned_sendable = active.iter().position(|id| *id == state.session_id)
+                .is_some_and(|index| sendable[index]);
+            if assigned_sendable && (sticky || state.burst_left >= packet.len()) {
                 state.burst_left = state.burst_left.saturating_sub(packet.len());
                 let id = state.session_id;
                 self.flows.insert(key, state);
                 id
             } else {
-                // A sustained flow advances as a bounded flowlet. This is the
-                // throughput/ordering trade-off of independent TURN paths:
-                // packets inside a burst share one path; burst boundaries may
-                // still expose cross-path arrival skew.
-                let id = self.choose(active, now, packet.len());
+                let id = self.choose(active, sendable, now, packet.len())?;
                 state.session_id = id;
                 state.burst_left = FLOW_BURST_BYTES.saturating_sub(packet.len());
                 self.flows.insert(key, state);
                 id
             }
         } else {
-            let id = self.choose(active, now, packet.len());
+            let id = self.choose(active, sendable, now, packet.len())?;
             self.flows.insert(key, DownlinkFlowState {
                 session_id: id,
                 last_seen: now,
@@ -178,7 +259,19 @@ impl DownlinkScheduler {
         if let Some(tokens) = self.tokens.get_mut(&selected) {
             *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
         }
-        selected
+        Some(selected)
+    }
+
+    fn select(
+        &mut self,
+        active: &[[u8; 8]],
+        client_ipv4: Ipv4Addr,
+        packet: &[u8],
+        now: Instant,
+    ) -> [u8; 8] {
+        let sendable = vec![true; active.len()];
+        self.select_sendable(active, &sendable, client_ipv4, packet, now)
+            .expect("test scheduler requires at least one sendable path")
     }
 }
 
@@ -208,6 +301,19 @@ struct GatewaySession {
     lease_generation: Option<[u8; 16]>,
     crypto: Mutex<SessionCrypto>,
     last_activity: Mutex<Instant>,
+    downlink_sender: mpsc::Sender<Vec<u8>>,
+    downlink_failed: Arc<AtomicBool>,
+    downlink_worker: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl Drop for GatewaySession {
+    fn drop(&mut self) {
+        if let Ok(worker) = self.downlink_worker.lock() {
+            if let Some(worker) = worker.as_ref() {
+                worker.abort();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -224,7 +330,7 @@ struct Counters {
     rejected_session: AtomicU64,
     rejected_packet: AtomicU64,
     queue_drops: AtomicU64,
-    downlink_sent: AtomicU64,
+    downlink_sent: Arc<AtomicU64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -436,6 +542,25 @@ impl TurnGateway {
                 sessions: vec![session_id],
             });
         }
+        let (downlink_sender, mut downlink_receiver) =
+            mpsc::channel::<Vec<u8>>(DOWNLINK_QUEUE_CAPACITY);
+        let downlink_failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = Arc::clone(&downlink_failed);
+        let socket = Arc::clone(&self.socket);
+        let sent_counter = Arc::clone(&self.counters.downlink_sent);
+        let downlink_worker = tokio::spawn(async move {
+            while let Some(encoded) = downlink_receiver.recv().await {
+                match socket.send_to(&encoded, relay_peer).await {
+                    Ok(sent) if sent == encoded.len() => {
+                        worker_failed.store(false, Ordering::Release);
+                        sent_counter.fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {
+                        worker_failed.store(true, Ordering::Release);
+                    }
+                }
+            }
+        });
         let session = Arc::new(GatewaySession {
             client_ipv4,
             relay_peer,
@@ -443,6 +568,9 @@ impl TurnGateway {
             lease_generation,
             crypto: Mutex::new(SessionCrypto { opener, sealer }),
             last_activity: Mutex::new(Instant::now()),
+            downlink_sender,
+            downlink_failed,
+            downlink_worker: Mutex::new(Some(downlink_worker)),
         });
         sessions.insert(session_id, session);
         drop(clients);
@@ -637,6 +765,7 @@ impl TurnGateway {
             if let Ok(mut last_activity) = session.last_activity.lock() {
                 *last_activity = Instant::now();
             }
+            session.downlink_failed.store(false, Ordering::Release);
             let nonce = u64::from_be_bytes(plaintext[4..12].try_into().expect("validated keepalive length"));
             let response = {
                 let mut crypto = match session.crypto.lock() {
@@ -669,6 +798,7 @@ impl TurnGateway {
         if let Ok(mut last_activity) = session.last_activity.lock() {
             *last_activity = Instant::now();
         }
+        session.downlink_failed.store(false, Ordering::Release);
         if packet.packet.len() < 20
             || Ipv4Addr::new(packet.packet[12], packet.packet[13], packet.packet[14], packet.packet[15])
                 != session.client_ipv4
@@ -709,24 +839,44 @@ impl TurnGateway {
         drop(sessions);
         ensure!(!active_paths.is_empty(), "TURN session group has no recently authenticated paths");
         let active_ids: Vec<[u8; 8]> = active_paths.iter().map(|(id, _)| *id).collect();
-        let selected_id = self.downlink_scheduler.lock()
-            .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
-            .select(&active_ids, destination, &packet.packet, now);
+        let sendable: Vec<bool> = active_paths.iter().map(|(_, session)| {
+            !session.downlink_failed.load(Ordering::Acquire)
+                && session.downlink_sender.capacity() > 0
+        }).collect();
+        let selected_id = {
+            self.downlink_scheduler.lock()
+                .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
+                .select_sendable(&active_ids, &sendable, destination, &packet.packet, now)
+        };
+        let Some(selected_id) = selected_id else {
+            self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        };
         let session = active_paths.iter().find(|(id, _)| *id == selected_id)
             .map(|(_, session)| Arc::clone(session))
             .context("selected TURN downlink path disappeared")?;
         let encoded = {
-            let mut crypto = session.crypto.lock().map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
+            let mut crypto = session.crypto.lock()
+                .map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
             crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
                 .context("protect TURN downlink frame")?
         };
-        let sent = self.socket.send_to(&encoded, session.relay_peer).await
-            .context("send raw downlink payload to observed TURN relay peer")?;
-        ensure!(sent == encoded.len(), "partial TURN gateway UDP datagram send");
-        // Only authenticated client traffic refreshes path liveness. A local
-        // UDP send succeeding does not prove the TURN allocation is still alive.
-        self.counters.downlink_sent.fetch_add(1, Ordering::Relaxed);
-        Ok(())
+        match session.downlink_sender.try_send(encoded) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Drop newest rather than moving it to another path after the
+                // capacity snapshot; this preserves FIFO for the selected flowlet.
+                self.downlink_scheduler.lock()
+                    .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
+                    .mark_congested(selected_id);
+                self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                session.downlink_failed.store(true, Ordering::Release);
+                Err(anyhow::anyhow!("selected TURN downlink path queue is closed"))
+            }
+        }
     }
 
     pub fn stats(&self) -> TurnGatewayStats {
@@ -2072,6 +2222,56 @@ mod tests {
         assert!(
             busiest < 800,
             "bulk flow remains pinned to too few paths: {per_path:?}",
+        );
+    }
+
+
+    #[test]
+    fn downlink_scheduler_excludes_unavailable_and_backpressured_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[1u8; 8], [2u8; 8]];
+        let packet = ipv4_packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 8), 17, 12000, 443);
+        let now = Instant::now();
+
+        assert_eq!(
+            scheduler.select_sendable(&active, &[false, true], CLIENT_IP, &packet, now),
+            Some(active[1]),
+        );
+        assert_eq!(
+            scheduler.select_sendable(&active, &[false, false], CLIENT_IP, &packet, now),
+            None,
+        );
+    }
+
+    #[test]
+    fn downlink_scheduler_moves_a_pinned_flow_off_a_backpressured_path() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[3u8; 8], [4u8; 8]];
+        let packet = ipv4_packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 9), 17, 12001, 443);
+        let now = Instant::now();
+        let first = scheduler.select_sendable(&active, &[true, true], CLIENT_IP, &packet, now).unwrap();
+        let next = scheduler.select_sendable(
+            &active,
+            &[first != active[0], first != active[1]],
+            CLIENT_IP,
+            &packet,
+            now + Duration::from_millis(1),
+        ).unwrap();
+        assert_ne!(first, next);
+    }
+
+    #[test]
+    fn downlink_rate_controller_reduces_rate_on_congestion_and_recovers() {
+        let now = Instant::now();
+        let mut controller = DownlinkRateController::new();
+        controller.tick(now);
+        controller.mark_congested();
+        controller.tick(now + Duration::from_millis(100));
+        assert_eq!(controller.rate, DOWNLINK_RATE_BYTES_PER_SEC * 0.85);
+        controller.tick(now + Duration::from_millis(200));
+        assert_eq!(
+            controller.rate,
+            DOWNLINK_RATE_BYTES_PER_SEC * 0.85 + DOWNLINK_RATE_RECOVERY_STEP,
         );
     }
 
