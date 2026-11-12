@@ -150,7 +150,6 @@ class GhulakhVpnService : VpnService() {
                 .addAddress(clientAddress, 32)
                 .addAddress(clientIpv6Address, 128)
                 .addRoute("0.0.0.0", 0)
-                // IPv6 is captured to prevent leaks; the current server drops IPv6 packets.
                 .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
                 .establish()
@@ -167,7 +166,7 @@ class GhulakhVpnService : VpnService() {
                 descriptor.close()
                 return
             }
-            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 пока без маршрутизации")
+            updateNotification("VPN активен · IPv4/IPv6 через TURN-реле VK Calls")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
@@ -185,12 +184,11 @@ class GhulakhVpnService : VpnService() {
                         }
                         if (length > 0) {
                             val version = (buffer[0].toInt() and 0xff) ushr 4
-                            if (version == 6) continue
-                            if (version != 4) {
+                            if (version != 4 && version != 6) {
                                 throw IllegalStateException("Android TUN returned an unsupported IP version")
                             }
                             if (!transport.nativeTurnSendPacket(handle, buffer.copyOf(length))) {
-                                throw IllegalStateException("TURN-транспорт отклонил IPv4-пакет")
+                                throw IllegalStateException("TURN-транспорт отклонил IP-пакет")
                             }
                         }
                     }
