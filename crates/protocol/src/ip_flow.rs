@@ -303,4 +303,81 @@ mod tests {
         assert!(matches!(ip_flow_key(&packet), Some(IpFlowKey::Ipv6(_))));
     }
 
+
+    fn ipv6_with_extension_headers(chain: &[(u8, Vec<u8>)], transport: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x60;
+        packet[8..24].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        packet[24..40].copy_from_slice(&[0x20, 1, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+        packet[6] = chain.first().map_or(17, |(kind, _)| *kind);
+        for (index, (kind, mut header)) in chain.iter().cloned().enumerate() {
+            let next = chain.get(index + 1).map_or(17, |(next, _)| *next);
+            header[0] = next;
+            match kind {
+                0 | 43 | 60 => header[1] = (header.len() / 8 - 1) as u8,
+                51 => header[1] = (header.len() / 4 - 2) as u8,
+                _ => {}
+            }
+            packet.extend_from_slice(&header);
+        }
+        packet.extend_from_slice(transport);
+        let payload_len = (packet.len() - 40) as u16;
+        packet[4..6].copy_from_slice(&payload_len.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn ipv6_flow_key_walks_routing_and_destination_options_headers() {
+        let transport = [0x04, 0xd2, 0x01, 0xbb];
+        let routing = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let destination = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = ipv6_with_extension_headers(&[(43, routing), (60, destination)], &transport);
+        let Some(IpFlowKey::Ipv6(key)) = ip_flow_key(&packet) else {
+            panic!("IPv6 flow key was not parsed");
+        };
+        assert_eq!(key.protocol, 17);
+        assert_eq!(key.discriminator, Ipv6FlowDiscriminator::Ports {
+            source: 1234,
+            destination: 443,
+        });
+    }
+
+    #[test]
+    fn ipv6_flow_key_walks_authentication_header() {
+        let authentication = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        let packet = ipv6_with_extension_headers(&[(51, authentication)], &[0x00, 0x35, 0x01, 0xbb]);
+        let Some(IpFlowKey::Ipv6(key)) = ip_flow_key(&packet) else {
+            panic!("IPv6 AH flow key was not parsed");
+        };
+        assert_eq!(key.protocol, 17);
+        assert_eq!(key.discriminator, Ipv6FlowDiscriminator::Ports {
+            source: 53,
+            destination: 443,
+        });
+    }
+
+    #[test]
+    fn ipv6_fragment_key_is_stable_for_first_and_later_fragments() {
+        let mut first = ipv6_with_extension_headers(&[(44, vec![0; 8])], &[0, 1, 0, 2]);
+        first[40] = 17;
+        first[42..44].copy_from_slice(&0x1234u16.to_be_bytes());
+        first[44..48].copy_from_slice(&0x1020_3040u32.to_be_bytes());
+        let mut later = first.clone();
+        later[42..44].copy_from_slice(&8u16.to_be_bytes());
+        assert_eq!(ip_flow_key(&first), ip_flow_key(&later));
+        later[44..48].copy_from_slice(&0x1020_3041u32.to_be_bytes());
+        assert_ne!(ip_flow_key(&first), ip_flow_key(&later));
+    }
+
+    #[test]
+    fn truncated_ipv6_extension_headers_are_rejected() {
+        let mut packet = vec![0u8; 42];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&2u16.to_be_bytes());
+        packet[6] = 0;
+        packet[40] = 17;
+        packet[41] = 1;
+        assert_eq!(ipv6_flow_key(&packet), None);
+    }
+
 }
