@@ -34,6 +34,8 @@ const UDP_BUFFER_SIZE: usize = 65_507;
 const DATAGRAM_DISPATCH_SHARDS: usize = 8;
 const DATAGRAM_DISPATCH_CAPACITY: usize = 256;
 const SESSION_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+// Client authenticated keepalive cadence is 15 seconds with a 45-second failure deadline.
+const PATH_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const SESSION_MAINTENANCE_INTERVAL: Duration = Duration::from_secs(30);
 const DOWNLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
 const DOWNLINK_MIN_RATE_BYTES_PER_SEC: f64 = 150_000.0;
@@ -836,7 +838,7 @@ impl TurnGateway {
             .filter_map(|session_id| {
                 let session = sessions.get(session_id)?.clone();
                 let last_activity = *session.last_activity.lock().ok()?;
-                (now.saturating_duration_since(last_activity) < SESSION_IDLE_TIMEOUT)
+                (now.saturating_duration_since(last_activity) < PATH_HEALTH_TIMEOUT)
                     .then_some((*session_id, session))
             })
             .collect();
@@ -859,7 +861,7 @@ impl TurnGateway {
         let session = active_paths.iter().find(|(id, _)| *id == selected_id)
             .map(|(_, session)| Arc::clone(session))
             .context("selected TURN downlink path disappeared")?;
-        let sequence = route.next_downlink_sequence.fetch_update(
+        let sequence = route.next_downlink_sequence.try_update(
             Ordering::AcqRel,
             Ordering::Acquire,
             |current| current.checked_add(1),
@@ -915,6 +917,21 @@ mod tests {
     const SERVER_KEY: [u8; 32] = [0x22; 32];
     const CLIENT_PREFIX: [u8; 4] = [0x31; 4];
     const SERVER_PREFIX: [u8; 4] = [0x42; 4];
+
+    #[test]
+    fn downlink_rate_controller_reduces_on_congestion_and_recovers_gradually() {
+        let start = Instant::now();
+        let mut controller = DownlinkRateController::new();
+        controller.tick(start);
+        controller.mark_congested();
+        controller.tick(start + DOWNLINK_ADJUST_INTERVAL);
+        let reduced = DOWNLINK_RATE_BYTES_PER_SEC * 0.85;
+        assert!((controller.rate - reduced).abs() < 0.001);
+        assert!(!controller.congested);
+
+        controller.tick(start + DOWNLINK_ADJUST_INTERVAL * 2);
+        assert!((controller.rate - (reduced + DOWNLINK_RATE_RECOVERY_STEP)).abs() < 0.001);
+    }
 
     fn packet(source: Ipv4Addr, destination: Ipv4Addr) -> DataDatagram {
         let mut bytes = vec![0u8; 20];
@@ -1158,7 +1175,7 @@ mod tests {
 
         let stale = gateway.sessions.read().await.get(&session_a).cloned().unwrap();
         *stale.last_activity.lock().unwrap() =
-            Instant::now() - SESSION_IDLE_TIMEOUT - Duration::from_secs(1);
+            Instant::now() - PATH_HEALTH_TIMEOUT - Duration::from_secs(1);
 
         let outbound = packet(Ipv4Addr::new(203, 0, 113, 10), CLIENT_IP);
         gateway.send_downlink(&outbound).await.unwrap();
