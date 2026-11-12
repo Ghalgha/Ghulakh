@@ -193,7 +193,7 @@ class GhulakhVpnService : VpnService() {
                         }
                     }
                 } catch (error: Throwable) {
-                    if (isCurrent(generation)) failSession(generation, "Ошибка чтения Android TUN", error)
+                    if (isCurrent(generation)) failSession(generation, startId, "Ошибка чтения Android TUN", error)
                 }
             }, "ghulakh-tun-reader")
 
@@ -206,7 +206,7 @@ class GhulakhVpnService : VpnService() {
                         output.flush()
                     }
                 } catch (error: Throwable) {
-                    if (isCurrent(generation)) failSession(generation, "Ошибка приёма TURN-пакета", error)
+                    if (isCurrent(generation)) failSession(generation, startId, "Ошибка приёма TURN-пакета", error)
                 }
             }, "ghulakh-tun-writer")
 
@@ -393,11 +393,12 @@ class GhulakhVpnService : VpnService() {
         }
     }
 
-    private fun failSession(generation: Long, message: String, error: Throwable) {
+    private fun failSession(generation: Long, startId: Int, message: String, error: Throwable) {
         if (!stopTunnel(generation)) return
         Log.e(TAG, message, error)
         updateNotification("$message: ${error.message ?: "ошибка"}")
-        stopSelf()
+        // Do not stop a service instance that has since received a newer start request.
+        stopSelfResult(startId)
     }
 
     @Synchronized
