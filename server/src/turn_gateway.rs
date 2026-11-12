@@ -2388,10 +2388,17 @@ mod tests {
             DataDatagram { kind: IpPacketKind::Ipv6, packet: bytes }
         };
 
-        let uplink = ipv6_packet(client_ipv6, "2001:db8::99".parse().unwrap());
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
         );
+        let spoofed = ipv6_packet("fd77:77::99".parse().unwrap(), "2001:db8::99".parse().unwrap());
+        let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
+        relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(tun_rx.try_recv().is_err());
+        assert_eq!(gateway.stats().rejected_packet, 1);
+
+        let uplink = ipv6_packet(client_ipv6, "2001:db8::99".parse().unwrap());
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
         assert_eq!(
