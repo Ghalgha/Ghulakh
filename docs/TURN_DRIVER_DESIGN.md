@@ -6,7 +6,7 @@
 
 ## Владение состоянием
 
-Одна allocation на устройство. Один управляющий driver владеет:
+Один управляющий driver владеет одной независимой TURN allocation (одним path). Tunnel group объединяет несколько таких driver/path instances:
 
 - UDP socket и его единственным receive loop;
 - transaction manager;
@@ -37,7 +37,7 @@
 
 `crates/transport/src/turn_driver.rs` связывает UDP adapter, transaction manager, auth context, allocation manager и peer registry. Он предоставляет отдельные операции Allocate, CreatePermission, ChannelBind и Refresh; все операции выполняются через один mutable driver, поэтому control transactions не конкурируют за один socket receive loop. Начальный unauthenticated 401 возвращается как структурированный challenge для credential/auth слоя. 438 принимается только после проверки MESSAGE-INTEGRITY; authenticated 401 не используется для повторного согласования credentials. Состояние allocation/peer обновляется только после проверки ответа.
 
-Это ещё не автоматический session supervisor: nonce rotation/credential renewal, повтор Allocate после challenge, reconnect, непрерывный ChannelData receive path и TUN data path остаются отдельными задачами. Driver намеренно не выводит integrity key из VK Calls username/password.
+Это описание раннего control-driver среза; оно superseded последующими разделами этого документа и текущим кодом. Session supervisor, ограниченная обработка 401/438, allocation/permission/channel refresh, reconnect, ChannelData dataplane и TUN integration реализованы. Совместимость auth profile с реальным VK relay всё ещё требует проверки.
 
 ## Session supervisor
 
@@ -53,7 +53,7 @@ Supervisor остаётся единственным владельцем contro
 
 Actor классифицирует UDP ChannelData по корректному RFC framing и STUN сообщения по codec; STUN Data indications направляются в data queue. Он не подтверждает транзакции и не проверяет MESSAGE-INTEGRITY: эти действия остаются у control-plane owner. Отправка сериализована actor task, а Android-путь с заранее защищённым socket descriptor остаётся в UDP adapter.
 
-Actor подключён к `TurnClientDriver`: control transactions отправляются через bounded actor command queue и получают ответы через единственный control receiver; data receiver может быть передан отдельному dataplane consumer. Это устраняет конкурирующие socket receive loops. Сам data receiver пока не подключён к `TurnDataReceiver`, Android TUN и серверному gateway, поэтому сквозной TURN data path ещё не готов.
+Actor подключён к `TurnClientDriver`: control transactions отправляются через bounded actor command queue и получают ответы через единственный control receiver; data receiver может быть передан отдельному dataplane consumer. Это устраняет конкурирующие socket receive loops. Этот абзац описывает промежуточное состояние до интеграции dataplane. Текущий `TurnClientRuntime` связывает socket actor, TURN control, Noise handshake и защищённый bidirectional dataplane; Android JNI/VpnService и серверный TUN gateway интегрированы. Mock integration tests проверяют сквозную композицию, но не реальный VK relay.
 
 ## Защищённый TURN dataplane
 
