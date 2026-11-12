@@ -616,6 +616,13 @@ impl TurnClientPathGroup {
         );
         let paths = self.paths.read()
             .map_err(|_| anyhow::anyhow!("TURN path registry is poisoned"))?;
+        // close() publishes the closed flag before waiting for the write lock.
+        // Recheck after acquiring the read lock so a sender cannot slip past
+        // the initial check while shutdown is already in progress.
+        anyhow::ensure!(
+            !self.closed.load(Ordering::Acquire),
+            "TURN path group is closed"
+        );
         let now = Instant::now();
         let mut scheduler = self.uplink_scheduler.lock()
             .map_err(|_| anyhow::anyhow!("TURN uplink scheduler lock poisoned"))?;
