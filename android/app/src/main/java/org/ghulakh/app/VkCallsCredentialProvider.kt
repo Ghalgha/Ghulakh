@@ -15,12 +15,13 @@ data class VkCallsSession(
     internal val apiUrl: String,
     internal val sessionKey: String,
     internal val conversationId: String,
+    private val finishAction: (() -> Unit)? = null,
 ) {
     private val finished = AtomicBoolean(false)
 
     fun finish() {
         finishOnce {
-            VkCallsCredentialProvider.finishConversation(
+            finishAction?.invoke() ?: VkCallsCredentialProvider.finishConversation(
                 apiUrl,
                 sessionKey,
                 conversationId,
@@ -168,6 +169,7 @@ object VkCallsCredentialProvider {
         private val accessToken: String,
         private val conversationId: String,
         initialCredentialsJson: String,
+        private val sessionFetcher: (() -> VkCallsSession)? = null,
     ) {
         private val lock = Any()
         private val issuedFingerprints = mutableSetOf(
@@ -177,7 +179,8 @@ object VkCallsCredentialProvider {
         private var finished = false
 
         fun obtainCredentials(): String {
-            val session = VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
+            val session = sessionFetcher?.invoke()
+                ?: VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
             try {
                 val fingerprint = TurnQuotaRetryPolicy.fingerprint(session.turnCredentialsJson)
                 synchronized(lock) {
