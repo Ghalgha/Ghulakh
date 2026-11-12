@@ -755,8 +755,8 @@ fn select_relay_address(mut addresses: Vec<SocketAddr>, path_id: u16) -> Option<
 const UPLINK_RATE_BYTES_PER_SEC: f64 = 247_000.0;
 const UPLINK_BUCKET_CAPACITY: f64 = 10_500.0;
 const UPLINK_MAX_DEFICIT: f64 = -4_500.0;
-// Keep each uplink flow on one TURN allocation; downlink striping is sequenced and reordered.
-const UPLINK_FLOW_BURST_BYTES: usize = usize::MAX;
+// Keep each flow on one allocation for a bounded 16 KiB burst, then rebalance at a flowlet boundary.
+const UPLINK_FLOW_BURST_BYTES: usize = 16 * 1024;
 const UPLINK_FLOW_TABLE_MAX: usize = 1024;
 const UPLINK_FLOW_EVICT_EVERY: u32 = 1024;
 const UPLINK_FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
@@ -1112,22 +1112,38 @@ mod path_group_tests {
     }
 
     #[test]
-    fn sustained_bulk_flow_remains_pinned_across_burst_boundaries() {
+    fn sustained_bulk_flow_is_distributed_at_bounded_flowlet_boundaries() {
         let mut scheduler = UplinkScheduler::default();
         let healthy = [true; 10];
         let sendable = [true; 10];
         let packet = bulk_packet(12000);
+        let flow = ghulakh_protocol::ip_flow::ip_flow_key(&packet).unwrap();
         let start = Instant::now();
         let first = scheduler.select(&healthy, &sendable, &packet, start).unwrap();
+        let mut selected_paths = [false; 10];
+        selected_paths[first] = true;
+        let mut path_changes = 0;
+
         for offset in 1..4_000u64 {
+            let previous = scheduler.flows.get(&flow).copied().unwrap();
             let selected = scheduler.select(
                 &healthy,
                 &sendable,
                 &packet,
                 start + Duration::from_micros(offset * 520),
             ).unwrap();
-            assert_eq!(selected, first, "one uplink flow must not switch paths at a burst boundary");
+            if selected != previous.path_index {
+                assert!(
+                    previous.burst_left < packet.len(),
+                    "a healthy bulk flow may change paths only after its current 16 KiB flowlet",
+                );
+                path_changes += 1;
+            }
+            selected_paths[selected] = true;
         }
+
+        assert!(path_changes > 1, "a sustained bulk uplink must use multiple TURN allocations");
+        assert!(selected_paths.iter().filter(|selected| **selected).count() > 1);
     }
 
     #[test]
