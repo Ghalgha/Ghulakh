@@ -623,6 +623,7 @@ async fn main() -> Result<()> {
         );
     }
 
+    let mut turn_ingress_task = None;
     let _tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
@@ -630,13 +631,15 @@ async fn main() -> Result<()> {
         if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
             let mut ingress = ingress.take().expect("TURN ingress receiver is available during startup");
             let tun_ingress_sender = sender.clone();
-            let _turn_ingress_task = tokio::spawn(async move {
+            turn_ingress_task = Some(tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
-                    if tun_ingress_sender.send(packet.packet).await.is_err() {
-                        break;
-                    }
+                    tun_ingress_sender
+                        .send(packet.packet)
+                        .await
+                        .context("forward TURN ingress packet to TUN")?;
                 }
-            });
+                anyhow::bail!("TURN ingress channel closed unexpectedly");
+            }));
         }
         eprintln!(
             "TUN interface {} is active at {}/16 with MTU {}",
@@ -650,10 +653,20 @@ async fn main() -> Result<()> {
 
     let (_, _, turn_gateway_task) = turn_gateway_setup
         .expect("TURN gateway is required by the startup guard");
-    turn_gateway_task
-        .await
-        .context("TURN gateway task panicked")?
-        .context("TURN gateway task failed")?;
+    let turn_ingress_task = turn_ingress_task
+        .expect("TURN ingress task is required when the gateway is enabled");
+    tokio::select! {
+        result = turn_gateway_task => {
+            result
+                .context("TURN gateway task panicked")?
+                .context("TURN gateway task failed")?;
+        }
+        result = turn_ingress_task => {
+            result
+                .context("TURN ingress task panicked")?
+                .context("TURN ingress task failed")?;
+        }
+    }
     Ok(())
 }
 
