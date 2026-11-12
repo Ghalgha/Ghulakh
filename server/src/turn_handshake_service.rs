@@ -222,7 +222,8 @@ impl TurnHandshakeService {
                     |path_context| {
                         let (virtual_ipv4, virtual_ipv6) = if let Some(context) = path_context {
                             reserved_path = Some(context);
-                            let (ipv4, ipv6, previous) = self.reserve_path_transactional(context, envelope.handshake_id)
+                            let (ipv4, ipv6, previous) = self
+                                .reserve_path_transactional(context, envelope.handshake_id)
                                 .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?;
                             replaced_generation = previous;
                             (ipv4, ipv6)
@@ -262,7 +263,8 @@ impl TurnHandshakeService {
                         .map(|group| (group.virtual_ipv4, group.virtual_ipv6))
                         .context("reserved path group disappeared before acknowledgement")?
                 } else {
-                    let ipv4 = reserved_legacy_ip.context("legacy virtual IPv4 reservation missing")?;
+                    let ipv4 = reserved_legacy_ip
+                        .context("legacy virtual IPv4 reservation missing")?;
                     (ipv4, ipv6_for_virtual_ipv4(ipv4))
                 };
                 let config = TurnSessionConfig {
@@ -440,10 +442,6 @@ impl TurnHandshakeService {
             }
         }
         bail!("server dual-stack virtual address pool exhausted");
-    }
-
-    fn allocate_virtual_ipv4(&mut self) -> Result<Ipv4Addr> {
-        self.allocate_virtual_addresses().map(|(ipv4, _)| ipv4)
     }
 
     pub fn release_virtual_ipv4(&mut self, address: Ipv4Addr) -> bool {
@@ -784,14 +782,14 @@ mod tests {
     #[test]
     fn virtual_ipv4_addresses_can_be_released_and_reused() {
         let (mut service, _) = service(b"secret");
-        let first = service.allocate_virtual_ipv4().unwrap();
+        let first = service.allocate_virtual_addresses().unwrap().0;
         service.allocated_ips.insert(first);
         assert_eq!(service.allocated_virtual_ipv4_count(), 1);
         assert!(service.release_virtual_ipv4(first));
         assert_eq!(service.allocated_virtual_ipv4_count(), 0);
         service.next_client_host = u32::from(first.octets()[2]) * 256
             + u32::from(first.octets()[3]);
-        assert_eq!(service.allocate_virtual_ipv4().unwrap(), first);
+        assert_eq!(service.allocate_virtual_addresses().unwrap().0, first);
     }
 
     #[test]
