@@ -241,6 +241,7 @@ class GhulakhVpnService : VpnService() {
                 }
                 credentialGroups.clear()
             }
+            if (worker === Thread.currentThread()) worker = null
             if (ownsLifecycle) stopSelfResult(startId)
         }
     }
@@ -402,6 +403,11 @@ class GhulakhVpnService : VpnService() {
     private fun stopTunnel() {
         running.set(false)
         lifecycleGeneration.invalidate()
+        val activeWorker = worker
+        worker = null
+        if (activeWorker != null && activeWorker !== Thread.currentThread()) {
+            activeWorker.interrupt()
+        }
         recoveryWorker?.interrupt()
         recoveryWorker = null
         val recoveryThreads = synchronized(recoveryLock) {
@@ -439,7 +445,6 @@ class GhulakhVpnService : VpnService() {
     override fun onDestroy() {
         isActive = false
         stopTunnel()
-        worker?.interrupt()
         stopForeground(STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
