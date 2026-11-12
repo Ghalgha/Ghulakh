@@ -58,7 +58,10 @@ impl TurnSessionConfig {
         }
         let config = Self {
             virtual_ipv4: Ipv4Addr::new(encoded[0], encoded[1], encoded[2], encoded[3]),
-            virtual_ipv6: Ipv6Addr::from(<[u8; 16]>::try_from(&encoded[4..20]).map_err(|_| SessionHandshakeError::InvalidSessionConfig)?),
+            virtual_ipv6: Ipv6Addr::from(
+                <[u8; 16]>::try_from(&encoded[4..20])
+                    .map_err(|_| SessionHandshakeError::InvalidSessionConfig)?,
+            ),
             mtu: u16::from_be_bytes([encoded[20], encoded[21]]),
         };
         config.encode()?;
