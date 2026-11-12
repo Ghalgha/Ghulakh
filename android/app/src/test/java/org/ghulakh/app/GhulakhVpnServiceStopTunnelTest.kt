@@ -35,15 +35,17 @@ class GhulakhVpnServiceStopTunnelTest {
             val releaseChild = CountDownLatch(1)
             val supervisorInterrupted = AtomicBoolean(false)
             val childInterrupted = AtomicBoolean(false)
+            val supervisorInterruptObserved = CountDownLatch(1)
+            val childInterruptObserved = CountDownLatch(1)
             val brokerFinished = AtomicBoolean(false)
 
             val supervisor = Thread {
                 supervisorStarted.countDown()
-                awaitIgnoringInterrupt(releaseSupervisor, supervisorInterrupted)
+                awaitIgnoringInterrupt(releaseSupervisor, supervisorInterrupted, supervisorInterruptObserved)
             }
             val child = Thread {
                 childStarted.countDown()
-                awaitIgnoringInterrupt(releaseChild, childInterrupted)
+                awaitIgnoringInterrupt(releaseChild, childInterrupted, childInterruptObserved)
             }
             tokens.add(token)
             pathWorkers[token to 7] = child
@@ -65,6 +67,8 @@ class GhulakhVpnServiceStopTunnelTest {
             }
             completion.start()
 
+            assertTrue(supervisorInterruptObserved.await(1, TimeUnit.SECONDS))
+            assertTrue(childInterruptObserved.await(1, TimeUnit.SECONDS))
             assertTrue(supervisorInterrupted.get())
             assertTrue(childInterrupted.get())
             assertFalse(brokerFinished.get())
@@ -119,19 +123,24 @@ class GhulakhVpnServiceStopTunnelTest {
         stopMethod.invoke(service, generation) as Boolean
 
     private fun serviceStop(service: GhulakhVpnService) {
-        runCatching { stopMethod.invoke(service, null) }
+        runCatching { stopMethod.invoke(service, *arrayOf<Any?>(null)) }
     }
 
     private fun field(instance: Any, name: String): Field =
         instance.javaClass.getDeclaredField(name).apply { isAccessible = true }
 
-    private fun awaitIgnoringInterrupt(latch: CountDownLatch, interrupted: AtomicBoolean) {
+    private fun awaitIgnoringInterrupt(
+        latch: CountDownLatch,
+        interrupted: AtomicBoolean,
+        interruptObserved: CountDownLatch,
+    ) {
         while (true) {
             try {
                 latch.await()
                 return
             } catch (_: InterruptedException) {
                 interrupted.set(true)
+                interruptObserved.countDown()
             }
         }
     }
