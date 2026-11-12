@@ -119,15 +119,14 @@ impl DownlinkScheduler {
         // Keep every valid flow on one TURN allocation for its lifetime.
         // Distinct flows are distributed across allocations; moving packets
         // from an established flow between independent relay paths can reorder them.
-        let selected = if let Some(state) = self.flows.get_mut(&key) {
+        let selected = if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
-            if active.contains(&state.session_id) {
-                state.session_id
-            } else {
-                let id = self.choose(active, now, packet.len());
-                state.session_id = id;
-                id
+            if !active.contains(&state.session_id) {
+                state.session_id = self.choose(active, now, packet.len());
             }
+            let id = state.session_id;
+            self.flows.insert(key, state);
+            id
         } else {
             let id = self.choose(active, now, packet.len());
             self.flows.insert(key, DownlinkFlowState { session_id: id, last_seen: now });
