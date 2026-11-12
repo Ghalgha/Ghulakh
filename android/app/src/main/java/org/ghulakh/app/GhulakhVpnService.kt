@@ -135,16 +135,20 @@ class GhulakhVpnService : VpnService() {
             }
             val establishedGroup = checkNotNull(callsSession)
             credentialGroups.add(establishedGroup)
-            val (clientAddress, mtu) = synchronized(nativeOperationLock) {
+            val (clientAddress, clientIpv6Address, mtu) = synchronized(nativeOperationLock) {
                 if (!isCurrent(generation)) return
-                transport.nativeTurnClientIpv4(handle) to transport.nativeTurnMtu(handle)
+                Triple(
+                    transport.nativeTurnClientIpv4(handle),
+                    transport.nativeTurnClientIpv6(handle),
+                    transport.nativeTurnMtu(handle),
+                )
             }
             require(mtu in MIN_TUN_MTU..MAX_TUN_MTU) { "Сервер передал недопустимый MTU" }
             val descriptor = Builder()
                 .setSession("Ghulakh")
                 .setMtu(mtu)
                 .addAddress(clientAddress, 32)
-                .addAddress("fd77::2", 128)
+                .addAddress(clientIpv6Address, 128)
                 .addRoute("0.0.0.0", 0)
                 // IPv6 is captured to prevent leaks; the current server drops IPv6 packets.
                 .addRoute("::", 0)
@@ -163,7 +167,7 @@ class GhulakhVpnService : VpnService() {
                 descriptor.close()
                 return
             }
-            updateNotification("VPN активен · IPv4 через TURN-реле VK Calls · IPv6 блокируется")
+            updateNotification("VPN активен · IPv4/IPv6 через TURN-реле VK Calls")
 
             val input = FileInputStream(descriptor.fileDescriptor)
             val output = FileOutputStream(descriptor.fileDescriptor)
