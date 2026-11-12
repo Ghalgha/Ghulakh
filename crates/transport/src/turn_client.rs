@@ -5,7 +5,7 @@
 //! bidirectional IP dataplane. VK API credential acquisition remains external.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     net::{SocketAddr, UdpSocket as StdUdpSocket},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -15,7 +15,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use ghulakh_protocol::{DataDatagram, turn_path_context::TurnPathContext};
+use ghulakh_protocol::{ordered_datagram::SequencedDataDatagram, DataDatagram, turn_path_context::TurnPathContext};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -36,13 +36,81 @@ use crate::{
 
 pub const DEFAULT_TURN_CHANNEL: u16 = 0x4001;
 const APP_QUEUE_CAPACITY: usize = 128;
+const DOWNLINK_REORDER_GAP_TIMEOUT: Duration = Duration::from_millis(250);
+const DOWNLINK_REORDER_MAX_PENDING: usize = APP_QUEUE_CAPACITY * 2;
+
+#[derive(Default)]
+struct DownlinkReorderBuffer {
+    expected_sequence: u64,
+    pending: BTreeMap<u64, DataDatagram>,
+    ready: VecDeque<DataDatagram>,
+    gap_started: Option<Instant>,
+}
+
+impl DownlinkReorderBuffer {
+    fn push(&mut self, packet: SequencedDataDatagram, now: Instant) {
+        let Some(sequence) = packet.sequence else {
+            if self.pending.is_empty() && self.ready.is_empty() {
+                self.ready.push_back(packet.datagram);
+            }
+            return;
+        };
+        if sequence < self.expected_sequence {
+            return;
+        }
+        if sequence > self.expected_sequence && self.pending.len() >= DOWNLINK_REORDER_MAX_PENDING {
+            self.advance_gap(now);
+            if sequence < self.expected_sequence {
+                return;
+            }
+        }
+        if sequence == self.expected_sequence {
+            self.ready.push_back(packet.datagram);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+            self.drain(now);
+        } else {
+            self.pending.entry(sequence).or_insert(packet.datagram);
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn drain(&mut self, now: Instant) {
+        while let Some(packet) = self.pending.remove(&self.expected_sequence) {
+            self.ready.push_back(packet);
+            self.expected_sequence = self.expected_sequence.wrapping_add(1);
+        }
+        if self.pending.is_empty() {
+            self.gap_started = None;
+        } else {
+            self.gap_started.get_or_insert(now);
+        }
+    }
+
+    fn gap_deadline(&self) -> Option<Instant> {
+        self.gap_started.map(|started| started + DOWNLINK_REORDER_GAP_TIMEOUT)
+    }
+
+    fn advance_gap(&mut self, now: Instant) {
+        if let Some((&next_sequence, _)) = self.pending.first_key_value() {
+            self.expected_sequence = next_sequence;
+            self.drain(now);
+        } else {
+            self.gap_started = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn pop_ready(&mut self) -> Option<DataDatagram> {
+        self.ready.pop_front()
+    }
+}
 
 /// Fully assembled client-side TURN VPN dataplane.
 pub struct TurnClientRuntime {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     path_context: Option<TurnPathContext>,
     uplink: mpsc::Sender<DataDatagram>,
-    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
     dataplane_task: JoinHandle<Result<TurnDataPlaneStats>>,
     maintenance_task: JoinHandle<Result<()>>,
     shutdown_signal: watch::Sender<bool>,
@@ -199,7 +267,7 @@ impl TurnClientRuntime {
             TurnDataReceiver::new(DEFAULT_TURN_CHANNEL, downlink_opener),
         );
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
-        let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
+        let (downlink_tx, downlink) = mpsc::channel::<SequencedDataDatagram>(APP_QUEUE_CAPACITY);
         let (maintenance_stopped_tx, mut maintenance_stopped_rx) = watch::channel(false);
         let (shutdown_signal, mut shutdown_rx) = watch::channel(false);
         let maintenance_task = tokio::spawn(async move {
@@ -278,7 +346,7 @@ impl TurnClientRuntime {
         self.uplink.send(packet).await.context("TURN VPN uplink queue closed")
     }
 
-    pub async fn receive_packet(&self) -> Result<DataDatagram> {
+    pub async fn receive_packet(&self) -> Result<SequencedDataDatagram> {
         self.downlink.lock().await.recv().await.context("TURN VPN downlink queue closed")
     }
 
@@ -369,8 +437,9 @@ pub struct TurnClientPathGroup {
     config: ghulakh_protocol::session_handshake::TurnSessionConfig,
     paths: RwLock<Vec<Arc<TurnClientRuntime>>>,
     healthy: Vec<Arc<AtomicBool>>,
-    downlink: tokio::sync::Mutex<mpsc::Receiver<DataDatagram>>,
-    downlink_senders: StdMutex<mpsc::Sender<DataDatagram>>,
+    downlink: tokio::sync::Mutex<mpsc::Receiver<SequencedDataDatagram>>,
+    downlink_senders: StdMutex<mpsc::Sender<SequencedDataDatagram>>,
+    downlink_reorder: tokio::sync::Mutex<DownlinkReorderBuffer>,
     forwarders: StdMutex<Vec<JoinHandle<()>>>,
     uplink_scheduler: StdMutex<UplinkScheduler>,
     uplink_queue_drops: AtomicU64,
@@ -435,6 +504,7 @@ impl TurnClientPathGroup {
             healthy,
             downlink: tokio::sync::Mutex::new(downlink),
             downlink_senders: StdMutex::new(downlink_tx_for_group),
+            downlink_reorder: tokio::sync::Mutex::new(DownlinkReorderBuffer::default()),
             forwarders: StdMutex::new(forwarders),
             uplink_scheduler: StdMutex::new(UplinkScheduler::default()),
             uplink_queue_drops: AtomicU64::new(0),
@@ -569,15 +639,39 @@ impl TurnClientPathGroup {
     }
 
     pub async fn receive_packet(&self) -> Result<DataDatagram> {
+        enum Event {
+            Packet(Option<SequencedDataDatagram>),
+            Gap,
+        }
         let mut closed = self.closed_signal.subscribe();
         if self.closed.load(Ordering::Acquire) || *closed.borrow() {
             anyhow::bail!("TURN path group is closed");
         }
         let mut downlink = self.downlink.lock().await;
-        tokio::select! {
-            biased;
-            _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
-            packet = downlink.recv() => packet.context("all TURN path downlink queues are closed"),
+        let mut reorder = self.downlink_reorder.lock().await;
+        loop {
+            if let Some(packet) = reorder.ready.pop_front() {
+                return Ok(packet);
+            }
+            let event = if let Some(deadline) = reorder.gap_deadline() {
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+                    packet = downlink.recv() => Event::Packet(packet),
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => Event::Gap,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = closed.changed() => anyhow::bail!("TURN path group is closed"),
+                    packet = downlink.recv() => Event::Packet(packet),
+                }
+            };
+            match event {
+                Event::Packet(Some(packet)) => reorder.push(packet, Instant::now()),
+                Event::Packet(None) => anyhow::bail!("all TURN path downlink queues are closed"),
+                Event::Gap => reorder.advance_gap(Instant::now()),
+            }
         }
     }
 
@@ -1322,7 +1416,7 @@ mod path_group_tests {
     ) -> (
         TurnClientRuntime,
         mpsc::Receiver<DataDatagram>,
-        mpsc::Sender<DataDatagram>,
+        mpsc::Sender<SequencedDataDatagram>,
     ) {
         let (uplink, uplink_rx) = mpsc::channel(APP_QUEUE_CAPACITY);
         let (downlink_tx, downlink) = mpsc::channel(APP_QUEUE_CAPACITY);
@@ -1356,6 +1450,39 @@ mod path_group_tests {
         )
     }
 
+    #[test]
+    fn downlink_reorder_buffer_restores_sequence_across_paths() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let packet = |port| DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(port),
+        };
+        buffer.push(SequencedDataDatagram::new(2, packet(12002)), now);
+        buffer.push(SequencedDataDatagram::new(0, packet(12000)), now);
+        buffer.push(SequencedDataDatagram::new(1, packet(12001)), now);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12000u16.to_be_bytes());
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12002u16.to_be_bytes());
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_skips_lost_sequence_and_drops_late_packet() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let packet = |port| DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(port),
+        };
+        buffer.push(SequencedDataDatagram::new(1, packet(12001)), now);
+        assert!(buffer.pop_ready().is_none());
+        buffer.advance_gap(now + DOWNLINK_REORDER_GAP_TIMEOUT);
+        assert_eq!(buffer.pop_ready().unwrap().packet[20..22], 12001u16.to_be_bytes());
+        buffer.push(SequencedDataDatagram::new(0, packet(12000)), now + DOWNLINK_REORDER_GAP_TIMEOUT);
+        assert!(buffer.pop_ready().is_none());
+    }
+
     #[tokio::test]
     async fn path_group_dispatches_merges_downlink_and_degrades_after_path_loss() {
         let group_id = [0x5a; 16];
@@ -1385,6 +1512,20 @@ mod path_group_tests {
         }
         assert!(selected_paths.into_iter().all(|selected| selected));
 
+        // Sequenced packets arriving on independent paths are resequenced before TUN delivery.
+        let ordered_a = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(13000),
+        };
+        let ordered_b = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(13001),
+        };
+        downlink_a.send(SequencedDataDatagram::new(1, ordered_b.clone())).await.unwrap();
+        downlink_b.send(SequencedDataDatagram::new(0, ordered_a.clone())).await.unwrap();
+        assert_eq!(group.receive_packet().await.unwrap(), ordered_a);
+        assert_eq!(group.receive_packet().await.unwrap(), ordered_b);
+
         // The downlink fan-in accepts packets from either independent path.
         let down_a = DataDatagram {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
@@ -1394,8 +1535,8 @@ mod path_group_tests {
             kind: ghulakh_protocol::IpPacketKind::Ipv4,
             packet: packet(12002),
         };
-        downlink_a.send(down_a.clone()).await.unwrap();
-        downlink_b.send(down_b.clone()).await.unwrap();
+        downlink_a.send(SequencedDataDatagram::unsequenced(down_a.clone())).await.unwrap();
+        downlink_b.send(SequencedDataDatagram::unsequenced(down_b.clone())).await.unwrap();
         let mut merged = vec![
             group.receive_packet().await.unwrap(),
             group.receive_packet().await.unwrap(),

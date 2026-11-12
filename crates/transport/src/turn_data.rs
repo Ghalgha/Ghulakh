@@ -6,6 +6,7 @@
 
 use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
+    ordered_datagram::SequencedDataDatagram,
     secure_frame::{FrameOpener, FrameSealer},
     turn_channel_data::{decode_channel_data, encode_channel_data},
     DataDatagram,
@@ -41,7 +42,7 @@ impl TurnDataSender {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum TurnDataPayload {
-    Packet(DataDatagram),
+    Packet(SequencedDataDatagram),
     KeepaliveAck(u64),
 }
 
@@ -68,14 +69,14 @@ impl TurnDataReceiver {
             return Ok(TurnDataPayload::KeepaliveAck(nonce));
         }
         Ok(TurnDataPayload::Packet(
-            DataDatagram::decode(&plaintext).context("decode protected IP datagram")?
+            SequencedDataDatagram::decode(&plaintext).context("decode protected IP datagram")?
         ))
     }
 
     /// Decode an authenticated IP packet; control frames are not IP packets.
     pub fn decode_packet(&mut self, datagram: &[u8]) -> Result<DataDatagram> {
         match self.decode_payload(datagram)? {
-            TurnDataPayload::Packet(packet) => Ok(packet),
+            TurnDataPayload::Packet(packet) => Ok(packet.datagram),
             TurnDataPayload::KeepaliveAck(_) => anyhow::bail!("received keepalive acknowledgement where an IP packet was expected"),
         }
     }

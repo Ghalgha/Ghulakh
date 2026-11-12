@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
-use ghulakh_protocol::DataDatagram;
+use ghulakh_protocol::{ordered_datagram::SequencedDataDatagram, DataDatagram};
 use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
@@ -62,7 +62,7 @@ impl TurnDataPlane {
     pub async fn run(
         mut self,
         mut uplink: mpsc::Receiver<DataDatagram>,
-        downlink: mpsc::Sender<DataDatagram>,
+        downlink: mpsc::Sender<SequencedDataDatagram>,
     ) -> Result<TurnDataPlaneStats> {
         let mut stats = TurnDataPlaneStats::default();
         let mut keepalive = interval_at(Instant::now() + KEEPALIVE_INTERVAL, KEEPALIVE_INTERVAL);
@@ -227,7 +227,7 @@ mod tests {
         uplink_tx.send(packet()).await.unwrap();
         let returned = timeout(Duration::from_secs(2), downlink_rx.recv())
             .await.unwrap().unwrap();
-        assert_eq!(returned, packet());
+        assert_eq!(returned.datagram, packet());
         drop(uplink_tx);
         let stats = plane_task.await.unwrap().unwrap();
         assert_eq!(stats.sent_frames, 1);

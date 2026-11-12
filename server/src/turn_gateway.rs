@@ -17,6 +17,7 @@ use std::{
 
 use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
+    ordered_datagram::SequencedDataDatagram,
     secure_frame::{protected_frame_session_id, FrameOpener, FrameSealer},
     DataDatagram, IpPacketKind,
     turn_path_context::TurnPathContext,
@@ -321,6 +322,7 @@ impl Drop for GatewaySession {
 struct ClientRoute {
     group_id: Option<[u8; 16]>,
     sessions: Vec<[u8; 8]>,
+    next_downlink_sequence: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -541,6 +543,7 @@ impl TurnGateway {
             clients.insert(client_ipv4, ClientRoute {
                 group_id,
                 sessions: vec![session_id],
+                next_downlink_sequence: Arc::new(AtomicU64::new(0)),
             });
         }
         let (downlink_sender, mut downlink_receiver) =
@@ -856,10 +859,17 @@ impl TurnGateway {
         let session = active_paths.iter().find(|(id, _)| *id == selected_id)
             .map(|(_, session)| Arc::clone(session))
             .context("selected TURN downlink path disappeared")?;
+        let sequence = route.next_downlink_sequence.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| current.checked_add(1),
+        ).map_err(|_| anyhow::anyhow!("TURN downlink sequence space exhausted"))?;
+        let ordered_packet = SequencedDataDatagram::new(sequence, packet.clone())
+            .encode().context("encode ordered downlink IP packet")?;
         let encoded = {
             let mut crypto = session.crypto.lock()
                 .map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
-            crypto.sealer.seal(&packet.encode().context("encode downlink IP packet")?)
+            crypto.sealer.seal(&ordered_packet)
                 .context("protect TURN downlink frame")?
         };
         match session.downlink_sender.try_send(encoded) {
@@ -1281,7 +1291,7 @@ mod tests {
             } else {
                 opener_b.open(&buffer[..length]).unwrap()
             };
-            assert_eq!(DataDatagram::decode(&plaintext).unwrap(), flow);
+            assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, flow);
             let other = if expected_path == 0 { &relay_b } else { &relay_a };
             assert!(timeout(Duration::from_millis(25), other.recv_from(&mut buffer)).await.is_err());
         }
@@ -1479,7 +1489,8 @@ mod tests {
         gateway.send_downlink(&downlink).await.unwrap();
         let received_downlink = timeout(Duration::from_secs(2), client.receive_packet())
             .await.unwrap().unwrap();
-        assert_eq!(received_downlink, downlink);
+        assert_eq!(received_downlink.sequence, Some(0));
+        assert_eq!(received_downlink.datagram, downlink);
         assert_eq!(gateway.stats().accepted, 1);
 
         client.close();
@@ -1849,7 +1860,7 @@ mod tests {
         assert_eq!(source, gateway_addr);
         let mut client_rx = FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient);
         let plaintext = client_rx.open(&buffer[..length]).unwrap();
-        assert_eq!(DataDatagram::decode(&plaintext).unwrap(), downlink);
+        assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, downlink);
 
         assert_eq!(gateway.stats().accepted, 1);
         assert_eq!(gateway.stats().downlink_sent, 1);
