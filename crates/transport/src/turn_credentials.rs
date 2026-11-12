@@ -371,6 +371,30 @@ mod tests {
         assert!(debug.contains("<redacted>"));
     }
 
+
+    #[test]
+    fn parses_independent_credential_sets_for_each_path() {
+        let group = format!("[{RESPONSE},{RESPONSE}]");
+        let parsed = TurnCredentials::from_vk_response_json_array(&group, 2).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].username(), "temporary-user");
+        assert_eq!(parsed[1].password(), "temporary-password");
+    }
+
+    #[test]
+    fn rejects_credential_group_count_mismatch_and_invalid_member() {
+        assert_eq!(
+            TurnCredentials::from_vk_response_json_array(&format!("[{RESPONSE}]"), 2)
+                .unwrap_err(),
+            TurnCredentialError::InvalidCredentialSetCount
+        );
+        let invalid = r#"[{"turn_server":{"username":"u","credential":"p","urls":[]}}]"#;
+        assert_eq!(
+            TurnCredentials::from_vk_response_json_array(invalid, 2).unwrap_err(),
+            TurnCredentialError::InvalidCredentialSetCount
+        );
+    }
+
     #[test]
     fn accepts_direct_turn_server_object_from_webview_interception() {
         let direct = r#"{

@@ -29,28 +29,45 @@ internal object TurnQuotaRetryPolicy {
         fingerprint: String,
     ): Boolean = fingerprint in rejected
 
-    fun fingerprint(credentialsJson: String): String {
+    fun credentialFingerprints(credentialsJson: String): List<String> {
         val trimmed = credentialsJson.trim()
-        if (trimmed.startsWith("[")) {
-            val array = JSONArray(trimmed)
-            require(array.length() in 2..10) { "TURN credential group size is invalid" }
-            val fingerprints = (0 until array.length()).map { index ->
-                fingerprintSingle(array.getJSONObject(index))
-            }
-            require(fingerprints.distinct().size == fingerprints.size) {
-                "TURN credential group contains repeated credential sets"
-            }
-            val canonical = ByteArrayOutputStream()
-            DataOutputStream(canonical).use { output ->
-                fingerprints.sorted().forEach { value ->
-                    val bytes = value.toByteArray(Charsets.US_ASCII)
-                    output.writeInt(bytes.size)
-                    output.write(bytes)
-                }
-            }
-            return digest(canonical.toByteArray())
+        if (!trimmed.startsWith("[")) return listOf(fingerprintSingle(JSONObject(trimmed)))
+        val array = JSONArray(trimmed)
+        require(array.length() in 2..10) { "TURN credential group size is invalid" }
+        val fingerprints = (0 until array.length()).map { index ->
+            fingerprintSingle(array.getJSONObject(index))
         }
-        return fingerprintSingle(JSONObject(trimmed))
+        require(fingerprints.distinct().size == fingerprints.size) {
+            "TURN credential group contains repeated credential sets"
+        }
+        return fingerprints
+    }
+
+    fun fingerprint(credentialsJson: String): String {
+        val fingerprints = credentialFingerprints(credentialsJson)
+        if (fingerprints.size == 1) return fingerprints.single()
+        val canonical = ByteArrayOutputStream()
+        DataOutputStream(canonical).use { output ->
+            fingerprints.sorted().forEach { value ->
+                val bytes = value.toByteArray(Charsets.US_ASCII)
+                output.writeInt(bytes.size)
+                output.write(bytes)
+            }
+        }
+        return digest(canonical.toByteArray())
+    }
+
+    /** A quota-rejected member invalidates the entire candidate group. */
+    fun shouldRetryGroup(
+        attemptIndex: Int,
+        credentialsJson: String,
+        rejectedFingerprints: MutableSet<String>,
+    ): Boolean {
+        if (attemptIndex + 1 >= MAX_CONNECT_ATTEMPTS) return false
+        val members = credentialFingerprints(credentialsJson)
+        if (members.any { it in rejectedFingerprints }) return false
+        rejectedFingerprints.addAll(members)
+        return true
     }
 
 

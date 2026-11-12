@@ -47,6 +47,36 @@ class TurnQuotaRetryPolicyTest {
         )
     }
 
+
+    @Test
+    fun credentialGroupsAreOrderIndependentAndRejectPreviouslyRejectedMembers() {
+        val first = """{"turn_server":{"username":"u1","credential":"p1","urls":["turn:a.example:3478"]}}"""
+        val second = """{"turn_server":{"username":"u2","credential":"p2","urls":["turn:b.example:3478"]}}"""
+        val third = """{"turn_server":{"username":"u3","credential":"p3","urls":["turn:c.example:3478"]}}"""
+        val group = "[$first,$second]"
+        val reordered = "[$second,$first]"
+        assertEquals(
+            TurnQuotaRetryPolicy.fingerprint(group),
+            TurnQuotaRetryPolicy.fingerprint(reordered),
+        )
+
+        val rejected = mutableSetOf<String>()
+        assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(0, group, rejected))
+        assertFalse(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third,$first]", rejected))
+        assertTrue(TurnQuotaRetryPolicy.shouldRetryGroup(1, "[$third]", rejected).not())
+    }
+
+    @Test
+    fun credentialGroupsRejectDuplicateMembers() {
+        val credential = """{"turn_server":{"username":"u","credential":"p","urls":["turn:a.example:3478"]}}"""
+        try {
+            TurnQuotaRetryPolicy.credentialFingerprints("[$credential,$credential]")
+            throw AssertionError("duplicate credential set was accepted")
+        } catch (_: IllegalArgumentException) {
+            // Expected: one allocation credential cannot be reused across paths.
+        }
+    }
+
     @Test
     fun retryDelayIsBounded() {
         assertEquals(250L, TurnQuotaRetryPolicy.retryDelayMillis(0))

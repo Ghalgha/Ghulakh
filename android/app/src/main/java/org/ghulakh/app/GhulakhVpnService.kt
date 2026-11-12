@@ -82,11 +82,10 @@ class GhulakhVpnService : VpnService() {
                     break
                 } catch (error: Throwable) {
                     candidate.finish()
-                    val fingerprint = TurnQuotaRetryPolicy.fingerprint(candidate.turnCredentialsJson)
                     if (error.message != "TURN_ALLOCATION_QUOTA_486" ||
-                        !TurnQuotaRetryPolicy.shouldRetry(
+                        !TurnQuotaRetryPolicy.shouldRetryGroup(
                             connectAttempt,
-                            fingerprint,
+                            candidate.turnCredentialsJson,
                             rejectedCredentialFingerprints,
                         )
                     ) {
