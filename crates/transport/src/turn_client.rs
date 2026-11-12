@@ -768,7 +768,7 @@ impl UplinkScheduler {
 
     fn evict_flows(&mut self, now: Instant) {
         self.flow_evict_counter = self.flow_evict_counter.wrapping_add(1);
-        if self.flow_evict_counter % UPLINK_FLOW_EVICT_EVERY != 0
+        if !self.flow_evict_counter.is_multiple_of(UPLINK_FLOW_EVICT_EVERY)
             && self.flows.len() < UPLINK_FLOW_TABLE_MAX
         {
             return;
