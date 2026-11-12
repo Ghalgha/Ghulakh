@@ -69,6 +69,8 @@ class GhulakhVpnService : VpnService() {
 
     private fun runTunnel(generation: Long, startId: Int) {
         val credentialGroups = Collections.synchronizedList(mutableListOf<VkCallsCredentialGroup>())
+        var recoveryToken: AtomicBoolean? = null
+        var recoverySupervisor: Thread? = null
         try {
             val profile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
@@ -218,20 +220,24 @@ class GhulakhVpnService : VpnService() {
 
             tunReader.start()
             tunWriter.start()
-            val recoveryToken = AtomicBoolean(isCurrent(generation))
+            val token = AtomicBoolean(isCurrent(generation))
+            recoveryToken = token
             synchronized(recoveryLock) {
-                if (isCurrent(generation)) recoveryTokens.add(recoveryToken) else recoveryToken.set(false)
+                if (isCurrent(generation)) recoveryTokens.add(token) else token.set(false)
             }
-            recoveryWorker = Thread({
+            val supervisor = Thread({
                 recoverFailedPaths(
                     profile,
                     transport,
                     handle,
                     establishedGroup.credentialBroker,
-                    recoveryToken,
+                    token,
                     generation,
                 )
-            }, "ghulakh-turn-recovery").apply { start() }
+            }, "ghulakh-turn-recovery")
+            recoverySupervisor = supervisor
+            recoveryWorker = supervisor
+            supervisor.start()
             tunReader.join()
             tunWriter.join()
         } catch (error: Throwable) {
@@ -242,6 +248,24 @@ class GhulakhVpnService : VpnService() {
         } finally {
             val ownsLifecycle = isCurrent(generation)
             if (ownsLifecycle) stopTunnel(generation)
+            // The broker owns the VK Calls sessions used to obtain replacement
+            // credentials. Drain its supervisor and every per-path worker before
+            // finishing that broker, otherwise hangup can race an in-flight
+            // allocation handshake. This runs on the session worker, not main.
+            recoveryToken?.set(false)
+            awaitWorkerTermination(recoverySupervisor) {
+                val token = recoveryToken
+                if (token == null) {
+                    emptyList()
+                } else {
+                    synchronized(recoveryLock) {
+                        pathRecoveryThreads
+                            .filterKeys { it.first === token }
+                            .values
+                            .toList()
+                    }
+                }
+            }
             synchronized(credentialGroups) {
                 credentialGroups.forEach { group ->
                     runCatching { group.finish() }
