@@ -159,7 +159,7 @@ async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions()
 
 #[test]
 fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() {
-    use std::sync::{mpsc::channel, Barrier, TryLockError};
+    use std::sync::{mpsc::channel, TryLockError};
 
     let reorder = Arc::new(Mutex::new(UplinkReorderBuffer::default()));
     let now = Instant::now();
@@ -180,11 +180,11 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
     }
 
     let (delivered_tx, delivered_rx) = channel();
-    let start_delivery = Arc::new(Barrier::new(2));
+    let (start_processing_tx, start_processing_rx) = channel();
+    let (processing_started_tx, processing_started_rx) = channel();
 
     let expiry_reorder = Arc::clone(&reorder);
     let expiry_sender = delivered_tx.clone();
-    let expiry_barrier = Arc::clone(&start_delivery);
     let expiry = std::thread::spawn(move || {
         assert!(update_and_deliver_uplink(
             &expiry_reorder,
@@ -194,9 +194,10 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
                     expiry_reorder.try_lock(),
                     Err(TryLockError::WouldBlock),
                 ), "reorder lock must remain held through TUN delivery");
-                // Start the competing packet handler while this expiry batch
-                // is ready but has not yet been delivered.
-                expiry_barrier.wait();
+                // Let the competing packet handler attempt the same lock
+                // while the expired batch is ready but not yet delivered.
+                start_processing_tx.send(()).unwrap();
+                processing_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
                 expiry_sender.send(packet).unwrap();
             },
         ));
@@ -205,9 +206,9 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
     let packet_reorder = Arc::clone(&reorder);
     let packet_sender = delivered_tx;
     let packet = next_packet.clone();
-    let packet_barrier = Arc::clone(&start_delivery);
     let processing = std::thread::spawn(move || {
-        packet_barrier.wait();
+        start_processing_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        processing_started_tx.send(()).unwrap();
         assert!(update_and_deliver_uplink(
             &packet_reorder,
             |buffer| buffer.push(
