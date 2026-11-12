@@ -17,6 +17,8 @@ class NativeTransport {
 
     external fun nativeTurnClientIpv4(session: Long): String
 
+    external fun nativeTurnClientIpv6(session: Long): String
+
     external fun nativeTurnMtu(session: Long): Int
 
     external fun nativeTurnSendPacket(session: Long, packet: ByteArray): Boolean
