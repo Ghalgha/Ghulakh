@@ -227,44 +227,44 @@ class GhulakhVpnService : VpnService() {
                     }
                 for (pathId in failedPaths) {
                     if (!running.get() || !recoveryToken.get()) break
-                val now = SystemClock.elapsedRealtime()
-                val recoveryThread = synchronized(recoveryLock) {
-                    if (!running.get() || !recoveryToken.get() ||
-                        pathRecoveryThreads.containsKey(pathId) ||
-                        now < (nextAttemptAt[pathId] ?: 0L)
-                    ) {
-                        null
-                    } else {
-                        Thread({
-                            recoverPath(
-                                pathId,
-                                profile,
-                                transport,
-                                handle,
-                                vkSessions,
-                                failures,
-                                nextAttemptAt,
-                                rejectedCredentials,
-                                recoveryToken,
-                            )
-                        }, "ghulakh-turn-recovery-$pathId").also {
-                            pathRecoveryThreads[pathId] = it
-                        }
-                    }
-                }
-                if (recoveryThread != null) {
-                    runCatching { recoveryThread.start() }.onFailure { error ->
-                        synchronized(recoveryLock) {
-                            if (pathRecoveryThreads[pathId] === recoveryThread) {
-                                pathRecoveryThreads.remove(pathId)
+                    val now = SystemClock.elapsedRealtime()
+                    val recoveryThread = synchronized(recoveryLock) {
+                        if (!running.get() || !recoveryToken.get() ||
+                            pathRecoveryThreads.containsKey(pathId) ||
+                            now < (nextAttemptAt[pathId] ?: 0L)
+                        ) {
+                            null
+                        } else {
+                            Thread({
+                                recoverPath(
+                                    pathId,
+                                    profile,
+                                    transport,
+                                    handle,
+                                    vkSessions,
+                                    failures,
+                                    nextAttemptAt,
+                                    rejectedCredentials,
+                                    recoveryToken,
+                                )
+                            }, "ghulakh-turn-recovery-$pathId").also {
+                                pathRecoveryThreads[pathId] = it
                             }
                         }
-                        if (running.get() && recoveryToken.get()) {
-                            Log.w(TAG, "Unable to start TURN path $pathId recovery worker", error)
+                    }
+                    if (recoveryThread != null) {
+                        runCatching { recoveryThread.start() }.onFailure { error ->
+                            synchronized(recoveryLock) {
+                                if (pathRecoveryThreads[pathId] === recoveryThread) {
+                                    pathRecoveryThreads.remove(pathId)
+                                }
+                            }
+                            if (running.get() && recoveryToken.get()) {
+                                Log.w(TAG, "Unable to start TURN path $pathId recovery worker", error)
+                            }
                         }
                     }
                 }
-            }
                 try {
                     Thread.sleep(1_000)
                 } catch (_: InterruptedException) {
