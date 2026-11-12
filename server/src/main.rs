@@ -584,7 +584,7 @@ async fn main() -> Result<()> {
             .unwrap_or_else(|_| "false".to_string())
             .eq_ignore_ascii_case("true");
 
-    let turn_gateway_setup = if let Ok(gateway_bind) = env::var("GHULAKH_TURN_GATEWAY_BIND") {
+    let mut turn_gateway_setup = if let Ok(gateway_bind) = env::var("GHULAKH_TURN_GATEWAY_BIND") {
         anyhow::ensure!(
             tun_enabled && forwarding_enabled,
             "TURN gateway requires GHULAKH_TUN_ENABLED=true and GHULAKH_FORWARDING_ENABLED=true"
