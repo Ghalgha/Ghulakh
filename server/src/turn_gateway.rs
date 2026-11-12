@@ -1804,4 +1804,48 @@ mod tests {
         assert_eq!(gateway.stats().rejected_packet, 1);
         gateway_task.abort();
     }
+
+    fn scheduler_udp_flow(source_port: u16, total_len: usize) -> Vec<u8> {
+        let mut bytes = vec![0u8; total_len];
+        bytes[0] = 0x45;
+        bytes[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        bytes[9] = 17;
+        bytes[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        bytes[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
+        bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+        bytes
+    }
+
+    #[test]
+    fn downlink_scheduler_distributes_distinct_flows_between_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x11; 8], [0x22; 8]];
+        let now = Instant::now();
+        let first = scheduler.select(&active, &scheduler_udp_flow(10001, 1200), now);
+        let second = scheduler.select(&active, &scheduler_udp_flow(10002, 1200), now);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn downlink_scheduler_keeps_game_udp_affinity_but_rebalances_bulk_udp() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active = [[0x31; 8], [0x32; 8]];
+        let start = Instant::now();
+        let game_flow = scheduler_udp_flow(12000, 120);
+        let game_path = scheduler.select(&active, &game_flow, start);
+        for index in 1..250 {
+            let now = start + Duration::from_micros(index * 100);
+            assert_eq!(scheduler.select(&active, &game_flow, now), game_path);
+        }
+
+        let bulk_flow = scheduler_udp_flow(12001, 64);
+        let mut selected = std::collections::HashSet::new();
+        for index in 0..1500 {
+            let now = start + Duration::from_micros(index * 100);
+            selected.insert(scheduler.select(&active, &bulk_flow, now));
+        }
+        assert_eq!(selected.len(), 2, "high-rate short-packet UDP must leave sticky pinning and use both paths");
+    }
+
 }
