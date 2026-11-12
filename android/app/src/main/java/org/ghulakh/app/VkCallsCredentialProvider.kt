@@ -36,6 +36,7 @@ data class VkCallsSession(
 data class VkCallsCredentialGroup(
     val turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
+    val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
 ) {
     fun finish() = ownerSession.finish()
 }
@@ -160,6 +161,26 @@ object VkCallsCredentialProvider {
     }
 
 
+    internal class CredentialBroker(
+        private val accessToken: String,
+        private val conversationId: String,
+        initialCredentialsJson: String,
+        private val credentialFetcher: (() -> String)? = null,
+    ) {
+        private val issuedFingerprints = mutableSetOf(
+            TurnQuotaRetryPolicy.fingerprint(initialCredentialsJson),
+        )
+
+        fun obtainCredentials(): String {
+            val credentialsJson = credentialFetcher?.invoke()
+                ?: obtainConversationCredentials(accessToken, conversationId)
+            val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
+            val unique = synchronized(issuedFingerprints) { issuedFingerprints.add(fingerprint) }
+            require(unique) { "VK Calls returned a repeated TURN credential set" }
+            return credentialsJson
+        }
+    }
+
     /**
      * Creates one Calls conversation and obtains a distinct TURN credential set
      * for each independent allocation through separate anonymous account sessions.
@@ -168,21 +189,13 @@ object VkCallsCredentialProvider {
         require(pathCount in 2..10) { "TURN path count must be between 2 and 10" }
         val owner = obtain(accessToken)
         try {
+            val broker = CredentialBroker(accessToken, owner.conversationId, owner.turnCredentialsJson)
             val credentials = ArrayList<String>(pathCount)
-            val fingerprints = HashSet<String>()
             credentials += owner.turnCredentialsJson
-            fingerprints += TurnQuotaRetryPolicy.fingerprint(owner.turnCredentialsJson)
-            repeat(pathCount - 1) {
-                val next = obtainConversationCredentials(accessToken, owner.conversationId)
-                val fingerprint = TurnQuotaRetryPolicy.fingerprint(next)
-                require(fingerprints.add(fingerprint)) {
-                    "VK Calls returned a repeated TURN credential set"
-                }
-                credentials += next
-            }
+            repeat(pathCount - 1) { credentials += broker.obtainCredentials() }
             val array = JSONArray()
             credentials.forEach { array.put(JSONObject(it)) }
-            return VkCallsCredentialGroup(array.toString(), owner)
+            return VkCallsCredentialGroup(array.toString(), owner, broker)
         } catch (error: Throwable) {
             runCatching { owner.finish() }
             throw error
