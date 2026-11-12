@@ -1009,8 +1009,8 @@ mod tests {
         use ghulakh_protocol::stun::{
             append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
             decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_TRANSPORT,
-            ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
+            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
+            ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
             METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
         };
         use ghulakh_protocol::turn_channel_data::{decode_channel_data, encode_channel_data};
@@ -1062,6 +1062,7 @@ mod tests {
                             match request.method {
                                 METHOD_ALLOCATE => {
                                     assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                    assert_eq!(request.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
                                     attributes.push(StunAttribute {
                                         kind: ATTR_XOR_RELAYED_ADDRESS,
                                         value: encode_xor_address(peer_addr, &request.transaction_id),
@@ -1478,6 +1479,7 @@ mod tests {
                                 match request.method {
                                     METHOD_ALLOCATE => {
                                         assert_eq!(request.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
+                                    assert_eq!(request.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
                                         attributes.push(StunAttribute {
                                             kind: ATTR_XOR_RELAYED_ADDRESS,
                                             value: encode_xor_address(peer_addr, &request.transaction_id),
