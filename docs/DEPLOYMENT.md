@@ -32,11 +32,10 @@ Required environment:
 
 The TURN gateway listens for raw UDP payloads from VK TURN relays. Open the configured UDP port in the host firewall. The gateway validates relay source tuples and authenticated frames, but the actual VK relay address ranges have not yet been live-verified; do not invent an allowlist.
 
-The server checks that Linux IPv4 forwarding, global IPv6 forwarding, and default IPv6 forwarding for newly created interfaces are enabled. Configure them persistently through the host's sysctl configuration:
+The server checks that Linux IPv4 forwarding, global IPv6 forwarding are enabled. Configure them persistently through the host's sysctl configuration:
 
     net.ipv4.ip_forward=1
     net.ipv6.conf.all.forwarding=1
-    net.ipv6.conf.default.forwarding=1
 
 The dual-stack TUN interface uses 10.77.0.1/16 and fd77:77::1/64 with MTU 1100. Authenticated sessions receive one IPv4 and one IPv6 address; the gateway validates both source addresses and routes downlink packets by their full IP address.
 
