@@ -10,7 +10,7 @@ Ghulakh (ГӀулакх) — исследовательская система �
 
 ## Текущее состояние
 
-Реализованы основные программные компоненты TURN-транспорта: управление allocation/permission/channel binding, защищённый Noise XX handshake, server gateway, клиентский dataplane и Android JNI/VpnService-интеграция. Android получает временные TURN credentials через VK Calls API при подключении. QUIC runtime сервера выключен по умолчанию и не используется как fallback.
+Реализованы основные программные компоненты TURN-транспорта: управление allocation/permission/channel binding, защищённый Noise XX handshake, server gateway, клиентский dataplane и Android JNI/VpnService-интеграция. Android получает временные TURN credentials через VK Calls API при подключении. Серверный runtime ориентирован на TURN; остаточные QUIC-зависимости и диагностический код не являются пользовательским транспортом.
 
 Проект всё ещё находится в исследовательской стадии и **не готов для повседневного или production-использования**: совместимость VK Calls API и TURN auth profile не подтверждена на реальном relay, сквозные Android/VPS испытания и финальные end-to-end tests ещё не завершены. См. [текущий статус](docs/STATUS.md).
 
