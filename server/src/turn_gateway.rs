@@ -2628,3 +2628,7 @@ mod tests {
     }
 
 }
+
+#[cfg(test)]
+#[path = "turn_gateway_path_tests.rs"]
+mod path_tests;
