@@ -651,12 +651,6 @@ async fn main() -> Result<()> {
             ipv6_forward.trim() == "1",
             "Linux IPv6 forwarding is disabled; set net.ipv6.conf.all.forwarding=1"
         );
-        let ipv6_default_forward = fs::read_to_string("/proc/sys/net/ipv6/conf/default/forwarding")
-            .context("read default Linux IPv6 forwarding state")?;
-        anyhow::ensure!(
-            ipv6_default_forward.trim() == "1",
-            "default Linux IPv6 forwarding is disabled; set net.ipv6.conf.default.forwarding=1 before creating the TUN interface"
-        );
     }
 
     let mut turn_ingress_task = None;
