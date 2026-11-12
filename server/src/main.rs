@@ -74,7 +74,11 @@ fn start_tun(
     name: &str,
     sessions: SessionMap,
     turn_gateway: Option<Arc<turn_gateway::TurnGateway>>,
-) -> Result<mpsc::Sender<Vec<u8>>> {
+) -> Result<(
+    mpsc::Sender<Vec<u8>>,
+    tokio::task::JoinHandle<Result<()>>,
+    tokio::task::JoinHandle<Result<()>>,
+)> {
     let device = Arc::new(
         DeviceBuilder::new()
             .name(name)
@@ -86,26 +90,18 @@ fn start_tun(
     let (packet_sender, mut packet_receiver) = mpsc::channel::<Vec<u8>>(TUN_QUEUE_CAPACITY);
 
     let writer = Arc::clone(&device);
-    let _tun_writer_task = tokio::spawn(async move {
+    let tun_writer_task = tokio::spawn(async move {
         while let Some(packet) = packet_receiver.recv().await {
-            if let Err(error) = writer.send(&packet).await {
-                eprintln!("TUN write failed: {error}");
-                break;
-            }
+            writer.send(&packet).await.context("write packet to TUN")?;
         }
+        bail!("TUN packet channel closed unexpectedly")
     });
 
     let reader = Arc::clone(&device);
-    let _tun_reader_task = tokio::spawn(async move {
+    let tun_reader_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let length = match reader.recv(&mut buffer).await {
-                Ok(length) => length,
-                Err(error) => {
-                    eprintln!("TUN read failed: {error}");
-                    break;
-                }
-            };
+            let length = reader.recv(&mut buffer).await.context("read packet from TUN")?;
             let Some((_, destination)) = ipv4_endpoints(&buffer[..length]) else {
                 continue;
             };
@@ -135,7 +131,7 @@ fn start_tun(
         }
     });
 
-    Ok(packet_sender)
+    Ok((packet_sender, tun_writer_task, tun_reader_task))
 }
 
 #[allow(dead_code)]
@@ -636,10 +632,11 @@ async fn main() -> Result<()> {
     }
 
     let mut turn_ingress_task = None;
-    let _tun_sender = if tun_enabled {
+    let (tun_sender, tun_writer_task, tun_reader_task) = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
-        let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
+        let (sender, writer_task, reader_task) =
+            start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
         if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
             let mut ingress = ingress.take().expect("TURN ingress receiver is available during startup");
             let tun_ingress_sender = sender.clone();
@@ -657,10 +654,9 @@ async fn main() -> Result<()> {
             "TUN interface {} is active at {}/16 with MTU {}",
             name, TUN_SERVER_IPV4, TUN_MTU
         );
-        Some(sender)
+        (sender, writer_task, reader_task)
     } else {
-        eprintln!("TUN forwarding is disabled; authenticated packets are validated and dropped");
-        None
+        bail!("TUN is required when the TURN gateway is enabled");
     };
 
     let (_, _, turn_gateway_task) = turn_gateway_setup
@@ -678,7 +674,18 @@ async fn main() -> Result<()> {
                 .context("TURN ingress task panicked")?
                 .context("TURN ingress task failed")?;
         }
+        result = tun_writer_task => {
+            result
+                .context("TUN writer task panicked")?
+                .context("TUN writer task failed")??;
+        }
+        result = tun_reader_task => {
+            result
+                .context("TUN reader task panicked")?
+                .context("TUN reader task failed")??;
+        }
     }
+    drop(tun_sender);
     Ok(())
 }
 
