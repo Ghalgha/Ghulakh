@@ -13,5 +13,9 @@ internal class TunnelLifecycleGeneration {
 
     fun invalidate(): Long = current.incrementAndGet()
 
+    /** Invalidate only the run that still owns the lifecycle. */
+    fun invalidate(generation: Long): Boolean =
+        generation != Long.MAX_VALUE && current.compareAndSet(generation, generation + 1)
+
     fun isCurrent(generation: Long): Boolean = current.get() == generation
 }
