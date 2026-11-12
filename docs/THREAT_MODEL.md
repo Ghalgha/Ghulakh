@@ -2,68 +2,70 @@
 
 ## Защищаемые активы
 
-- индивидуальные credentials устройств;
-- доверенный сертификат сервера и конфигурации подключения;
+- VK access token и временные TURN credentials;
+- device credential и закреплённый Noise server public key;
 - конфиденциальность и целостность пользовательских IP-пакетов;
-- целостность управляющих команд;
-- доступность сервера, TUN-очередей и клиентских сессий.
+- целостность tunnel configuration и path membership;
+- доступность Android TUN, TURN allocations, server TUN и bounded queues.
 
 ## Противники
 
-- пассивный наблюдатель сети;
-- активный посредник, способный задерживать, повторять, изменять и блокировать пакеты;
+- пассивный наблюдатель и активный сетевой посредник;
+- relay peer, который может задерживать, терять, повторять или переупорядочивать UDP payloads;
+- удалённый отправитель некорректных handshake/data datagrams;
 - злоумышленник с credential одного устройства;
-- удалённый атакующий, отправляющий некорректные или чрезмерные запросы;
 - локальный процесс с ограниченными правами;
-- скомпрометированный сервер или Android-узел.
+- скомпрометированная ОС или сервер.
 
 ## Границы доверия
 
-- Android-приложение ↔ ОС и Android Keystore;
-- клиент ↔ сервер через QUIC/TLS 1.3;
-- серверный обработчик пакетов ↔ системный TUN и kernel forwarding;
-- администратор ↔ файлы credentials, TLS-ключи и firewall;
-- защищённый QUIC UDP-сокет ↔ Android VPN routing.
+- Android-приложение ↔ Android OS/VpnService/Keystore;
+- Android ↔ VK Calls credential API;
+- Android TURN client ↔ внешний TURN relay;
+- TURN relay ↔ собственный UDP gateway;
+- Noise-authenticated session ↔ server TUN/kernel forwarding;
+- администратор ↔ device credential hashes, Noise private key и firewall.
+
+TURN relay считается недоверенным посредником доставки. Он может наблюдать метаданные соединения и блокировать/изменять/повторять датаграммы, но не должен иметь возможности читать или незаметно изменять пользовательские IP-пакеты.
 
 ## Реализованные меры
 
-- QUIC/TLS 1.3 с проверкой доверенного DER-сертификата и имени сервера;
-- индивидуальные случайные credentials; сервер хранит только SHA-256 digest;
-- constant-time сравнение digest;
-- AES-GCM шифрование credential и trust anchor с ключом Android Keystore;
-- Android вызывает `VpnService.protect` для QUIC UDP-сокета до установки VPN-маршрутов, чтобы не допустить транспортную петлю;
-- ограничения размеров управляющих сообщений, request ID, credentials и IP-датаграмм;
-- лимиты числа QUIC-соединений и потоков, тайм-ауты и ограниченные TUN-очереди;
-- проверка назначенного клиенту IPv4 source address до передачи пакета в TUN;
-- egress ACL блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, диапазоны IETF protocol assignments, документации и benchmarking;
-- TUN выключен по умолчанию; Android отказывается устанавливать маршруты, если сервер не сообщил о готовности TUN и явном подтверждении администратора для IP forwarding/NAT/firewall;
-- IPv6 направляется в VPN на Android, но сервер его не пересылает: это fail-closed поведение, а не поддержка IPv6.
+- Noise XX handshake с pinning server static public key;
+- device credential передаётся только внутри зашифрованного Noise сообщения и проверяется сервером до установления сессии;
+- HKDF-SHA256 выводит независимые directional AEAD keys;
+- защищённые кадры аутентифицируют session ID, направление и sequence number; replay window ограничивает повторы;
+- handshake envelopes имеют version/phase/ID/length, bounded retries и exact-byte response cache;
+- сервер связывает сессию с фактическим relay source tuple и назначенным virtual IPv4;
+- gateway проверяет source tuple, AEAD/replay и inner IPv4 source до TUN ingress;
+- path group проверяет общий group ID/path count/virtual IPv4, уникальность path ID и generation-bound replacement;
+- handshake admission, peer rate table, replay cache, transaction concurrency и очереди ограничены;
+- TURN credentials хранятся в zeroizing контейнерах и redacted Debug; Android секреты хранятся с использованием Android Keystore;
+- Android вызывает `VpnService.protect(fd)` для каждого TURN UDP socket до использования его внутри VPN;
+- IPv6 маршрут захватывается Android, но IPv6 packets не передаются в серверный IPv4 dataplane (fail-closed);
+- серверная egress ACL блокирует частные, loopback, link-local, multicast, reserved/documentation и другие непубличные диапазоны.
 
 ## Остаточные риски и ограничения
 
-- IP forwarding, NAT и firewall не настраиваются приложением; `GHULAKH_FORWARDING_ENABLED` — только административное подтверждение, а не автоматическая проверка правил. Ошибочная системная конфигурация может привести к потере пакетов или нежелательной маршрутизации;
-- TUN требует привилегии `CAP_NET_ADMIN` и доступа к `/dev/net/tun`; сервер следует запускать с минимально необходимыми правами;
-- egress ACL намеренно запрещает доступ к частным сетям; настраиваемого allowlist пока нет;
-- адреса клиентских сессий не переиспользуются до перезапуска процесса, но состояние сессий не сохраняется после перезапуска;
-- нет автоматического восстановления QUIC-сессии при смене сети и динамической адаптации MTU;
-- нет API ротации/отзыва credentials и горячего обновления реестра;
-- нет отдельного rate limiting по IP/credential, только ограничения соединений, потоков и размеров;
-- Android Keystore не гарантирует аппаратное хранение ключа на каждом устройстве;
-- активный локальный злоумышленник или компрометация ОС могут получить доступ к секрету в памяти приложения;
-- IPv6, доступ к LAN и DNS через собственную серверную службу не реализованы.
+- VK Calls credential flow и текущий TURN long-term auth profile не подтверждены на реальном relay; возможны изменения API, challenge attributes, quotas и credential lifetime.
+- TURN relay видит сетевые метаданные и может блокировать трафик; туннель не обещает анонимность или устойчивость к любому DPI.
+- Noise library и собственная композиция handshake/session framing не прошли независимый формальный аудит.
+- Компрометация Android OS, сервера или device credential может раскрыть пользовательский трафик/доступ.
+- TURN quota и ограничения allocation контролируются внешним сервисом и не гарантируются клиентом.
+- IPv6, LAN access, DNS service, credential OAuth UI/rotation и production-grade firewall orchestration не реализованы.
+- Ошибочная конфигурация IP forwarding/NAT/firewall может нарушить маршрутизацию; флаг администратора не является автоматической проверкой firewall.
+- MTU 1100 и поведение path health/recovery требуют дальнейшей симуляции и в конце проекта — физических испытаний.
 
 ## Не входит в обещания
 
-Нельзя обещать анонимность, обход конкретных фильтров, устойчивость к целевому DPI или прохождение через любую сеть. QUIC/TLS защищает транспорт, но не делает конечные устройства и сервер доверенными автоматически.
+Нельзя обещать анонимность, доступность через любую сеть, прохождение любых фильтров или неограниченное число TURN allocations. Наличие нескольких независимых paths повышает потенциальную совокупную пропускную способность разных flows, но не гарантирует линейного ускорения и не увеличивает пропускную способность одного flow при текущем flow-affinity scheduler.
 
 ## Проверки перед выпуском
 
-- негативные тесты аутентификации, отзыва и повторной отправки команд;
-- fuzzing парсеров управляющего протокола и IP-пакетов;
-- replay и downgrade tests;
-- тесты потери сети, смены адреса и переподключения;
-- нагрузочные тесты ограниченных очередей и лимитов сессий;
-- анализ зависимостей и SBOM;
-- проверка утечек секретов в логах, crash reports и Android backup;
-- тесты Android permission lifecycle, защищённого UDP-сокета и корректного завершения VPN;
-- проверка firewall/NAT в изолированной VM до любых эксплуатационных испытаний.
+- негативные тесты Noise identity pinning, credential verification, replay и handshake cache;
+- fuzz/property tests STUN/TURN/handshake/IP parsers;
+- детерминированные тесты packet loss, reordering, stale nonce, Allocate/Refresh failures и partial path recovery;
+- нагрузочные тесты bounded queues, session admission и path replacement;
+- анализ зависимостей/SBOM и проверка секретов в логах/crash reports/backup;
+- Android permission/revoke/service shutdown и защищённый socket lifecycle;
+- проверка server TUN, routing, NAT и firewall в изолированной VM;
+- реальные Android/VPS испытания только после завершения программной вертикали.

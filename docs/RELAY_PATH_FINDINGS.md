@@ -1,91 +1,45 @@
 # Исследование двустороннего TURN data path
 
-Статус: статический анализ исходного кода; сетевое поведение не подтверждено физическими испытаниями.
+Статус: архитектура реализована и проверяется mock integration tests; совместимость с текущей внешней relay инфраструктурой ещё не подтверждена физическими испытаниями.
 
-## Подтверждённая модель передачи
+## Модель передачи
 
-TURN-реле — внешний посредник, а не серверная часть приложения. Клиент устанавливает TURN allocation на relay endpoint, а затем адресует пользовательские транспортные кадры выделенному peer endpoint — UDP-порту собственного gateway. Gateway не обязан сам реализовывать TURN server: в исследованных вариантах он принимает UDP-пакеты, которые relay отправляет с allocation, и отвечает на сетевой адрес relay-пакета. TURN relay по состоянию allocation пересылает ответ клиенту.
+TURN relay — внешний посредник, не сервер приложения. Клиент создаёт allocation на TURN endpoint, разрешает peer IP собственного gateway и устанавливает ChannelBind для выбранного канала. Данные идут через TURN allocation к UDP gateway. TURN server снимает ChannelData framing и пересылает peer payload gateway. Gateway отвечает на фактический relay source tuple; TURN relay доставляет UDP response клиенту в рамках allocation.
 
-Сквозной путь:
+## Сквозной путь
 
-1. Клиент получает TURN endpoint и временные credentials.
-2. Клиент открывает allocation на TURN relay.
-3. Клиент создаёт permission для gateway peer IP; при использовании ChannelData выполняет ChannelBind.
-4. Клиент отправляет data frames на gateway peer через relay allocation.
-5. Gateway принимает датаграмму от relay и обрабатывает защищённый payload.
-6. Gateway отправляет ответную датаграмму обратно на адрес relay, с которого пришёл пакет.
-7. Relay доставляет ответ клиенту в рамках allocation; клиент декодирует frame и передаёт IP-пакет в TUN.
+1. Android получает временные TURN credentials и endpoint через credential provider.
+2. Для каждого path Android создаёт отдельный UDP socket и защищает его через `VpnService.protect(fd)`.
+3. Клиент выполняет Allocate, CreatePermission и ChannelBind.
+4. Для каждого allocation выполняется независимый Noise XX handshake с pinned server key и device credential внутри зашифрованного сообщения.
+5. Server gateway регистрирует session ID, relay tuple, virtual IPv4, path metadata и directional AEAD codecs.
+6. Клиент передаёт encrypted IPv4 datagrams через ChannelData; gateway проверяет relay tuple, AEAD, replay и inner source IP до передачи в TUN.
+7. Server TUN reader выбирает активный path group по destination IPv4 и отправляет downlink на один из недавно аутентифицированных relay tuples группы.
+8. TURN relay доставляет ответ allocation, а клиент проверяет AEAD/replay и передаёт IPv4 packet в Android TUN.
 
-Шаги 3 и 6 зависят от выбранного режима TURN и должны быть строго согласованы. Нельзя отправлять ответ на произвольный клиентский адрес, извлечённый из незашифрованного payload. Для серверного обратного пути источником адреса назначения служит фактический UDP peer tuple relay-пакета, а принадлежность сессии устанавливается после криптографической проверки.
+## Multipath
 
-## Наблюдения по серверной реализации
+Одна tunnel group состоит из 2–10 независимых TURN allocations. Каждый path имеет собственные socket, allocation, permission/channel state, Noise session, session ID, directional keys и bounded queues. Paths имеют общий group ID, path count, virtual IPv4 и MTU.
 
-В исследованном raw-IP серверном пути:
-- сервер поднимает обычный UDP listener, обёрнутый в защищённый packet listener; он не поднимает собственный TURN server;
-- каждая активная relay-сессия представлена соединением, привязанным к удалённому UDP peer;
-- клиент регистрируется с назначенным виртуальным IP и device identity;
-- uplink IP-пакеты пишутся в общий серверный TUN;
-- один TUN reader читает downlink, извлекает destination IP и выбирает одну из активных relay-сессий данного клиента;
-- у одного устройства допускается несколько параллельных relay workers;
-- downlink использует ограниченные очереди и chunk scheduling, чтобы не перемешивать пакеты одного потока слишком агрессивно;
-- idle timeout и явное сообщение об отключении освобождают зависшие серверные сессии.
+Uplink использует flow affinity: одинаковый IP flow стабильно выбирает один path, разные flows распределяются по разным paths. При отказе path новый allocation и Noise handshake устанавливаются отдельно; успешный replacement атомарно занимает прежний path slot. Downlink выбирает только paths с недавно подтверждённой authenticated activity. Пакеты не striping-ятся внутри одного flow, поскольку общий group sequence и reorder buffer пока не реализованы.
 
-Это важное архитектурное отличие от текущего QUIC-прототипа Ghulakh: серверный gateway должен иметь UDP ingress для relay datagrams и session registry, а не принимать только QUIC connections.
+## Обратный путь и session binding
 
-## Наблюдения по TURN-клиенту
+Gateway не извлекает адрес клиента из незашифрованного IP payload. Для uplink проверяются session ID, зарегистрированный relay source tuple, AEAD/replay и назначенный inner source IPv4. Для downlink destination IPv4 выбирает клиентскую tunnel group; затем выбирается подходящий активный path и датаграмма отправляется на его relay tuple.
 
-В исследованном Rust-клиенте присутствуют отдельные модули:
-- разбор TURN endpoint URI и выбор UDP/TCP/TLS control transport;
-- STUN/TURN control plane с Allocate, Refresh, CreatePermission и ChannelBind;
-- получение relay address из результата Allocate;
-- поддержка UDP datagrams и framed stream режима;
-- ChannelData framing;
-- ограниченные очереди, backpressure, cleanup и восстановление allocation;
-- выделенный driver, который обрабатывает ответы control plane и входящие relay data.
+TURN relay source tuple подтверждает маршрут через allocation, но сам по себе не аутентифицирует устройство. Идентичность устанавливается Noise handshake, а data plane защищается directional AEAD.
 
-Отдельно присутствуют несколько allocation workers и диспетчеризация потоков. Планировщик учитывает размер пакетов, доступность allocation и привязку flow, чтобы уменьшать переупорядочивание TCP. Это оптимизация после корректной реализации одного рабочего канала, а не обязательная часть минимального прототипа.
+## Ограничения и неподтверждённые предположения
 
-## Что пока не доказано
+- VK Calls API выдача credentials и текущий TURN auth profile не проверены на реальном аккаунте/relay.
+- Не подтверждены актуальные quotas, allocation lifetime, endpoint rotation и vendor-specific attributes.
+- Mock TURN relay моделирует отдельные client-facing и peer-facing sockets; это подтверждает внутреннюю логику адресации, но не реальную политику VK relay.
+- Один UDP gateway listener обслуживает множество независимых relay paths; gateway receive loop пока обрабатывает datagrams последовательно. Параллелизация требует benchmark и отдельной проверки сохранности session/replay state.
+- Транспорт передаёт IPv4; IPv6 пока блокируется на клиенте и не маршрутизируется сервером.
+- Flow affinity распределяет разные flows, но не агрегирует пропускную способность нескольких paths внутри одного flow.
 
-Статический код не доказывает, что текущая инфраструктура VK Calls:
-- продолжает выдавать credentials тем же способом;
-- принимает все URI schemes и транспортные режимы;
-- сохраняет прежние lifetime, quotas и лимиты allocation;
-- принимает конкретные private STUN attributes;
-- одинаково маршрутизирует UDP и TCP/TLS варианты;
-- допускает выбранный размер и частоту пользовательских датаграмм.
+## Проверки
 
-Также не подтверждена совместимость всех клиентских веток с одним серверным wire format. Некоторые репозитории содержат клиентскую реализацию, а не самостоятельную серверную реализацию; серверный gateway требуется проектировать по фактическому протоколу соответствующего клиента, не приписывая каждому источнику собственный сервер.
+Mock tests проверяют TURN control flow, ChannelData forwarding, Noise handshake, registration-before-uplink, source tuple binding, protected uplink/downlink, replay rejection, multipath flow distribution, simultaneous relay loss, fresh allocation/handshake replacement и сохранение virtual IPv4. Эти проверки не являются доказательством live compatibility.
 
-## Требования к реализации Ghulakh
-
-### Relay ingress
-
-- Использовать UDP ingress для relay datagrams в минимальной целевой конфигурации.
-- Не доверять UDP source tuple как единственному доказательству личности: relay endpoint подтверждает путь, но не идентичность пользователя.
-- Проверять frame authentication, session id, direction, sequence number и replay window до изменения session state или передачи IP-пакета в TUN.
-- Связывать проверенную сессию с назначенным виртуальным IP и зарегистрированным relay peer tuple.
-- Ограничивать частоту неизвестных сессий, размер датаграмм и объём состояния.
-
-### Reverse path
-
-- Хранить relay peer tuple отдельно для каждого allocation worker.
-- Downlink выбирать worker из набора активных allocation конкретного устройства.
-- Отправлять ответ именно на сохранённый relay peer tuple через тот же gateway UDP socket либо через явно управляемый socket, сохраняя корректную source address semantics.
-- Не считать, что любой TURN режим имеет одинаковую обратную адресацию; тестировать UDP и stream modes отдельно.
-- Удалять worker атомарно при timeout, allocation failure и явном закрытии.
-
-### Первый вертикальный срез
-
-Первый end-to-end slice должен использовать один allocation на устройство, один gateway UDP listener, один назначенный virtual IPv4 и один TUN. Многопоточность и балансировка добавляются только после прохождения тестов одного канала.
-
-Минимальные локальные проверки:
-1. STUN/TURN Allocate и обработка challenge/authentication на mock TURN peer.
-2. CreatePermission и ChannelBind state transitions.
-3. Client → relay → mock gateway.
-4. Mock gateway → relay → client.
-5. Проверка source tuple и session binding.
-6. Неверный AEAD tag, replay, чужой session id и превышение лимитов.
-7. Потеря allocation, Refresh timeout и корректное освобождение состояния.
-
-Физические испытания остаются отложенными до завершения этих этапов.
+Следующие программные проверки: partial control-plane failures, stale nonce/refresh recovery, deterministic queue saturation, concurrent session churn, gateway load and bounded resource behavior. Физические Android/VPS испытания — только ближе к завершению проекта.

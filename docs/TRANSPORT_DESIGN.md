@@ -1,100 +1,60 @@
 # Проектирование основного транспорта
 
-Статус: исследование и проектирование; реализация ещё не начата.
+Статус: программная реализация основного TURN-транспорта и Android/server vertical slice собраны; реальная совместимость с инфраструктурой VK Calls ещё не подтверждена.
 
-## Назначение
+## Назначение и границы
 
-Единственный транспорт первой версии — передача зашифрованных пакетов IP через TURN-реле инфраструктуры звонков VK (VK Calls). TURN-реле является промежуточным узлом между клиентом и серверным шлюзом. Android-клиент не должен устанавливать обычное прямое соединение с сервером для переноса пользовательского трафика.
+Единственный транспорт первой версии — защищённый IP-туннель через TURN relay инфраструктуры VK Calls. TURN relay — посредник доставки UDP-датаграмм, а не сервер приложения. Собственный сервер принимает peer-facing UDP payloads от relay и маршрутизирует аутентифицированные IPv4-пакеты в TUN.
 
-Термины «VK Calls», «TURN» и «RTP/DTLS» описывают разные уровни:
-- VK Calls — инфраструктура звонков, выдающая параметры и учётные данные для TURN-доступа;
-- TURN — протокол ретрансляции пакетов через выделенный relay allocation;
-- RTP-подобное обрамление и DTLS/AEAD — варианты защиты и оформления полезной нагрузки, а не отдельные сетевые транспорты.
+QUIC runtime не является транспортом пользовательского VPN-трафика, не используется как fallback и выключен по умолчанию. Другие транспорты сейчас не реализуются.
 
-## Подтверждённые технические наблюдения
+## Реализованный поток
 
-В исследованных исходных реализациях встречаются следующие варианты:
-- TURN Allocate с аутентификацией по выданным сервисом username/password;
-- передача данных через relay allocation на адрес серверного узла;
-- TURN по UDP, а в некоторых реализациях также по TCP/TLS;
-- RTP-подобная упаковка пакетов с AEAD;
-- вариант с DTLS поверх ретранслируемого канала и вариант без DTLS, где защита пакетов обеспечивается отдельным AEAD;
-- поддержание allocation, TURN permissions и channel binding, keepalive и повторное получение TURN credentials;
-- несколько параллельных relay-сессий для увеличения пропускной способности.
+1. Android получает временные TURN credentials через VK Calls credential provider.
+2. Для каждого транспортного пути Android создаёт отдельный UDP socket и вызывает `VpnService.protect(fd)` до запуска сетевого обмена.
+3. Каждый путь независимо выполняет TURN Allocate, CreatePermission, ChannelBind, Noise XX handshake и получает собственные directional AEAD keys.
+4. В зашифрованном Noise exchange сервер аутентифицирует device credential и передаёт tunnel IPv4/MTU в encrypted ServerAck.
+5. Android объединяет 2–10 независимых путей в одну tunnel group с одним TUN и общим виртуальным IPv4.
+6. Uplink IPv4 packets распределяются по путям с flow affinity. Пакеты одного flow остаются на одном пути, разные flows используют разные allocations.
+7. Сервер проверяет relay source tuple, session ID, AEAD, replay window и внутренний source IPv4 до передачи пакета в серверный TUN.
+8. Downlink маршрутизируется по virtual destination IPv4 и отправляется на relay tuple соответствующего активного пути.
 
-Это результаты статического изучения исходников и документации. Они не доказывают доступность конкретного метода получения credentials, неизменность параметров VK Calls или совместимость всех режимов с текущей инфраструктурой VK.
+На клиентской стороне TURN ChannelData framing используется для передачи peer payload. На peer-facing стороне TURN relay снимает ChannelData framing и доставляет gateway исходную UDP-нагрузку.
 
-## Целевая архитектура
+## Компоненты
 
-### Android-клиент
+- `android/`: VpnService, защищённые UDP sockets, получение credentials, TUN I/O и восстановление отказавших путей.
+- `crates/protocol/`: STUN/TURN wire codecs, allocation/path metadata, Noise handshake, encrypted frame format и IP flow hashing.
+- `crates/transport/`: TURN socket actor, control driver/supervisor, dataplane, independent path runtime и multipath group.
+- `server/`: UDP relay ingress, bounded handshake admission, authenticated session registry, TUN gateway и downlink routing.
 
-1. Android VpnService создаёт TUN и получает IP-пакеты приложений.
-2. Packet engine валидирует пакеты, применяет MTU и при необходимости фрагментирует их на транспортные кадры.
-3. VK TURN session manager получает или принимает TURN credentials и endpoint, создаёт allocation и поддерживает его жизненный цикл.
-4. VK TURN data channel отправляет зашифрованные кадры через relay на серверный gateway endpoint и принимает обратные кадры.
-5. Reassembly восстанавливает исходные IP-пакеты и передаёт их в TUN.
+## Multipath и конкуренция
 
-### Серверный шлюз
+Путь означает независимый TURN allocation и отдельный socket/session/Noise context, а не только OS thread. Допустимо 2–10 путей; Android начально запрашивает 5. Это конфигурационное значение, не измеренный оптимум и не гарантия квот VK.
 
-1. Принимает UDP-пакеты, поступающие от TURN relay.
-2. Проверяет формат кадра, криптографическую аутентичность, идентификатор сессии, счётчик/nonce и replay window.
-3. Собирает транспортные фрагменты в IP-пакеты с жёсткими лимитами памяти и размера.
-4. Проверяет source IP клиента и egress ACL.
-5. Передаёт разрешённые пакеты в серверный TUN; обратный трафик упаковывает и отправляет обратно через TURN relay-маршрут.
+Один Tokio multi-thread runtime выполняет параллельную настройку путей. У каждого пути собственный socket actor и bounded queues. Один Android TUN reader и один writer обслуживают общую tunnel group. Flow affinity сохраняет порядок внутри потока; packet round-robin внутри одного flow не используется. Переполнение очереди выбранного пути приводит к drop-newest и счётчику, но не к миграции уже начатого flow на другой путь.
 
-Точная схема обратной адресации и идентификации relay-сессии должна быть зафиксирована отдельным wire-level RFC после анализа полного серверного пути исходных реализаций. Нельзя предполагать, что обычный UDP-ответ на адрес-источник всегда корректен для всех режимов TURN.
+Отказ allocation обнаруживается по отсутствию authenticated keepalive acknowledgement. Восстановление создаёт новый protected socket, получает свежие credentials, выполняет новую allocation и Noise handshake, затем заменяет только соответствующий path slot. Отклонённые по TURN quota credentials учитываются общим bounded fingerprint set на время VPN-сессии, чтобы другой recovery worker не повторял ту же credential.
 
-## Границы модулей
+## TURN control plane
 
-- `TransportProvider`: единый интерфейс жизненного цикла и передачи кадров; в первой версии имеет только реализацию VK TURN.
-- `VkCallCredentialProvider`: получение/обновление TURN credentials и endpoint. Источник credentials изолирован от TURN-клиента.
-- `TurnAllocation`: Allocate, Refresh, CreatePermission, ChannelBind, тайм-ауты, retry и деallocation.
-- `SecureFrameCodec`: аутентифицированное шифрование, nonce/counter, replay protection и версия кадра.
-- `PacketFragmenter` / `PacketReassembler`: ограниченная фрагментация и сборка IP-пакетов.
-- `TunnelGateway`: TUN, маршрутизация сессий, ACL и обратный поток.
-- `SessionSupervisor`: смена сети, восстановление allocation, обновление credentials и backpressure.
+Реализованы Allocate, Refresh, CreatePermission и ChannelBind, transaction matching, bounded retransmissions, allocation lease/refresh, peer/channel expiry и authenticated 401/438 challenge handling. Shutdown и ошибки setup выполняют best-effort Refresh(0) с ограниченным timeout. При невозможности подтвердить deallocation локальные ресурсы всё равно закрываются.
 
-QUIC-код текущего прототипа не является реализацией этого транспорта. До отдельного решения он может оставаться изолированным экспериментальным управляющим/диагностическим компонентом, но не должен переносить пользовательские IP-пакеты в рабочем режиме.
+TURN auth provider изолирован от протокольного слоя. Текущий legacy auth profile основан на MD5 long-term key и HMAC-SHA1; его совместимость с текущим VK relay не подтверждена. PASSWORD-ALGORITHMS и vendor-specific атрибуты не включаются без отдельного доказательства совместимости.
 
-## Требования к протоколу данных
+## Безопасность и ограничения
 
-- Использовать стандартные криптографические библиотеки; не разрабатывать собственный cipher или handshake.
-- Не считать маскировку RTP шифрованием. Конфиденциальность и целостность должны обеспечиваться отдельным проверенным AEAD-профилем.
-- Для каждого направления и каждой сессии — независимые ключи/nonce space.
-- Проверять replay до передачи пакета в TUN.
-- Ограничить размер кадра, число одновременно собираемых пакетов, количество фрагментов, время жизни сборки и очереди.
-- Не допускать неограниченного выделения памяти по данным из сети.
-- MTU рассчитывать из фактического лимита relay path с запасом на TURN, DTLS/AEAD и RTP framing.
-- Не полагаться на надёжность или упорядочивание UDP/TURN datagrams; определить политику потерь, дублирования и восстановления.
-- Управляющие сообщения не должны позволять удалённому peer менять сетевую конфигурацию без аутентификации и авторизации.
+- Noise XX аутентифицирует закреплённый server static key; device credential передаётся только внутри зашифрованного handshake сообщения.
+- Directional frame keys выводятся отдельно через HKDF-SHA256.
+- AEAD frames включают session ID, direction и sequence; replay window обновляется только после успешной аутентификации.
+- TURN credentials, device credential, access token и Noise key — отдельные секреты; секреты не должны попадать в логи.
+- Все очереди, handshake admission, transaction retry и cache ограничены.
+- IPv4 — единственный маршрутизируемый IP family. Android захватывает IPv6 для fail-closed поведения, серверный IPv6 dataplane не реализован.
+- MTU по умолчанию 1100 и должен быть проверен на реальном relay path.
+- Потери UDP возможны; надёжность и упорядочивание на уровне TURN не предполагаются.
 
-## Серверная модель и обратный путь
+## Проверки
 
-TURN-реле не является сервером Ghulakh. Минимальная серверная схема — UDP gateway ingress, принимающий пакеты от relay peer tuple. После проверки криптографической сессии gateway связывает allocation worker с назначенным virtual IP, передаёт uplink в TUN и отправляет downlink обратно на сохранённый relay peer tuple. TURN relay доставляет ответ через allocation клиенту. Подробная модель и результаты статического аудита описаны в [RELAY_PATH_FINDINGS.md](RELAY_PATH_FINDINGS.md).
+CI покрывает Rust tests/Clippy/fuzz targets, Android JVM tests, native transport build и APK build. Mock tests покрывают control plane, Noise handshake, bidirectional dataplane, multipath, relay loss, path replacement и bounded queue behavior. Эти тесты не доказывают реальную совместимость с VK Calls.
 
-Первая реализация должна ограничиться одним allocation на устройство и одним UDP gateway listener. Многоканальность и распределение потоков — последующая оптимизация, не часть первого вертикального среза.
-
-## Что нужно установить до реализации
-
-1. Полный путь получения VK Calls credentials: какие API/механизмы используются, какие из них документированы и какие являются неофициальными.
-2. Формат TURN endpoint и допустимые UDP/TCP/TLS режимы на актуальной инфраструктуре.
-3. Фактический серверный приём и обратную отправку пакетов: relay address, peer tuple, permission и channel semantics.
-4. Какие варианты DTLS/RTP/AEAD реально согласуются между клиентом и сервером, как выводятся ключи и как устроен replay protection.
-5. Ограничения квот, количества allocation, частоты Allocate и lifetime.
-6. Поведение при потере сети, смене IP, истечении credentials и завершении звонка/сессии.
-
-До завершения этого исследования нельзя объявлять выбранный wire format совместимым или запускать физические испытания.
-
-## План проверки
-
-1. Статический аудит клиентского и серверного кода и истории изменений.
-2. Независимая спецификация wire format и модели угроз.
-3. Unit-тесты TURN/STUN codec, AEAD, replay window, fragmenter/reassembler и allocation state machine.
-4. Локальные интеграционные тесты с mock TURN peer и mock gateway.
-5. Property-based и fuzz-тесты парсеров и state machine.
-6. Симуляция потерь, задержек, перестановки и смены endpoint.
-7. Физические Android/VPS испытания — только после завершения предыдущих этапов.
-
-## Происхождение и лицензирование
-
-Исходный код исследуется как технический материал. В Ghulakh не переносится код из источников с ограничительной лицензией без отдельного разрешения и юридической проверки. Реализация должна быть самостоятельной, а используемые зависимости — иметь совместимые лицензии. Названия и ссылки на сторонние исходные проекты в файлы репозитория не добавляются.
+До физических испытаний остаются: deterministic fault tests для частичных отказов, расширение fuzz/property coverage, аудит lifecycle и секретов, нагрузочные/ресурсные тесты в симуляции и security review. Android/VPS испытания проводить только ближе к завершению программной вертикали.
