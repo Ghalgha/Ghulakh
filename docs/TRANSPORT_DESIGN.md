@@ -32,7 +32,7 @@ QUIC runtime не является транспортом пользовател
 
 Путь означает независимый TURN allocation и отдельный socket/session/Noise context, а не только OS thread. Допустимо 2–10 путей; Android начально запрашивает 5. Это конфигурационное значение, не измеренный оптимум и не гарантия квот VK.
 
-Один Tokio multi-thread runtime выполняет параллельную настройку путей. У каждого пути собственный socket actor и bounded queues. Один Android TUN reader и один writer обслуживают общую tunnel group. Flow affinity сохраняет порядок внутри потока; packet round-robin внутри одного flow не используется. Переполнение очереди выбранного пути приводит к drop-newest и счётчику, но не к миграции уже начатого flow на другой путь.
+Один Tokio multi-thread runtime выполняет настройку независимых paths. У каждого пути собственный socket actor и bounded queues. Один Android TUN reader и один writer обслуживают общую tunnel group. Uplink использует flow/flowlet affinity с переключением bulk flows на границе burst; downlink использует адаптивный scheduler и backpressure. Sequence/reorder слой сохраняет порядок при смене path. Переполнение ограниченной очереди имеет явную drop policy и метрики.
 
 Отказ allocation обнаруживается по отсутствию authenticated keepalive acknowledgement. Восстановление создаёт новый protected socket, получает свежие credentials, выполняет новую allocation и Noise handshake, затем заменяет только соответствующий path slot. Отклонённые по TURN quota credentials учитываются общим bounded fingerprint set на время VPN-сессии, чтобы другой recovery worker не повторял ту же credential. При первоначальном подключении один Calls conversation обслуживает группу независимых путей: отдельные anonymous account sessions запрашивают `vchat.getConversationParams` для одного conversation ID, а каждый путь получает свой TURN credential set. Повторяющиеся наборы отвергаются до создания allocations; при 486 вся группа заменяется целиком, не переиспользуя частично отклонённые credentials.
 
@@ -49,7 +49,7 @@ TURN auth provider изолирован от протокольного слоя
 - AEAD frames включают session ID, direction и sequence; replay window обновляется только после успешной аутентификации.
 - TURN credentials, device credential, access token и Noise key — отдельные секреты; секреты не должны попадать в логи.
 - Все очереди, handshake admission, transaction retry и cache ограничены.
-- IPv4 — единственный маршрутизируемый IP family. Android захватывает IPv6 для fail-closed поведения, серверный IPv6 dataplane не реализован.
+- IPv4 и IPv6 поддерживаются на packet path: Android TUN, native TURN transport, server TUN, source validation и destination-based session routing. Публичный IPv6 egress требует внешней маршрутизации или NAT66 и не проверен на реальном VPS.
 - MTU по умолчанию 1100 и должен быть проверен на реальном relay path.
 - Потери UDP возможны; надёжность и упорядочивание на уровне TURN не предполагаются.
 
