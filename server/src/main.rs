@@ -641,7 +641,7 @@ async fn main() -> Result<()> {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
         let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
-        if let Some((_, mut ingress, _)) = turn_gateway_setup {
+        if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
             let tun_ingress_sender = sender.clone();
             let _turn_ingress_task = tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
