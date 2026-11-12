@@ -27,16 +27,16 @@ data class VkCallsSession(
         }
     }
 
+    internal fun finishOnce(action: () -> Unit) {
+        if (finished.compareAndSet(false, true)) action()
+    }
+}
+
 data class VkCallsCredentialGroup(
     val turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
 ) {
     fun finish() = ownerSession.finish()
-}
-
-    internal fun finishOnce(action: () -> Unit) {
-        if (finished.compareAndSet(false, true)) action()
-    }
 }
 
 /**
