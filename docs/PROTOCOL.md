@@ -1,14 +1,14 @@
 # Протокол: начальная спецификация
 
-Статус: draft, не является стабильным wire-стандартом.
+Статус: описание текущего исследовательского wire-протокола; формат не объявляется стабильным публичным стандартом.
 
 ## Текущий статус транспорта
 
 Целевой транспорт первой версии — защищённый IP-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). QUIC-формат ниже сохранён только как описание экспериментального прототипа и не должен использоваться для передачи пользовательских IP-пакетов в целевой конфигурации.
 
-В `ghulakh-protocol::stun` реализован начальный ограниченный STUN framing codec: заголовок, transaction ID, class/method, TLV attributes с padding и XOR-MAPPED/XOR-RELAYED address encoding/decoding для IPv4/IPv6. Кодек реализует MESSAGE-INTEGRITY на HMAC-SHA1 с внешним ключом и FINGERPRINT на CRC-32. Он не выводит long-term ключи, не реализует TURN transaction state machine, TLS/DTLS, allocation lifecycle или сетевой обмен и не является готовым TURN-клиентом.
+`ghulakh-protocol::stun` реализует STUN framing, transaction ID, class/method, TLV attributes с padding, XOR address encoding/decoding для IPv4/IPv6, MESSAGE-INTEGRITY HMAC-SHA1/SHA-256 и FINGERPRINT CRC-32. Отдельные модули реализуют TURN challenge parsing, password-algorithm attributes, transaction manager, ChannelData, allocation lifecycle, peer/channel registry и защищённые datagram envelopes. `crates/transport` связывает эти primitives с UDP socket actor, TURN driver/supervisor, Noise handshake и bidirectional dataplane.
 
-Следующие обязательные компоненты: подтверждение фактического TURN credential/auth profile VK Calls, Allocate/Refresh/CreatePermission/ChannelBind state machine, relay data channel, затем gateway reverse path. Для криптографических операций использовать audited crates, не самописные реализации.
+Оставшаяся проверка относится прежде всего к совместимости VK Calls credential/auth profile и relay behavior на реальной инфраструктуре. Реализация TURN state machine, relay data path и gateway reverse path присутствует и покрыта mock integration tests; эти тесты не доказывают live compatibility.
 
 ## Экспериментальный QUIC прототип (не целевой транспорт)
 
