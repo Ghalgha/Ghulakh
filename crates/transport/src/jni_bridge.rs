@@ -387,10 +387,10 @@ fn receive_turn_packet_impl(handle: jlong) -> Result<Vec<u8>> {
     })
 }
 
-fn turn_client_config_impl(handle: jlong) -> Result<(String, jint)> {
+fn turn_client_config_impl(handle: jlong) -> Result<(String, String, jint)> {
     let session = turn_session(handle)?;
     let config = session.client.config();
-    Ok((config.virtual_ipv4.to_string(), jint::from(config.mtu)))
+    Ok((config.virtual_ipv4.to_string(), config.virtual_ipv6.to_string(), jint::from(config.mtu)))
 }
 
 fn close_turn_impl(handle: jlong) -> Result<()> {
@@ -594,7 +594,7 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv4
     handle: jlong,
 ) -> jstring {
     match turn_client_config_impl(handle) {
-        Ok((address, _)) => match env.new_string(address) {
+        Ok((address, _, _)) => match env.new_string(address) {
             Ok(value) => value.into_raw(),
             Err(error) => {
                 throw_error(&mut env, "java/lang/IllegalStateException", error);
@@ -609,13 +609,34 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv4
 }
 
 #[no_mangle]
+#[no_mangle]
+pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv6(
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
+) -> jstring {
+    match turn_client_config_impl(handle) {
+        Ok((_, address, _)) => match env.new_string(address) {
+            Ok(value) => value.into_raw(),
+            Err(error) => {
+                throw_error(&mut env, "java/lang/IllegalStateException", error);
+                std::ptr::null_mut()
+            }
+        },
+        Err(error) => {
+            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnMtu(
     mut env: JNIEnv,
     _this: JObject,
     handle: jlong,
 ) -> jint {
     match turn_client_config_impl(handle) {
-        Ok((_, mtu)) => mtu,
+        Ok((_, _, mtu)) => mtu,
         Err(error) => {
             throw_error(&mut env, "java/lang/IllegalStateException", error);
             0
