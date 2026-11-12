@@ -40,11 +40,24 @@ const DOWNLINK_MAX_DEFICIT: f64 = -4_500.0;
 const FLOW_TABLE_MAX: usize = 1024;
 const FLOW_IDLE_TTL: Duration = Duration::from_secs(30);
 const FLOW_EVICT_EVERY: u32 = 1024;
+// Keep latency-sensitive UDP flows on one relay path, but let sustained bulk
+// flows use bounded flowlet bursts across independent TURN allocations.
+const FLOW_BURST_BYTES: usize = 16 * 1024;
+const SMALL_UDP_MAX_LEN: usize = 300;
+const SMALL_UDP_STICKY: Duration = Duration::from_secs(1);
+const PIN_WINDOW: Duration = Duration::from_millis(250);
+const PIN_WINDOW_MAX_BYTES: usize = (DOWNLINK_RATE_BYTES_PER_SEC as usize) * 3 / 4 / 4;
+const BULK_HOLD: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy)]
 struct DownlinkFlowState {
     session_id: [u8; 8],
     last_seen: Instant,
+    burst_left: usize,
+    sticky_until: Option<Instant>,
+    window_start: Instant,
+    window_bytes: usize,
+    bulk_until: Option<Instant>,
 }
 
 struct DownlinkScheduler {
@@ -123,24 +136,56 @@ impl DownlinkScheduler {
             }
             return id;
         }
-        // Keep every valid flow on one TURN allocation for its lifetime.
-        // Distinct flows are distributed across allocations; moving packets
-        // from an established flow between independent relay paths can reorder them.
+        let small_udp = packet.get(9) == Some(&17) && packet.len() <= SMALL_UDP_MAX_LEN;
         let selected = if let Some(mut state) = self.flows.get(&key).copied() {
             state.last_seen = now;
-            if !active.contains(&state.session_id) {
-                state.session_id = self.choose(active, now, packet.len());
+            if now.saturating_duration_since(state.window_start) >= PIN_WINDOW {
+                state.window_start = now;
+                state.window_bytes = 0;
             }
-            let id = state.session_id;
-            self.flows.insert(key, state);
-            id
+            state.window_bytes = state.window_bytes.saturating_add(packet.len());
+            if state.window_bytes > PIN_WINDOW_MAX_BYTES {
+                state.bulk_until = Some(now + BULK_HOLD);
+                state.sticky_until = None;
+            }
+            let bulk = state.bulk_until.is_some_and(|until| now < until);
+            if small_udp && !bulk {
+                state.sticky_until = Some(now + SMALL_UDP_STICKY);
+            }
+            let sticky = state.sticky_until.is_some_and(|until| now < until);
+            if active.contains(&state.session_id) && (sticky || state.burst_left >= packet.len()) {
+                state.burst_left = state.burst_left.saturating_sub(packet.len());
+                let id = state.session_id;
+                self.flows.insert(key, state);
+                id
+            } else {
+                // A sustained flow advances as a bounded flowlet. This is the
+                // throughput/ordering trade-off of independent TURN paths:
+                // packets inside a burst share one path; burst boundaries may
+                // still expose cross-path arrival skew.
+                let id = self.choose(active, now, packet.len());
+                state.session_id = id;
+                state.burst_left = FLOW_BURST_BYTES.saturating_sub(packet.len());
+                self.flows.insert(key, state);
+                id
+            }
         } else {
             let id = self.choose(active, now, packet.len());
-            self.flows.insert(key, DownlinkFlowState { session_id: id, last_seen: now });
+            self.flows.insert(key, DownlinkFlowState {
+                session_id: id,
+                last_seen: now,
+                burst_left: FLOW_BURST_BYTES.saturating_sub(packet.len()),
+                sticky_until: small_udp.then_some(now + SMALL_UDP_STICKY),
+                window_start: now,
+                window_bytes: packet.len(),
+                bulk_until: None,
+            });
             id
         };
         self.refill(selected, now);
-        if let Some(tokens) = self.tokens.get_mut(&selected) { *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT); }
+        if let Some(tokens) = self.tokens.get_mut(&selected) {
+            *tokens = (*tokens - packet.len() as f64).max(DOWNLINK_MAX_DEFICIT);
+        }
         selected
     }
 }
@@ -1917,16 +1962,28 @@ mod tests {
             assert_eq!(scheduler.select(&active, CLIENT_IP, &game_flow, now), game_path);
         }
 
-        let bulk_flow = scheduler_udp_flow(12001, 64);
-        let bulk_path = scheduler.select(&active, CLIENT_IP, &bulk_flow, start);
-        for index in 1..1500 {
-            let now = start + Duration::from_micros(index * 100);
-            assert_eq!(scheduler.select(&active, CLIENT_IP, &bulk_flow, now), bulk_path);
-        }
-
         let another_flow = scheduler_udp_flow(12002, 1200);
         let another_path = scheduler.select(&active, CLIENT_IP, &another_flow, start);
-        assert_ne!(another_path, bulk_path);
+        assert_ne!(another_path, game_path);
+    }
+
+    #[test]
+    fn downlink_scheduler_distributes_sustained_bulk_udp_across_paths() {
+        let mut scheduler = DownlinkScheduler::new();
+        let active: Vec<[u8; 8]> = (0..10).map(|index| [index + 1; 8]).collect();
+        let start = Instant::now();
+        let flow = scheduler_udp_flow(12_001, 64);
+        let mut per_path = HashMap::<[u8; 8], usize>::new();
+
+        for index in 0..4_000u64 {
+            let now = start + Duration::from_micros(index * 100);
+            let path = scheduler.select(&active, CLIENT_IP, &flow, now);
+            *per_path.entry(path).or_default() += 1;
+        }
+
+        assert_eq!(per_path.len(), active.len(), "bulk flow should use every active path: {per_path:?}");
+        let busiest = per_path.values().copied().max().unwrap_or_default();
+        assert!(busiest < 800, "bulk flow remains pinned to too few paths: {per_path:?}");
     }
 
 }
