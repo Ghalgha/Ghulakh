@@ -84,29 +84,35 @@ class GhulakhVpnService : VpnService() {
                 // stopped while they are in flight, so serialize the generation check,
                 // native connect and handle publication with native shutdown.
                 try {
+                    if (!isCurrent(generation)) {
+                        runCatching { candidate.finish() }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                        return
+                    }
+                    // Native connect performs network I/O. Do not hold the
+                    // shutdown lock while allocations and Noise handshakes run:
+                    // a stop can invalidate this generation immediately, and
+                    // the returned handle is either published atomically or
+                    // closed as stale below.
+                    val connected = transport.nativeTurnConnect(
+                        this,
+                        profile.host,
+                        profile.port,
+                        candidate.turnCredentialsJson,
+                        decodeHexKey(profile.pinnedServerPublicKeyHex),
+                        profile.credential,
+                        DEFAULT_TURN_PATHS,
+                    )
+                    check(connected != 0L) { "Native TURN connect returned an invalid handle" }
                     val connectedHandle = synchronized(nativeOperationLock) {
                         if (!isCurrent(generation)) {
+                            runCatching { transport.nativeTurnClose(connected) }
+                                .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session", closeError) }
                             null
                         } else {
-                            val connected = transport.nativeTurnConnect(
-                                this,
-                                profile.host,
-                                profile.port,
-                                candidate.turnCredentialsJson,
-                                decodeHexKey(profile.pinnedServerPublicKeyHex),
-                                profile.credential,
-                                DEFAULT_TURN_PATHS,
-                            )
-                            check(connected != 0L) { "Native TURN connect returned an invalid handle" }
-                            if (!isCurrent(generation)) {
-                                runCatching { transport.nativeTurnClose(connected) }
-                                    .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session", closeError) }
-                                null
-                            } else {
-                                nativeTransport = transport
-                                sessionHandle = connected
-                                connected
-                            }
+                            nativeTransport = transport
+                            sessionHandle = connected
+                            connected
                         }
                     }
                     if (connectedHandle == null) {
