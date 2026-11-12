@@ -353,16 +353,15 @@ class GhulakhVpnService : VpnService() {
             }
             if (alreadyRejected) throw IllegalStateException("VK Calls returned credentials already rejected by TURN")
             if (!isCurrent(generation) || !recoveryToken.get()) return
-            val recovered = synchronized(nativeOperationLock) {
-                if (!isCurrent(generation) || !recoveryToken.get()) {
-                    false
-                } else {
-                    transport.nativeTurnRecoverPath(
-                        this, handle, profile.host, profile.port, credentialsJson,
-                        decodeHexKey(profile.pinnedServerPublicKeyHex), profile.credential, pathId,
-                    )
-                }
-            }
+            if (!isCurrent(generation) || !recoveryToken.get()) return
+            // Recovery performs network I/O and may outlive a stop request.
+            // The JNI layer retains an Arc to the native session and the path
+            // group rejects installation after close(), so do not hold the
+            // shutdown lock across the replacement handshake.
+            val recovered = transport.nativeTurnRecoverPath(
+                this, handle, profile.host, profile.port, credentialsJson,
+                decodeHexKey(profile.pinnedServerPublicKeyHex), profile.credential, pathId,
+            )
             if (!isCurrent(generation) || !recoveryToken.get()) return
             check(recovered) { "Native TURN path replacement was rejected" }
             failures.remove(pathId)
