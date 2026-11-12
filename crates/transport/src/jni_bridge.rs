@@ -613,7 +613,6 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv4
 }
 
 #[no_mangle]
-#[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv6(
     mut env: JNIEnv,
     _this: JObject,
