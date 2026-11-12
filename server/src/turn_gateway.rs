@@ -1149,26 +1149,21 @@ mod tests {
     }
 
     #[test]
-    fn datagram_dispatch_keeps_each_session_on_one_fifo_shard() {
-        use ghulakh_protocol::secure_frame::{FrameDirection, FrameSealer};
-
+    fn dispatch_keeps_each_session_on_one_fifo_shard() {
         let session_a = [0x11; 8];
         let session_b = [0x22; 8];
-        let mut sealer_a = FrameSealer::new(
-            [0x31; 32], [0x41; 4], session_a, FrameDirection::ClientToServer,
-        );
-        let frame_a1 = sealer_a.seal(b"first").unwrap();
-        let frame_a2 = sealer_a.seal(b"second").unwrap();
-        let mut sealer_b = FrameSealer::new(
-            [0x32; 32], [0x42; 4], session_b, FrameDirection::ClientToServer,
-        );
-        let frame_b = sealer_b.seal(b"other session").unwrap();
+        let shard_a = session_dispatch_shard(session_a, None);
+        let shard_b = session_dispatch_shard(session_b, None);
 
-        assert_eq!(datagram_dispatch_shard(&frame_a1), datagram_dispatch_shard(&frame_a2));
-        assert!(datagram_dispatch_shard(&frame_a1) < DATAGRAM_DISPATCH_SHARDS);
-        assert!(datagram_dispatch_shard(&frame_b) < DATAGRAM_DISPATCH_SHARDS);
-        assert_eq!(datagram_dispatch_shard(b"GHHS-invalid"), 0);
-        assert_eq!(datagram_dispatch_shard(b"malformed"), 0);
+        assert_eq!(shard_a, session_dispatch_shard(session_a, None));
+        assert!(shard_a < DATAGRAM_DISPATCH_SHARDS);
+        assert!(shard_b < DATAGRAM_DISPATCH_SHARDS);
+
+        let group_id = [0x91; 16];
+        let path_a = session_dispatch_shard(session_a, Some(group_id));
+        let path_b = session_dispatch_shard(session_b, Some(group_id));
+        assert_eq!(path_a, path_b);
+        assert!(path_a < DATAGRAM_DISPATCH_SHARDS);
     }
 
     #[tokio::test]
