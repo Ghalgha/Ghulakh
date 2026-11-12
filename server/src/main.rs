@@ -623,7 +623,7 @@ async fn main() -> Result<()> {
         );
     }
 
-    let tun_sender = if tun_enabled {
+    let _tun_sender = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
         let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
         let sender = start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
