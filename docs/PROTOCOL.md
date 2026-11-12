@@ -157,7 +157,7 @@ The UDP ChannelData codec validates the current RFC 8656 channel range `0x4000â€
 
 The protocol crate includes an AEAD frame codec using ChaCha20-Poly1305. A frame authenticates its magic/version marker, session identifier, direction, sequence number, and payload length as associated data. Nonces are formed from a caller-supplied 32-bit per-direction prefix and a 64-bit monotonic sequence. The receiver enforces a 128-packet replay window and commits sequence state only after successful authentication.
 
-The codec requires independent directional keys and nonce prefixes from a future authenticated session key agreement. It does not derive keys from TURN credentials, does not implement the key agreement, and is not yet connected to the Android TUN, TURN socket, or server gateway.
+The codec requires independent directional keys and nonce prefixes supplied by the authenticated Noise XX session handshake. It does not derive keys from TURN credentials. The codec is integrated with the TURN dataplane, Android TUN and server gateway; automated mock integration tests cover the composed packet path.
 
 
 ### TURN peer permission and channel state
@@ -167,12 +167,12 @@ The allocation-scoped peer registry tracks permissions by peer IP and channel bi
 
 ### TURN UDP socket adapter
 
-The transport crate now provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages to one configured TURN endpoint, preserves the source address of received datagrams, and can adopt a pre-bound standard UDP socket. Android integration is expected to create and protect that socket with `VpnService.protect(fd)` before handing it to the adapter. The adapter does not yet perform TURN authentication, transaction scheduling, allocation management, or relay session establishment.
+The transport crate provides a Tokio UDP socket adapter that sends STUN/TURN control datagrams and ChannelData messages, preserves source addresses and adopts pre-bound sockets. Android creates and protects each socket with `VpnService.protect(fd)`. The adapter is integrated with the TURN socket actor, control driver, allocation supervisor and path runtime.
 
 
 ### TURN tunnel data codec composition
 
-The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This is a codec composition only: it does not own UDP receive dispatch, TURN state transitions, or the authenticated key exchange.
+The transport crate now composes the IP datagram envelope, ChaCha20-Poly1305 protected frame, and TURN ChannelData envelope into one sender/receiver API. The receiver checks the expected channel number before AEAD authentication, then validates the decrypted IP datagram. This codec composition is used by the TURN dataplane; UDP dispatch, TURN state transitions and authenticated key exchange are owned by their respective integrated runtime components.
 
 ### Downlink ordering across independent TURN paths
 
