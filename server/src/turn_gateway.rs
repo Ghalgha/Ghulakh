@@ -2369,15 +2369,19 @@ mod tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
-        let client_ipv6 = ipv6_for_virtual_ipv4(CLIENT_IP);
+        // Use an independently assigned IPv6 address rather than deriving it
+        // from IPv4. The authenticated handshake carries this exact address.
+        let client_ipv6: Ipv6Addr = "fd77:77::beef".parse().unwrap();
 
-        gateway.register_session(
-            SESSION,
-            CLIENT_IP,
-            relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        gateway.register_session_with_path_generation(SessionRegistration {
+            session_id: SESSION,
+            client_ipv4: CLIENT_IP,
+            client_ipv6,
+            relay_peer: relay_addr,
+            opener: FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            sealer: FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+            path_lease: None,
+        }).await.unwrap();
 
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
