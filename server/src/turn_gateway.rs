@@ -2449,6 +2449,7 @@ mod tests {
         assert_ne!(another_path, game_path);
     }
 
+    // A 1,300-byte bulk flow stays pinned through its 16 KiB burst, then moves.
     #[test]
     fn downlink_scheduler_switches_bulk_flow_only_at_burst_boundary() {
         let mut scheduler = DownlinkScheduler::new();
