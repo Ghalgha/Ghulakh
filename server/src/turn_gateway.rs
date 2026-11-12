@@ -1101,37 +1101,49 @@ mod tests {
     fn uplink_reorder_buffer_restores_sequence_across_paths() {
         let now = Instant::now();
         let make_packet = |marker: u8| {
-            let mut bytes = vec![0u8; 20];
+            let mut bytes = vec![0u8; 28];
             bytes[0] = 0x45;
-            bytes[2..4].copy_from_slice(&20u16.to_be_bytes());
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&u16::from(marker).to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
             bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
-            bytes[16..20].copy_from_slice(&[10, 77, 0, marker]);
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 3]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
             DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
         };
         let mut reorder = UplinkReorderBuffer::default();
         assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
         let ready = reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now);
         assert_eq!(ready.len(), 2);
-        assert_eq!(ready[0].packet[19], 2);
-        assert_eq!(ready[1].packet[19], 3);
+        assert_eq!(ready[0].packet[5], 2);
+        assert_eq!(ready[1].packet[5], 3);
     }
 
     #[test]
     fn uplink_reorder_buffer_skips_expired_gap_and_drops_late_packet() {
         let now = Instant::now();
         let make_packet = |marker: u8| {
-            let mut bytes = vec![0u8; 20];
+            let mut bytes = vec![0u8; 28];
             bytes[0] = 0x45;
-            bytes[2..4].copy_from_slice(&20u16.to_be_bytes());
+            bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
+            bytes[4..6].copy_from_slice(&u16::from(marker).to_be_bytes());
+            bytes[8] = 64;
+            bytes[9] = 17;
             bytes[12..16].copy_from_slice(&CLIENT_IP.octets());
-            bytes[16..20].copy_from_slice(&[10, 77, 0, marker]);
+            bytes[16..20].copy_from_slice(&[10, 77, 0, 3]);
+            bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
+            bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
+            bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
             DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
         };
         let mut reorder = UplinkReorderBuffer::default();
         assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
         let ready = reorder.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT);
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].packet[19], 3);
+        assert_eq!(ready[0].packet[5], 3);
         assert!(reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now + UPLINK_REORDER_GAP_TIMEOUT).is_empty());
     }
 
