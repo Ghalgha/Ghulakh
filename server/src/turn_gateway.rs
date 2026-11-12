@@ -1886,6 +1886,9 @@ mod tests {
         }
         scheduler.select(&first_group, CLIENT_IP, &scheduler_udp_flow(16_101, 1200), now);
         let first_group_tokens = first_group.map(|id| scheduler.tokens[&id]);
+        for id in second_group {
+            scheduler.refill(id, now + Duration::from_millis(1));
+        }
         scheduler.select(
             &second_group,
             Ipv4Addr::new(10, 77, 0, 3),
