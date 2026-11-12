@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
 
+# Keep only the newest run for a given PR or branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -13,6 +18,7 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -29,7 +35,8 @@ jobs:
       - name: Verify formatting
         run: cargo fmt --all -- --check
       - name: Test
-        run: cargo test --workspace
+        timeout-minutes: 30
+        run: cargo test --workspace -- --nocapture
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - uses: dtolnay/rust-toolchain@nightly
@@ -43,6 +50,7 @@ jobs:
   android:
     name: Android debug build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
