@@ -269,12 +269,12 @@ impl DownlinkScheduler {
     fn select(
         &mut self,
         active: &[[u8; 8]],
-        client_ipv4: Ipv4Addr,
+        client_ip: impl Into<IpAddr>,
         packet: &[u8],
         now: Instant,
     ) -> [u8; 8] {
         let sendable = vec![true; active.len()];
-        self.select_sendable(active, &sendable, client_ipv4, packet, now)
+        self.select_sendable(active, &sendable, client_ip, packet, now)
             .expect("test scheduler requires at least one sendable path")
     }
 }
@@ -1194,11 +1194,11 @@ mod tests {
         assert_eq!(route.sessions.len(), 2);
 
         assert!(gateway.unregister_session(session_a).await);
-        let route = gateway.clients.read().await.get(&CLIENT_IP).cloned().unwrap();
+        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
-        assert!(!gateway.clients.read().await.contains_key(&CLIENT_IP));
+        assert!(!gateway.clients.read().await.contains_key(&IpAddr::V4(CLIENT_IP)));
     }
 
     #[tokio::test]
@@ -1997,7 +1997,7 @@ mod tests {
             Instant::now(),
             Duration::from_secs(60),
         ).await;
-        assert_eq!(expired, vec![CLIENT_IP]);
+        assert_eq!(expired, vec![IpAddr::V4(CLIENT_IP)]);
         assert!(gateway.sessions.read().await.is_empty());
         assert!(gateway.clients.read().await.is_empty());
     }
@@ -2248,7 +2248,7 @@ mod tests {
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
         assert!(!scheduler.flows.contains_key(&expired_key));
-        assert!(scheduler.flows.contains_key(&(CLIENT_IP, ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap())));
+        assert!(scheduler.flows.contains_key(&(IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap())));
     }
 
     #[test]
