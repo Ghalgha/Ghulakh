@@ -502,6 +502,10 @@ impl TurnClientPathGroup {
         forwarders[index].abort();
         old.close();
 
+        // Publish the slot as healthy before its watcher can run. If the
+        // replacement has already failed, the watcher must be the final
+        // writer and leave the slot unhealthy.
+        self.healthy[index].store(true, Ordering::Release);
         let path_health = Arc::clone(&self.healthy[index]);
         let forwarder = tokio::spawn(async move {
             while let Ok(packet) = replacement.receive_packet().await {
@@ -512,7 +516,6 @@ impl TurnClientPathGroup {
             path_health.store(false, Ordering::Release);
         });
         forwarders[index] = forwarder;
-        self.healthy[index].store(true, Ordering::Release);
         Ok(())
     }
 
@@ -830,6 +833,30 @@ mod path_group_tests {
         drop(downlink_a);
     }
 
+
+    #[tokio::test]
+    async fn replacement_that_fails_immediately_is_marked_unhealthy() {
+        let group_id = [0x7e; 16];
+        let (path_a, _uplink_a, _downlink_a) = mock_path(0, group_id);
+        let (path_b, _uplink_b, downlink_b) = mock_path(1, group_id);
+        let group = TurnClientPathGroup::new(vec![path_a, path_b]).unwrap();
+        drop(downlink_b);
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+
+        let (replacement, _replacement_uplink, replacement_downlink) = mock_path(1, group_id);
+        drop(replacement_downlink);
+        group.replace_path(replacement).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while group.failed_path_ids() != vec![1] {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(group.active_paths(), 1);
+    }
 
     #[tokio::test]
     async fn simultaneous_path_failures_can_all_be_replaced_in_place() {
