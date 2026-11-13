@@ -1,6 +1,6 @@
 # Текущий статус проекта
 
-Дата сверки: 2026-11-13. Базовый main: `d62e9b45cde0f5ee6502196128eb5d60041304f2` (после PR №11). Открытый PR №12 добавляет IPv4/IPv6 fwmark policy-routing regression test; его head `298fd96b510166e79700ecdb185eab5258e73379` прошёл все три CI jobs. Изменения PR ещё не входят в main.
+Дата сверки: 2026-11-13. Базовый main: `cf8218a11b56f5cba770f91281af231ef7a2bc7d` (PR №12 слит). PR №12 добавил IPv4/IPv6 fwmark policy-routing regression test; его head `2289e4c8718ad5a4372a53c878126e2c76f845db` прошёл все три CI jobs до squash-слияния.
 
 Документ отделяет наличие реализации и автоматических тестов от подтверждения работы с внешней сетью. Успешный CI не доказывает совместимость с VK Calls relay или production readiness.
 
@@ -25,7 +25,7 @@
 
 ## Автоматически проверено
 
-Для merge head eb92fd6e1628508c22c5eabf0f8ae5b291ed13d6 успешно завершились Rust checks, Android debug build и Linux network namespace integration. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic, firewall drop cases, а в PR №12 — IPv4/IPv6 fwmark policy routing через посторонний интерфейс с подтверждением, что пакеты не достигают rogue peer и попадают под TUN catch-all drop. Это не тест реального VPS или Android туннеля.
+Для PR №12 на head `2289e4c8718ad5a4372a53c878126e2c76f845db` успешно завершились Rust checks, Android debug build и Linux network namespace integration; затем изменения слиты в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic, firewall drop cases и IPv4/IPv6 fwmark policy routing через посторонний интерфейс: пакеты не достигают rogue peer и попадают под TUN catch-all drop. Это не тест реального VPS или Android туннеля.
 
 Mock UDP/integration tests покрывают TURN control/data composition, Noise handshake, session registration, protected uplink/downlink, multipath, path loss/replacement, IPv4/IPv6 forwarding, ordering, lifecycle races и cleanup. Mock relay не является реализацией VK TURN и не подтверждает внешний auth profile.
 
@@ -49,7 +49,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 
 ## Порядок завершения
 
-1. Завершён аудит основных IPv4/IPv6 egress edge cases; PR №12 добавляет изолированный тест обходного fwmark policy routing для обоих семейств. После слияния актуализировать ссылку на merge commit.
+1. Аудит основных IPv4/IPv6 egress edge cases и изолированный тест обходного fwmark policy routing для обоих семейств включены в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Это закрывает тестирование описанной топологии, но не произвольных правил реального хоста.
 2. Закончить аудит секретов и lifetime на Kotlin/JNI/Rust границах.
 3. Закрыть dependency locking/verification и SHA pinning CI actions.
 4. Завершить crypto composition review и длительные fuzz/property/fault/resource tests.
