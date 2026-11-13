@@ -59,11 +59,9 @@ for pair in "$C c0" "$R rc0" "$R ru0" "$R rx0" "$U u0" "$X x0"; do
   read -r ns dev <<<"$pair"
   ip -n "$ns" link set "$dev" up
 done
-ip -n "$C" addr add 10.88.0.99/32 dev c0
 ip -n "$C" route add default via 10.77.0.1
 ip -n "$X" route add default via 10.88.0.1
 ip -n "$U" route add 10.77.0.0/16 via 1.1.1.254
-ip -n "$C" -6 addr add fd88::99/128 dev c0
 ip -n "$C" -6 route add default via fd77:77::1
 ip -n "$X" -6 route add default via fd88::1
 ip -n "$U" -6 route add fd77:77::/64 via 2606:4700:4700::fffe
@@ -161,6 +159,12 @@ if ip netns exec "$U" ping -6 -c 1 -W 1 fd77:77::2; then
   echo "FAIL: unsolicited IPv6 forwarding was not blocked" >&2
   exit 1
 fi
+# Add deliberately invalid source addresses only when their negative probes run.
+# Keeping them off the interface during NAT66 warm-up prevents IPv6 source-address
+# selection from choosing the spoof-test ULA instead of the tunnel ULA.
+ip -n "$C" addr add 10.88.0.99/32 dev c0
+ip -n "$C" -6 addr add fd88::99/128 dev c0
+
 # Reject spoofed source prefixes on the tunnel interface and unrelated ingress.
 if ip netns exec "$C" ping -I 10.88.0.99 -c 1 -W 1 1.1.1.253; then
   echo "FAIL: spoofed IPv4 source escaped the tunnel egress policy" >&2
