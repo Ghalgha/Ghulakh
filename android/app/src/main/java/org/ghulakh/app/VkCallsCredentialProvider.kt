@@ -425,7 +425,7 @@ object VkCallsCredentialProvider {
             val status = connection.responseCode
             val stream = if (status >= 400) connection.errorStream else connection.inputStream
             val bytes = stream?.use { input ->
-                val output = WipingByteArrayOutputStream()
+                val output = VkCallsWipingByteArrayOutputStream()
                 val buffer = ByteArray(8 * 1024)
                 try {
                     var total = 0
@@ -492,7 +492,7 @@ internal object VkCallsRetryPolicy {
 
 
 /** ByteArrayOutputStream whose mutable backing storage can be explicitly cleared. */
-private class WipingByteArrayOutputStream : ByteArrayOutputStream() {
+private class VkCallsWipingByteArrayOutputStream : ByteArrayOutputStream() {
     fun wipe() {
         buf.fill(0)
         reset()

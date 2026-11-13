@@ -40,7 +40,7 @@ internal object TurnQuotaRetryPolicy {
             require(fingerprints.distinct().size == fingerprints.size) {
                 "TURN credential group contains repeated credential sets"
             }
-            val canonical = WipingByteArrayOutputStream()
+            val canonical = FingerprintWipingByteArrayOutputStream()
             try {
                 DataOutputStream(canonical).use { output ->
                     fingerprints.sorted().forEach { value ->
@@ -119,7 +119,7 @@ internal object TurnQuotaRetryPolicy {
         val endpoints = (0 until urls.length()).map { index ->
             urls.getString(index).also { require(it.isNotBlank()) { "TURN endpoint is empty" } }
         }.distinct().sorted()
-        val canonical = WipingByteArrayOutputStream()
+        val canonical = FingerprintWipingByteArrayOutputStream()
         try {
             DataOutputStream(canonical).use { output ->
                 (listOf(username, credential) + endpoints).forEach { value ->
@@ -165,7 +165,7 @@ internal object TurnQuotaRetryPolicy {
 }
 
 
-private class WipingByteArrayOutputStream : ByteArrayOutputStream() {
+private class FingerprintWipingByteArrayOutputStream : ByteArrayOutputStream() {
     fun wipe() {
         buf.fill(0)
         reset()
