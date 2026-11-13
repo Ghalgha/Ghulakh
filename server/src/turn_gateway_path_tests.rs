@@ -129,7 +129,7 @@ async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions()
         packet[8] = 64;
         packet[9] = 17;
         packet[12..16].copy_from_slice(&TEST_CLIENT_IP.octets());
-        packet[16..20].copy_from_slice(&[203, 0, 113, 9]);
+        packet[16..20].copy_from_slice(&[1, 1, 1, 1]);
         packet[20..22].copy_from_slice(&12_000u16.to_be_bytes());
         packet[22..24].copy_from_slice(&443u16.to_be_bytes());
         packet[24..26].copy_from_slice(&8u16.to_be_bytes());
