@@ -28,6 +28,7 @@ use crate::{
     turn_udp::TurnUdpSocket,
 };
 use tokio::sync::mpsc;
+use zeroize::Zeroizing;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const DEFAULT_REFRESH_LIFETIME: u32 = 600;
@@ -297,17 +298,17 @@ impl TurnClientDriver {
     ) -> Result<StunMessage> {
         let destination = self.relay_endpoint;
         let actor = self.socket.as_ref().cloned().ok_or(TurnDriverError::SocketActorClosed)?;
-        let wire = match auth {
+        let mut wire = Zeroizing::new(match auth {
             Some(context) => context.sign_request(&request).context("authenticate TURN request")?,
             None => request.encode().context("encode unauthenticated TURN request")?,
-        };
+        });
         let id = self.transactions.register(
-            wire.clone(),
+            wire.to_vec(),
             destination,
             Instant::now(),
             self.transaction_policy,
         ).map_err(|e| anyhow::anyhow!("register TURN transaction: {e}"))?;
-        if let Err(error) = actor.send_datagram(wire).await {
+        if let Err(error) = actor.send_datagram(std::mem::take(&mut *wire)).await {
             self.transactions.cancel(&id);
             return Err(error).context("send TURN request");
         }
