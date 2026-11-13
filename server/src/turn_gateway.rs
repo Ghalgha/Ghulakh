@@ -2709,7 +2709,7 @@ mod egress_policy_tests {
     }
     #[test]
     fn blocks_non_global_and_special_ipv6_and_allows_global_unicast() {
-        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3f00::1","3f80::1","3fc0::1","3fe0::1","3ff0::1","3ff8::1","3ffc::1","3ffe::1","3fff::1"] {
+        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2000:ffff::1","2001:1ff:ffff::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3f00::1","3f80::1","3fc0::1","3fe0::1","3ff0::1","3ff8::1","3ffc::1","3ffe::1","3fff::1","4000::1"] {
             assert!(!destination_allowed(a.parse().unwrap()), "{a}");
         }
         assert!(destination_allowed("2606:4700:4700::1111".parse().unwrap()));
