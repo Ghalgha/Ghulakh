@@ -190,7 +190,8 @@ ip netns exec "$R" nft -f - <<'NFT'
 table inet policy_route_probe {
   chain prerouting {
     type filter hook prerouting priority mangle; policy accept;
-    iifname "rc0" meta mark set 0x42
+    iifname "rc0" ip daddr 8.8.8.8 counter meta mark set 0x42
+    iifname "rc0" ip6 daddr 2001:4860:4860::8888 counter meta mark set 0x42
   }
 }
 NFT
@@ -221,6 +222,10 @@ ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
   | grep -F 'ip daddr 8.8.8.8 counter packets' | grep -Eq 'counter packets 0'
 ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
   | grep -F 'ip6 daddr 2001:4860:4860::8888 counter packets' | grep -Eq 'counter packets 0'
+ip netns exec "$R" nft list chain inet policy_route_probe prerouting \\
+  | grep -F 'ip daddr 8.8.8.8 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet policy_route_probe prerouting \\
+  | grep -F 'ip6 daddr 2001:4860:4860::8888 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward \\
   | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" ip rule del priority 100 fwmark 0x42/0xff table 100
