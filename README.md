@@ -1,43 +1,41 @@
 # Ghulakh (ГӀулакх)
 
-Ghulakh — исследовательская система защищённого IP VPN-туннеля с Android-клиентом и серверным шлюзом.
+Ghulakh (ГӀулакх) — исследовательская система защищённого VPN-туннеля (IP-туннеля) с Android-клиентом и серверным шлюзом.
 
-## Назначение
+## Основная цель
 
-Единственный пользовательский транспорт первой версии — собственный защищённый туннель через TURN-реле инфраструктуры звонков VK (VK Calls). Android-клиент создаёт независимые TURN allocations и передаёт защищённые IP-кадры серверному UDP gateway. Сервер проверяет сессию и маршрутизирует пакеты через TUN; обратный трафик возвращается через проверенный relay path. Другие пользовательские транспорты не реализованы; архитектура допускает их добавление позднее.
+Единственный транспорт первой версии — собственный защищённый VPN-туннель через TURN-реле инфраструктуры звонков VK (VK Calls). Android-клиент передаёт IP-пакеты через TURN relay allocation на серверный шлюз; сервер проверяет и маршрутизирует их, а обратный трафик возвращается тем же транспортным путём.
 
-## Состояние на 2026-11-13
+Другие транспорты сейчас не реализуются. Архитектура должна позволять добавлять их позднее через отдельный интерфейс провайдера транспорта.
 
-Текущий main: 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
+## Текущее состояние
 
-Последний CI для вошедшего в merge содержимого завершился успешно: Rust checks, Android debug build и Linux network namespace integration. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
+Реализованы основные программные компоненты TURN-транспорта: управление allocation/permission/channel binding, защищённый Noise XX handshake, server gateway, клиентский dataplane и Android JNI/VpnService-интеграция. Android получает временные TURN credentials через VK Calls API при подключении. Серверный runtime ориентирован на TURN; остаточные QUIC-зависимости и диагностический код не являются пользовательским транспортом.
 
-**Проект пока не готов к production или повседневному использованию.** Не подтверждены live VK Calls API/TURN auth profile, реальная relay allocation и сквозной маршрут Android → VK TURN → VPS → интернет → Android. Не проверены публичный IPv6 egress на VPS, внешние квоты и длительная стабильность. VK access token вводится вручную; in-app OAuth отсутствует. Подробности — [текущий статус](docs/STATUS.md).
+Проект остаётся исследовательской системой и **не готов для повседневного или production-использования**: автоматические mock integration tests проходят, но совместимость VK Calls API и TURN auth profile не подтверждена на реальном relay; сквозные Android/VPS испытания ещё не завершены. См. [текущий статус](docs/STATUS.md).
 
 ## Компоненты
 
-- android/ — Android UI, Keystore, VpnService, JNI bridge и lifecycle.
-- server/ — UDP TURN gateway, аутентификация сессий, TUN и маршрутизация.
-- crates/protocol/ — wire formats, STUN/TURN, handshake и защищённые кадры.
-- crates/transport/ — TURN driver/supervisor, socket actor, Noise handshake и dataplane.
-- tools/ — ограниченная nftables egress policy и изолированный network namespace test.
-- docs/ — архитектура, протокол, безопасность и эксплуатация.
+- `android/` — Android-клиент и VpnService.
+- `server/` — серверный шлюз и TUN.
+- `crates/protocol/` — общие типы и форматы протокола.
+- `crates/transport/` — TURN control plane, Noise handshake, защищённый dataplane и высокоуровневый клиентский runtime.
+- `docs/` — архитектура, спецификация, модель угроз, эксплуатация и статус.
 
-## Основные ограничения
+## Инженерные принципы
 
-- Поддерживается только UDP TURN endpoint; TCP/TLS/TURNS не реализованы.
-- TURN credentials VK Calls, device credential и Noise keys — разные секреты.
-- Серверный forwarding/NAT/firewall настраивается администратором отдельно. Полного автоматического server installer/update/uninstaller в репозитории нет.
-- Автоматические тесты используют mock relay и не доказывают совместимость с внешней инфраструктурой VK Calls.
-- Физические испытания выполняются ближе к завершению проекта, после программного аудита.
+- VK Calls TURN — единственный транспорт первой версии.
+- Разделять получение TURN credentials, управление allocation, защищённый framing и IP-маршрутизацию.
+- Использовать стандартные криптографические библиотеки и индивидуальные ключи сессий.
+- Fail-closed при ошибках аутентификации, целостности и состояния туннеля.
+- Ограничивать размеры пакетов, очереди, буферы, число сессий и время сборки фрагментов.
+- Не проводить физические испытания до завершения статического аудита, спецификации и локальных интеграционных тестов.
 
 ## Документация
 
 - [Архитектура](docs/ARCHITECTURE.md)
-- [Проектирование транспорта](docs/TRANSPORT_DESIGN.md)
-- [Спецификация протокола](docs/PROTOCOL.md)
-- [Текущий статус и оставшиеся работы](docs/STATUS.md)
+- [Проектирование основного транспорта](docs/TRANSPORT_DESIGN.md)
+- [Протокол](docs/PROTOCOL.md)
+- [Статус](docs/STATUS.md)
 - [Развёртывание](docs/DEPLOYMENT.md)
-- [Эксплуатация сервера](docs/SERVER_OPERATIONS.md)
 - [Модель угроз](docs/THREAT_MODEL.md)
-- [Исследование relay path](docs/RELAY_PATH_FINDINGS.md)

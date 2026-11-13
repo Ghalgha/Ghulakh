@@ -1,7 +1,5 @@
 # Проектирование основного транспорта
 
-**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
-
 Статус: программная реализация основного TURN-транспорта и Android/server vertical slice собраны; реальная совместимость с инфраструктурой VK Calls ещё не подтверждена.
 
 ## Назначение и границы
@@ -59,4 +57,4 @@ TURN auth provider изолирован от протокольного слоя
 
 CI покрывает Rust tests/Clippy/fuzz targets, Android JVM tests, native transport build и APK build. Mock tests покрывают control plane, Noise handshake, bidirectional dataplane, multipath, relay loss, path replacement и bounded queue behavior. Эти тесты не доказывают реальную совместимость с VK Calls.
 
-Остаются deterministic fault tests для частичных отказов, увеличение длительности fuzz/property coverage, аудит lifecycle и секретов, нагрузочные/ресурсные тесты в симуляции и security review. Базовые mock integration и Linux namespace tests уже присутствуют и проходят CI. Live VK Calls и Android/VPS испытания отложены до завершения этих программных проверок. Android/VPS испытания проводить только ближе к завершению программной вертикали.
+До физических испытаний остаются: deterministic fault tests для частичных отказов, расширение fuzz/property coverage, аудит lifecycle и секретов, нагрузочные/ресурсные тесты в симуляции и security review. Android/VPS испытания проводить только ближе к завершению программной вертикали.

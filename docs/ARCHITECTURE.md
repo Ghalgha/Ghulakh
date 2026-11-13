@@ -1,7 +1,5 @@
 # Архитектура
 
-**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
-
 ## Цель
 
 Ghulakh — Android VPN-клиент и серверный шлюз для защищённой передачи IP-пакетов через TURN-реле инфраструктуры звонков VK (VK Calls). Это основной и единственный транспорт первой версии. Архитектура допускает добавление других транспортов позднее, но сейчас альтернативные реализации не создаются.
@@ -63,6 +61,4 @@ Ghulakh — Android VPN-клиент и серверный шлюз для за�
 - IPv4 и IPv6 захватываются Android TUN и передаются через TURN dataplane; сервер проверяет виртуальные source addresses и маршрутизирует оба семейства. Публичный IPv6 egress зависит от маршрута upstream либо NAT66 на сервере и не подтверждён на реальном VPS.
 - Физические испытания проводятся только на заключительном этапе.
 
-Подробные открытые вопросы и порядок проверки перечислены в [TRANSPORT_DESIGN.md](TRANSPORT_DESIGN.md) и [STATUS.md](STATUS.md).
-
-Текущая реализация включает dual-stack tunnel group, multipath recovery, Android Keystore profile persistence и authenticated TURN credential-rejection recovery. Серверные sysctl/routes/firewall остаются административной конфигурацией; приложение не выполняет автоматический глобальный deployment.
+Подробные открытые вопросы и порядок проверки перечислены в [TRANSPORT_DESIGN.md](TRANSPORT_DESIGN.md).

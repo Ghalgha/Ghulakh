@@ -1,7 +1,5 @@
 # Многопоточный TURN datapath
 
-**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
-
 ## Цель
 
 Один логический VPN-туннель должен использовать несколько независимых TURN allocations через VK Calls. Ограничение пропускной способности отдельного relay-потока нельзя обходить созданием дополнительных потоков ОС поверх одной allocation: для масштабирования нужны независимые allocations, каждая со своим UDP socket, TURN allocation, permission, ChannelBind и защищённой сессией.
@@ -72,7 +70,13 @@ Group ID — идентификатор экземпляра туннеля, а 
 
 ## Этапы реализации
 
-Основной multipath datapath реализован: tunnel group использует независимые TURN allocations, sockets, permission/channel state и Noise sessions; uplink применяет flow/flowlet affinity, downlink распределяет flows по пригодным paths, sequence/reorder layer ограничивает переупорядочивание, отказавший path может быть заменён новой allocation и handshake. Android service управляет lifecycle generation и остановкой recovery workers. Mock tests покрывают распределение flows, ordering, path loss/replacement и cleanup. Они не измеряют реальную производительность и не подтверждают допустимое число allocations на VK relay. Benchmark, soak testing, resource exhaustion и live relay behavior остаются открытыми.
+1. Добавить защищённый формат client session context: group ID, path ID, requested path count.
+2. На сервере реализовать lease виртуального IPv4 и регистрацию нескольких session IDs в одной tunnel group.
+3. Подключить Rust TurnClientPathGroup к JNI и реализовать Android создание нескольких protected UDP sockets/allocations.
+4. Реализовать мониторинг path health, выбор живых путей, graceful degradation и повторное создание allocation.
+5. Добавить mock end-to-end тесты для двух и более paths: распределение flows, порядок, потери, duplicate/replay, path failure, восстановление, queue saturation и cleanup последнего path.
+6. После стабилизации flow-affinity multipath оценить необходимость striping одного flow с group sequence/reorder.
+7. Только после успешной программной вертикали провести физические Android/VPS испытания и измерить масштабирование.
 
 ## Поздние функции
 

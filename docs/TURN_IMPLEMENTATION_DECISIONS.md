@@ -1,7 +1,5 @@
 # Решения по реализации TURN-транспорта
 
-**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
-
 Дата: 2026-11-10.
 
 ## Область сравнения
@@ -36,8 +34,8 @@
 3. Bounded ingress/egress queues и единый socket actor используются в текущем runtime. SPSC/ring-buffer замена остаётся только возможной оптимизацией после сопоставимого benchmark.
 4. Outbound UDP operations выполняются через actor/runtime с ограниченными очередями и управляемым shutdown; отдельная SPSC writer-архитектура не заявляется как реализованная.
 5. Event-driven notifications вместо периодического polling.
-6. Повторно используемые буферы допускаются там, где они поддержаны текущей моделью владения; отдельный общий PacketPool не следует считать обязательной частью реализованного runtime.
-7. Сохранять наблюдаемость queue-full, socket WouldBlock, packet loss, retransmission и reconnect; не документировать метрики, которых нет в коде.
+6. Буферы из PacketPool/reusable buffers, чтобы избежать лишних allocation/copy на каждый пакет.
+7. Явные счётчики queue-full, pool-exhaustion, socket WouldBlock, packet loss, retransmission и reconnect.
 
 Не копировать значения buffer sizes из одного источника. Начальная конфигурация должна быть консервативной и измеряться на одинаковых тестовых сценариях.
 
