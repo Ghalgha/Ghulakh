@@ -392,7 +392,7 @@ fn is_turn_credentials_rejected(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<crate::turn_driver::TurnDriverError>(),
-            Some(crate::turn_driver::TurnDriverError::CredentialsRejected)
+            Some(crate::turn_driver::crate::turn_driver::TurnDriverError::CredentialsRejected)
         )
     })
 }
@@ -1758,14 +1758,14 @@ mod turn_credential_recovery_tests {
 
     #[test]
     fn only_explicit_credential_rejection_triggers_path_recovery() {
-        let rejected_401 = anyhow::Error::new(TurnDriverError::CredentialsRejected);
+        let rejected_401 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected);
         assert!(is_turn_credentials_rejected(&rejected_401));
 
-        let rejected_441 = anyhow::Error::new(TurnDriverError::CredentialsRejected)
+        let rejected_441 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected)
             .context("authenticated TURN Refresh returned STUN 441");
         assert!(is_turn_credentials_rejected(&rejected_441));
 
-        let stale_nonce_438 = anyhow::Error::new(TurnDriverError::Challenge(
+        let stale_nonce_438 = anyhow::Error::new(crate::turn_driver::TurnDriverError::Challenge(
             ghulakh_protocol::turn_auth::TurnChallenge {
                 code: 438,
                 realm: "turn.example.invalid".into(),
@@ -1775,7 +1775,7 @@ mod turn_credential_recovery_tests {
         ));
         assert!(!is_turn_credentials_rejected(&stale_nonce_438));
 
-        let transient = anyhow::Error::new(TurnDriverError::Timeout);
+        let transient = anyhow::Error::new(crate::turn_driver::TurnDriverError::Timeout);
         assert!(!is_turn_credentials_rejected(&transient));
     }
 }
