@@ -9,7 +9,7 @@ for cmd in ip nft ping; do
   command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd" >&2; exit 2; }
 done
 
-test_id="$"
+test_id="${BASHPID}"
 C="ghulakh-${test_id}-client"
 R="ghulakh-${test_id}-router"
 U="ghulakh-${test_id}-upstream"
