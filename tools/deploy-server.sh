@@ -337,37 +337,134 @@ deploy() {
   fi
   printf "Pinned Noise server public key (hex):\n"
   cat "$NOISE_PUBLIC"
-  link="$BASE/.current.$BASHPID.$RANDOM"
-  ln -s "$release_dir" "$link"
-  mv -Tf "$link" "$CURRENT"
-  if ! write_units "$WAN" "$IPV6_MODE"; then
-    if [[ -n "$old_target" ]]; then ln -sfn "$old_target" "$link"; mv -Tf "$link" "$CURRENT"; else rm -f "$CURRENT"; fi
-    die "Unit validation failed; active release pointer was restored."
+  # Snapshot every mutable deployment component until systemd activation succeeds.
+  local transaction_dir had_old_egress=0 had_old_server=0 had_old_marker=0
+  local old_egress_enabled old_server_enabled old_egress_active old_server_active
+  local rollback_failed=0
+  transaction_dir="$(mktemp -d "$BASE/.deploy-transaction.XXXXXX")" || die "Could not create deployment transaction snapshot."
+  if [[ -e "$EGRESS_UNIT" || -L "$EGRESS_UNIT" ]]; then
+    cp -a -- "$EGRESS_UNIT" "$transaction_dir/old-egress" || die "Could not snapshot egress unit."
+    had_old_egress=1
   fi
-  sha256sum "$SERVER_UNIT" "$EGRESS_UNIT" >"$MARKER.tmp"
-  chmod 0600 "$MARKER.tmp"
-  mv -f "$MARKER.tmp" "$MARKER"
-  systemctl daemon-reload
+  if [[ -e "$SERVER_UNIT" || -L "$SERVER_UNIT" ]]; then
+    cp -a -- "$SERVER_UNIT" "$transaction_dir/old-server" || die "Could not snapshot server unit."
+    had_old_server=1
+  fi
+  if [[ -e "$MARKER" || -L "$MARKER" ]]; then
+    cp -a -- "$MARKER" "$transaction_dir/old-marker" || die "Could not snapshot ownership marker."
+    had_old_marker=1
+  fi
+  old_egress_enabled="$(systemctl is-enabled ghulakh-egress.service 2>/dev/null || true)"
+  old_server_enabled="$(systemctl is-enabled ghulakh-server.service 2>/dev/null || true)"
+  old_egress_active="$(systemctl is-active ghulakh-egress.service 2>/dev/null || true)"
+  old_server_active="$(systemctl is-active ghulakh-server.service 2>/dev/null || true)"
+
+  rollback_activation() {
+    local failed=0 restore_link
+    restore_link="$BASE/.rollback-current.$BASHPID.$RANDOM"
+    if [[ -n "$old_target" ]]; then
+      if ln -s "$old_target" "$restore_link" && mv -Tf "$restore_link" "$CURRENT"; then :; else failed=1; fi
+    else
+      rm -f "$CURRENT" || failed=1
+    fi
+
+    if (( had_old_egress )); then
+      cp -a -- "$transaction_dir/old-egress" "$EGRESS_UNIT.rollback" &&
+        mv -f "$EGRESS_UNIT.rollback" "$EGRESS_UNIT" || failed=1
+    else
+      rm -f "$EGRESS_UNIT" || failed=1
+    fi
+    if (( had_old_server )); then
+      cp -a -- "$transaction_dir/old-server" "$SERVER_UNIT.rollback" &&
+        mv -f "$SERVER_UNIT.rollback" "$SERVER_UNIT" || failed=1
+    else
+      rm -f "$SERVER_UNIT" || failed=1
+    fi
+    if (( had_old_marker )); then
+      cp -a -- "$transaction_dir/old-marker" "$MARKER.rollback" &&
+        mv -f "$MARKER.rollback" "$MARKER" || failed=1
+    else
+      rm -f "$MARKER" || failed=1
+    fi
+
+    systemctl daemon-reload || failed=1
+    if (( had_old_egress )); then
+      case "$old_egress_enabled" in
+        enabled|enabled-runtime) systemctl enable ghulakh-egress.service || failed=1 ;;
+        disabled) systemctl disable ghulakh-egress.service || failed=1 ;;
+        masked|masked-runtime) systemctl mask ghulakh-egress.service || failed=1 ;;
+      esac
+      if [[ "$old_egress_active" == active ]]; then
+        systemctl restart ghulakh-egress.service || failed=1
+      else
+        systemctl stop ghulakh-egress.service || failed=1
+      fi
+    else
+      systemctl disable --now ghulakh-egress.service >/dev/null 2>&1 || true
+    fi
+    if (( had_old_server )); then
+      case "$old_server_enabled" in
+        enabled|enabled-runtime) systemctl enable ghulakh-server.service || failed=1 ;;
+        disabled) systemctl disable ghulakh-server.service || failed=1 ;;
+        masked|masked-runtime) systemctl mask ghulakh-server.service || failed=1 ;;
+      esac
+      if [[ "$old_server_active" == active ]]; then
+        systemctl restart ghulakh-server.service || failed=1
+      else
+        systemctl stop ghulakh-server.service || failed=1
+      fi
+    else
+      systemctl disable --now ghulakh-server.service >/dev/null 2>&1 || true
+    fi
+
+    if (( failed )); then
+      printf 'CRITICAL: deployment rollback was incomplete; snapshots retained at %s\n' "$transaction_dir" >&2
+      return 1
+    fi
+    rm -rf -- "$transaction_dir"
+    return 0
+  }
+
+  trap 'if ! rollback_activation; then printf "CRITICAL: rollback requires manual recovery.\\n" >&2; fi; exit 1' HUP INT TERM
+
+  link="$BASE/.current.$BASHPID.$RANDOM"
+  if ! ln -s "$release_dir" "$link" || ! mv -Tf "$link" "$CURRENT"; then
+    rm -f "$link"
+    rollback_activation || rollback_failed=1
+    trap - HUP INT TERM
+    if (( rollback_failed )); then die "Release switch failed and rollback was incomplete; inspect $transaction_dir."; fi
+    die "Could not switch active release; previous deployment state restored."
+  fi
+  if ! write_units "$WAN" "$IPV6_MODE"; then
+    rollback_activation || rollback_failed=1
+    trap - HUP INT TERM
+    if (( rollback_failed )); then die "Unit installation failed and rollback was incomplete; inspect $transaction_dir."; fi
+    die "Unit validation or installation failed; previous release, units and marker restored."
+  fi
+  # write_units manages and clears its own traps; re-arm the outer transaction guard.
+  trap 'if ! rollback_activation; then printf "CRITICAL: rollback requires manual recovery.\\n" >&2; fi; exit 1' HUP INT TERM
+  if ! systemctl daemon-reload; then
+    rollback_activation || rollback_failed=1
+    trap - HUP INT TERM
+    if (( rollback_failed )); then die "daemon-reload failed and rollback was incomplete; inspect $transaction_dir."; fi
+    die "systemd daemon-reload failed; previous deployment state restored."
+  fi
   if systemctl enable ghulakh-egress.service ghulakh-server.service &&
      systemctl restart ghulakh-egress.service &&
      systemctl restart ghulakh-server.service; then
+    rm -rf -- "$transaction_dir"
+    trap - HUP INT TERM
     printf 'Deployment active. Release: %s\n' "$release_id"
     printf 'Create a device credential: sudo bash tools/deploy-server.sh credential\n'
     printf 'Allow the gateway UDP port in the existing INPUT firewall after reviewing host policy.\n'
     return 0
   fi
-  printf 'Activation failed; attempting release rollback.\n' >&2
-  if [[ -n "$old_target" ]]; then
-    ln -sfn "$old_target" "$link"; mv -Tf "$link" "$CURRENT"
-    systemctl daemon-reload
-    systemctl restart ghulakh-egress.service || true
-    systemctl restart ghulakh-server.service || true
-  else
-    systemctl disable --now ghulakh-server.service ghulakh-egress.service || true
-    rm -f "$CURRENT"
-    systemctl daemon-reload
-  fi
-  die "Deployment activation failed. Previous release restored when available; persistent configuration was preserved."
+
+  printf 'Activation failed; restoring the previous release, units, marker and service state.\n' >&2
+  rollback_activation || rollback_failed=1
+  trap - HUP INT TERM
+  if (( rollback_failed )); then die "Deployment activation failed and rollback was incomplete; inspect $transaction_dir."; fi
+  die "Deployment activation failed. Previous deployment state was restored; persistent configuration was preserved."
 }
 credential() {
   require_root
