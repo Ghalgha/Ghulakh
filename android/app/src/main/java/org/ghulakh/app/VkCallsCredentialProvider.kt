@@ -457,7 +457,7 @@ object VkCallsCredentialProvider {
         }
     }
 
-    private fun checkApiError(json: JSONObject) {
+    internal fun checkApiError(json: JSONObject) {
         val error = json.optJSONObject("error")
         if (error != null) {
             val code = error.optInt("error_code", -1)
