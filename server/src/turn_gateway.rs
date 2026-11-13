@@ -86,11 +86,10 @@ fn destination_allowed(address: IpAddr) -> bool {
                     && (rem == 0 || (s[whole] >> (16-rem)) == (p[whole] >> (16-rem)))
             };
             prefix([0x2000,0,0,0],3)
-                && !prefix([0x2001,0x0db8,0,0],32)
-                && !prefix([0x2001,0x0002,0,0],48)
-                && !prefix([0x2001,0x0010,0,0],28)
-                && !prefix([0x2002,0,0,0],16)
-                && !prefix([0x3fff,0,0,0],20)
+                && !prefix([0x2001,0,0,0],23) // IETF protocol assignments
+                && !prefix([0x2001,0x0db8,0,0],32) // documentation
+                && !prefix([0x2002,0,0,0],16) // 6to4
+                && !prefix([0x3fff,0,0,0],20) // documentation
         }
     }
 }
