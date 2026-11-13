@@ -47,7 +47,7 @@ fn make_protected_socket(env: &mut JNIEnv, service: &JObject) -> Result<Option<U
             &[JValue::Int(socket.as_raw_fd())],
         )?
         .z()?;
-    anyhow::ensure!(protected, "Android VpnService refused to protect QUIC socket");
+    anyhow::ensure!(protected, "Android VpnService refused to protect TURN socket");
     Ok(Some(socket))
 }
 
