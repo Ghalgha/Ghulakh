@@ -26,6 +26,7 @@ class VkCallsSession(
     }
 
     fun finish() {
+        synchronized(this) { pendingTurnCredentialsJson = null }
         finishOnce {
             finishAction?.invoke() ?: VkCallsCredentialProvider.finishConversation(
                 apiUrl,
@@ -58,6 +59,7 @@ internal class VkCallsCredentialGroup(
     }
 
     fun finish() {
+        synchronized(this) { pendingTurnCredentialsJson = null }
         credentialBroker.finish()
         ownerSession.finish()
     }
