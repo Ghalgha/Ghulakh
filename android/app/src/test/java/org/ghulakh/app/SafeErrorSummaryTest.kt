@@ -13,7 +13,7 @@ class SafeErrorSummaryTest {
 
         val summary = safeErrorSummary(error)
 
-        assertEquals("Operation failed (IllegalStateException)", summary)
+        assertEquals("Операция завершилась ошибкой (IllegalStateException)", summary)
         listOf("vk-secret", "turn-secret", "hidden", "access_token", "password").forEach {
             assertFalse(summary.contains(it))
         }
@@ -21,12 +21,12 @@ class SafeErrorSummaryTest {
 
     @Test
     fun knownNetworkAndCredentialErrorsExposeOnlySafeCategories() {
-        assertEquals("VK Calls HTTP request failed (status 503)", safeErrorSummary(VkCallsHttpException(503)))
+        assertEquals("Ошибка запроса VK Calls (HTTP 503)", safeErrorSummary(VkCallsHttpException(503)))
         assertEquals(
-            "Android Keystore key is unavailable",
+            "Ключ Android Keystore недоступен",
             safeErrorSummary(CredentialStoreException.KeyUnavailable(IllegalStateException("secret=hidden"))),
         )
-        assertEquals("Network operation timed out", safeErrorSummary(java.net.SocketTimeoutException("token=hidden")))
+        assertEquals("Сетевой запрос превысил время ожидания", safeErrorSummary(java.net.SocketTimeoutException("token=hidden")))
     }
 
     @Test
