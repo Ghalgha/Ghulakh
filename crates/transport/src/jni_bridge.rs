@@ -2,8 +2,6 @@
 #![allow(non_snake_case)]
 
 use crate::{
-    ClientOptions,
-    QuicClient,
     turn_client::{TurnClientPathGroup, TurnClientRuntime},
     turn_credentials::TurnCredentials,
 };
@@ -31,44 +29,6 @@ use jni::objects::JValue;
 struct NativeTurnSession {
     client: TurnClientPathGroup,
     runtime: Runtime,
-}
-
-struct NativeSession {
-    // Keep the runtime alive until after the QUIC client is dropped.
-    client: QuicClient,
-    runtime: Runtime,
-}
-
-static SESSIONS: OnceLock<Mutex<HashMap<jlong, Arc<NativeSession>>>> = OnceLock::new();
-
-fn sessions() -> &'static Mutex<HashMap<jlong, Arc<NativeSession>>> {
-    SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-static TURN_SESSIONS: OnceLock<Mutex<HashMap<jlong, Arc<NativeTurnSession>>>> = OnceLock::new();
-
-fn turn_sessions() -> &'static Mutex<HashMap<jlong, Arc<NativeTurnSession>>> {
-    TURN_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn turn_session(handle: jlong) -> Result<Arc<NativeTurnSession>> {
-    let registry = turn_sessions()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("native TURN session registry is unavailable"))?;
-    registry
-        .get(&handle)
-        .cloned()
-        .context("unknown native TURN session handle")
-}
-
-fn session(handle: jlong) -> Result<Arc<NativeSession>> {
-    let registry = sessions()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?;
-    registry
-        .get(&handle)
-        .cloned()
-        .context("unknown native session handle")
 }
 
 
@@ -99,65 +59,6 @@ fn make_protected_socket(_env: &mut JNIEnv, service: &JObject) -> Result<Option<
     );
     Ok(None)
 }
-
-fn connect_impl(
-    env: &mut JNIEnv,
-    vpn_service: JObject,
-    host: JString,
-    port: jint,
-    server_name: JString,
-    root_certificate_der: JByteArray,
-    credential: JString,
-) -> Result<jlong> {
-    let host = env.get_string(&host)?.to_string_lossy().into_owned();
-    let server_name = env
-        .get_string(&server_name)?
-        .to_string_lossy()
-        .into_owned();
-    let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
-    let root_certificate_der = env.convert_byte_array(root_certificate_der)?;
-
-    let port = u16::try_from(port).context("server port is invalid")?;
-    anyhow::ensure!(port != 0, "server port must not be zero");
-
-    let udp_socket = make_protected_socket(env, &vpn_service)?;
-    let runtime = Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .context("create native Tokio runtime")?;
-    let server_addr: SocketAddr = runtime.block_on(async {
-        let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
-        let address = if udp_socket.is_some() {
-            addresses.find(SocketAddr::is_ipv4)
-        } else {
-            addresses.next()
-        };
-        address.context("server host did not resolve to a supported address")
-    })?;
-    let client = runtime.block_on(QuicClient::connect(ClientOptions {
-        server_addr,
-        server_name,
-        root_certificate_der,
-        credential,
-        udp_socket,
-    }))?;
-
-    let native_session = Arc::new(NativeSession { client, runtime });
-    let mut registry = sessions()
-        .lock()
-        .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?;
-    let handle = loop {
-        let mut bytes = [0u8; 8];
-        OsRng.fill_bytes(&mut bytes);
-        let candidate = (u64::from_be_bytes(bytes) & i64::MAX as u64) as jlong;
-        if candidate != 0 && !registry.contains_key(&candidate) {
-            break candidate;
-        }
-    };
-    let _previous = registry.insert(handle, native_session);
-    Ok(handle)
-}
-
 
 struct TurnConnectArgs<'local> {
     vpn_service: JObject<'local>,
@@ -417,55 +318,6 @@ fn close_turn_impl(handle: jlong) -> Result<()> {
     Ok(())
 }
 
-fn send_packet_impl(env: &mut JNIEnv, handle: jlong, packet: JByteArray) -> Result<()> {
-    let packet = env.convert_byte_array(packet)?;
-    let first_byte = *packet.first().context("IP packet is empty")?;
-    let kind = IpPacketKind::try_from(first_byte >> 4)?;
-    let session = session(handle)?;
-    let datagram = DataDatagram { kind, packet };
-    session.runtime.block_on(session.client.send_packet(&datagram))
-}
-
-fn receive_packet_impl(handle: jlong) -> Result<Vec<u8>> {
-    let session = session(handle)?;
-    session.runtime.block_on(async {
-        let packet = session.client.receive_packet().await?;
-        Ok::<Vec<u8>, anyhow::Error>(packet.packet)
-    })
-}
-
-fn client_ipv4_impl(handle: jlong) -> Result<String> {
-    let session = session(handle)?;
-    Ok(session.client.client_ipv4().to_owned())
-}
-
-fn tunnel_enabled_impl(handle: jlong) -> Result<bool> {
-    let session = session(handle)?;
-    Ok(session.client.tunnel_enabled())
-}
-
-fn forwarding_enabled_impl(handle: jlong) -> Result<bool> {
-    let session = session(handle)?;
-    Ok(session.client.forwarding_enabled())
-}
-
-fn ping_impl(handle: jlong) -> Result<()> {
-    let session = session(handle)?;
-    session.runtime.block_on(session.client.ping())
-}
-
-fn close_impl(handle: jlong) -> Result<()> {
-    let session = {
-        let mut registry = sessions()
-            .lock()
-            .map_err(|_| anyhow::anyhow!("native session registry is unavailable"))?;
-        registry.remove(&handle)
-    }
-    .context("unknown native session handle")?;
-    session.client.close();
-    Ok(())
-}
-
 fn is_turn_allocation_quota_error(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
@@ -641,6 +493,7 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClientIpv6
     }
 }
 
+#[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnMtu(
     mut env: JNIEnv,
     _this: JObject,
@@ -665,151 +518,6 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnClose(
         throw_error(&mut env, "java/lang/IllegalStateException", error);
     }
 }
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeConnect(
-    mut env: JNIEnv,
-    _this: JObject,
-    vpn_service: JObject,
-    host: JString,
-    port: jint,
-    server_name: JString,
-    root_certificate_der: JByteArray,
-    credential: JString,
-) -> jlong {
-    match connect_impl(
-        &mut env,
-        vpn_service,
-        host,
-        port,
-        server_name,
-        root_certificate_der,
-        credential,
-    ) {
-        Ok(handle) => handle,
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeSendPacket(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-    packet: JByteArray,
-) -> jboolean {
-    match send_packet_impl(&mut env, handle, packet) {
-        Ok(()) => 1,
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeReceivePacket(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jbyteArray {
-    match receive_packet_impl(handle) {
-        Ok(packet) => match env.byte_array_from_slice(&packet) {
-            Ok(array) => array.into_raw(),
-            Err(error) => {
-                throw_error(&mut env, "java/lang/IllegalStateException", error);
-                std::ptr::null_mut()
-            }
-        },
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            std::ptr::null_mut()
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativePing(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
-    match ping_impl(handle) {
-        Ok(()) => 1,
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeClose(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) {
-    if let Err(error) = close_impl(handle) {
-        throw_error(&mut env, "java/lang/IllegalStateException", error);
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeClientIpv4(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jstring {
-    match client_ipv4_impl(handle) {
-        Ok(address) => match env.new_string(address) {
-            Ok(value) => value.into_raw(),
-            Err(error) => {
-                throw_error(&mut env, "java/lang/IllegalStateException", error);
-                std::ptr::null_mut()
-            }
-        },
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            std::ptr::null_mut()
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTunnelEnabled(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
-    match tunnel_enabled_impl(handle) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            0
-        }
-    }
-}
-
-#[no_mangle]
-pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeForwardingEnabled(
-    mut env: JNIEnv,
-    _this: JObject,
-    handle: jlong,
-) -> jboolean {
-    match forwarding_enabled_impl(handle) {
-        Ok(true) => 1,
-        Ok(false) => 0,
-        Err(error) => {
-            throw_error(&mut env, "java/lang/IllegalStateException", error);
-            0
-        }
-    }
-}
-
 
 #[cfg(test)]
 mod turn_quota_error_tests {
