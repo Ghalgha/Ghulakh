@@ -19,7 +19,10 @@ data class ConnectionProfile(
     val rootCertificateDer: ByteArray,
     val vkAccessToken: String = "",
     val pinnedServerPublicKeyHex: String = "",
-)
+) {
+    override fun toString(): String =
+        "ConnectionProfile(host=$host, port=$port, serverName=$serverName, credential=<redacted>, rootCertificateDer=<redacted>, vkAccessToken=<redacted>, pinnedServerPublicKeyHex=<redacted>)"
+}
 
 /** Stores the VK access token, tunnel credential and pinned Noise key encrypted with Android Keystore. */
 class CredentialStore(context: Context) {
