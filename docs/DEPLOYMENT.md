@@ -1,92 +1,113 @@
-# Развёртывание сервера (текущая ручная процедура)
+# Развёртывание сервера
 
-Документ описывает существующий runtime и административные действия. Полного автоматического installer/update/uninstaller в репозитории нет. Системные sysctl, маршруты и host firewall настраивает и подтверждает администратор; приложение не меняет их скрытно. Автоматические тесты проверяют локальную композицию и изолированную Linux egress policy, но live VK Calls relay и сквозной Android/VPS путь не подтверждены.
+Документ описывает установку, обновление и удаление серверного runtime. Установщик управляет только собственными каталогами, двумя systemd units и собственными nftables tables. Он не устанавливает пакеты, не меняет sysctl, маршруты, глобальную политику firewall, INPUT rules или чужие службы.
 
-## 1. Создать постоянную Noise keypair
+## Требования
 
-Выполнить один раз на сервере:
+- Linux с работающим systemd.
+- Root для установки и управления службами.
+- /dev/net/tun как character device.
+- net.ipv4.ip_forward=1 и net.ipv6.conf.all.forwarding=1, настроенные администратором и сохранённые в конфигурации ОС.
+- Команды ip, nft, runuser, useradd, python3, systemctl, systemd-analyze.
+- Доступный WAN-интерфейс.
+- Linux release binary ghulakh-server, собранный для архитектуры сервера.
 
-~~~sh
-cargo run -p ghulakh-server -- --generate-noise-keypair /etc/ghulakh/noise_private.hex /etc/ghulakh/noise_public.hex
+Установщик не загружает бинарники из сети и не устанавливает системные пакеты. Перед передачей бинарника на сервер проверьте его происхождение и SHA-256 по доверенному каналу.
+
+## Сборка
+
+На Linux build host из корня репозитория:
+
+~~~
+cargo build --release --locked -p ghulakh-server
 ~~~
 
-Команда отказывается перезаписывать существующие файлы; private key создаётся с правами 0600 на Unix. Хранить private key только для service account. Публичный ключ закрепить в Android profile. Не генерировать новую пару при обычном перезапуске.
+Ожидаемый бинарник: `target/release/ghulakh-server`.
 
-## 2. Создать device credential
+## Первая установка
 
-Создать высокоэнтропийный отдельный credential для каждого устройства. На сервере хранить только SHA-256 digest — по одному lowercase hex digest на строку:
+Если на сервере уже существует /etc/ghulakh или /var/lib/ghulakh, не меняйте владельца автоматически: установщик остановится, если каталог не принадлежит service account. Выполните миграцию прав вручную после проверки содержимого.
 
-~~~sh
-printf '%s' "$DEVICE_CREDENTIAL" | sha256sum | awk '{print $1}'
+Скопируйте бинарник и каталог tools/ на сервер, сохранив рядом файлы:
+- deploy-server.sh
+- configure-egress-nftables.sh
+- create_credential.py
+
+Укажите фактический WAN-интерфейс и подходящий режим IPv6:
+
+~~~
+sudo bash tools/deploy-server.sh install \
+  --binary /absolute/path/to/ghulakh-server \
+  --wan-interface eth0 \
+  --ipv6-mode nat66
 ~~~
 
-Raw credential вводится в Android profile. Не смешивать его с VK access token, временными TURN credentials или Noise private key. Файл digest должен быть доступен только серверному service account.
+Используйте routed вместо nat66 только при наличии проверенного upstream-маршрута к клиентскому IPv6-префиксу.
 
-## 3. Настроить серверный runtime
+При первой установке создаются системная учётная запись ghulakh, постоянные каталоги, Noise keypair, digest-файл device credentials, EnvironmentFile, release directory и systemd units. Секрет первого устройства и публичный Noise key выводятся в терминал. Сохраните credential и закрепите public key в Android profile. Credential показывается только при создании; digest хранится на сервере.
 
-~~~sh
-GHULAKH_CREDENTIAL_HASHES=/etc/ghulakh/device-credentials.sha256
-GHULAKH_TUN_ENABLED=true
-GHULAKH_FORWARDING_ENABLED=true
-GHULAKH_TUN_NAME=ghulakh0
-GHULAKH_TURN_GATEWAY_BIND=0.0.0.0:4434
-GHULAKH_NOISE_PRIVATE_KEY=/etc/ghulakh/noise_private.hex
-GHULAKH_NOISE_PUBLIC_KEY=/etc/ghulakh/noise_public.hex
+Установщик включает и запускает:
+- ghulakh-egress.service: устанавливает только принадлежащие приложению nftables tables через configure-egress-nftables.sh; при остановке удаляет только эти таблицы после проверки ownership marker;
+- ghulakh-server.service: запускает сервер от непривилегированного пользователя ghulakh с CAP_NET_ADMIN и доступом к /dev/net/tun.
+
+Сервис не может менять sysctl благодаря systemd hardening. Серверный EnvironmentFile находится в /etc/ghulakh/server.env.
+
+## Добавление устройства
+
+~~~
+sudo bash tools/deploy-server.sh credential
 ~~~
 
-Открыть выбранный UDP gateway port только в соответствии с проверенной host firewall policy. Точные VK relay address ranges не придумывать: они не подтверждены live capture.
+Команда генерирует отдельный 256-битный credential, добавляет только SHA-256 digest в серверный файл и выводит исходный секрет один раз. Передайте его устройству по защищённому каналу. Не копируйте секрет в логи, Git или тикеты.
 
-Сервер проверяет наличие включённого IPv4 forwarding и global IPv6 forwarding, но не включает их автоматически. Администратор должен настроить persistent sysctl после оценки влияния на хост:
+## Обновление
 
-~~~ini
-net.ipv4.ip_forward=1
-net.ipv6.conf.all.forwarding=1
+Соберите и передайте новый бинарник, затем выполните ту же команду с действующими WAN/IPv6 параметрами:
+
+~~~
+sudo bash tools/deploy-server.sh update \
+  --binary /absolute/path/to/new-ghulakh-server \
+  --wan-interface eth0 \
+  --ipv6-mode nat66
 ~~~
 
-TUN использует IPv4 10.77.0.1/16, IPv6 fd77:77::1/64, MTU 1100. Клиентские IPv4/IPv6 адреса выделяются и проверяются сервером отдельно. Публичный IPv6 egress не возникает автоматически из-за наличия IPv6 адреса в TUN.
+Новая версия размещается в отдельном release directory. Активная ссылка переключается атомарно. Если перезапуск не проходит, установщик возвращает предыдущую ссылку и пытается восстановить прежнюю службу. Предыдущие release directories сохраняются для ручного восстановления. WAN interface и IPv6 mode нельзя менять через update: для изменения сетевой топологии требуется отдельная проверенная процедура.
 
-## 4. Проверить маршруты и установить egress policy
+Обновление не перезаписывает server.env, Noise keys или credential digests.
 
-Сначала определить фактический WAN interface и выбрать режим:
-- nat66 — если upstream не маршрутизирует клиентский ULA prefix;
-- routed — только если upstream имеет явный рабочий маршрут к выделенному клиентскому IPv6 prefix.
+## Проверка состояния
 
-Установка policy:
-
-~~~sh
-sudo bash tools/configure-egress-nftables.sh ghulakh0 <WAN_IF> nat66
+~~~
+sudo bash tools/deploy-server.sh status
+sudo systemctl status ghulakh-server.service ghulakh-egress.service
+sudo journalctl -u ghulakh-server.service -u ghulakh-egress.service
 ~~~
 
-Для routed IPv6 заменить последний аргумент на routed.
+## Удаление
 
-Скрипт управляет только таблицами inet ghulakh_egress, ip ghulakh_nat4 и ip6 ghulakh_nat6. Он ограничивает TUN source prefixes, блокирует private/special destinations и unsolicited return traffic, разрешает established replies и настраивает IPv4 NAT плюс выбранную IPv6 policy. Он не меняет глобальный FORWARD policy, INPUT rules, sysctl, маршруты или чужие nftables tables. Drop в другой base chain по-прежнему может блокировать traffic.
-
-Проверить полную конфигурацию до включения GHULAKH_FORWARDING_ENABLED=true. Удалить только собственные таблицы:
-
-~~~sh
-sudo bash tools/configure-egress-nftables.sh --remove
+~~~
+sudo bash tools/deploy-server.sh uninstall
 ~~~
 
-Удаление этих таблиц не восстанавливает sysctl или маршруты, поскольку скрипт их не меняет.
+Требуется точный ввод REMOVE GHULAKH. Удаляются только проверенные собственные systemd units, release directories, активная ссылка и принадлежащие приложению nftables tables. Сохраняются /etc/ghulakh (EnvironmentFile, Noise keys, credential digests), /var/lib/ghulakh и системная учётная запись. Они оставлены намеренно, чтобы удаление runtime не уничтожало ключи и учётные данные. Удалять их можно отдельно после резервного копирования и ручной проверки.
 
-## 5. Настроить Android profile
+Если unit-файл изменён администратором или не содержит маркер установщика, удаление останавливается вместо удаления неизвестной конфигурации.
 
-Указать gateway hostname/IP и UDP port, отдельный device credential, VK account access token и pinned Noise server public key. VK access token вводится вручную и сохраняется в составе полного connection profile, зашифрованного Android Keystore AES-GCM. In-app OAuth/login не реализован. При потере Keystore key профиль не расшифровывается и не заменяется автоматически.
+## Сетевые границы
 
-Во время соединения приложение получает временные TURN credentials через VK Calls provider. Эти credentials краткоживущие и не являются ключами шифрования туннеля.
+Установщик не меняет:
+- net.ipv4.ip_forward, IPv6 forwarding или другие sysctl;
+- маршруты, policy routing и RA;
+- host INPUT rules и UDP-доступ к gateway;
+- чужие nftables tables/chains;
+- настройки SSH, DNS, package manager, Docker или другие службы.
 
-## 6. Проверить изолированную сетевую политику
+Egress unit использует только собственные таблицы inet ghulakh_egress, ip ghulakh_nat4 и, для nat66, ip6 ghulakh_nat6. Если такие таблицы уже установлены вручную, перед запуском unit удалите их только штатной командой sudo bash tools/configure-egress-nftables.sh --remove после проверки ownership marker. Не сохраняйте параллельную копию этих таблиц в другом firewall startup config.
 
-~~~sh
-sudo bash tools/test-network-namespaces.sh
-~~~
+Входящий UDP-порт gateway по умолчанию 4434. Разрешение входящего трафика в существующем INPUT firewall остаётся отдельным решением администратора. Установщик его не открывает.
 
-Тест создаёт network namespaces/veth, проверяет IPv4 NAT, IPv6 NAT66 и routed mode, обратный established traffic и firewall drops. Дополнительный сценарий в PR №12 проверяет IPv4/IPv6 `fwmark` policy routing: маркированные пакеты намеренно направляются через посторонний интерфейс; rogue peer не должен получить ни один пакет, а TUN catch-all drop должен сработать. Для PR №12 все три CI jobs прошли на head `2289e4c8718ad5a4372a53c878126e2c76f845db`; сценарий включён в `main` коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Он не меняет внешние маршруты хоста и не подтверждает поведение конкретного VPS provider. Дополнительно вручную проверить WAN interface/default routes, конфликты nftables, UDP gateway port, sysctl/IPv6 RA и отсутствие forwarding к private, loopback, link-local и multicast destinations.
+## Проверки и ограничения
 
-## 7. Ограничения
+Автоматические deployment checks проверяют shell syntax, ключевые lifecycle invariants, отсутствие глобальных сетевых мутаций и отсутствие широкого удаления системных каталогов. Linux namespace tests отдельно проверяют egress policy.
 
-- Только UDP TURN endpoint; TCP/TLS/TURNS не поддерживаются текущим socket driver.
-- Live VK Calls API, relay allocation, auth profile, quota/expiry и endpoint rotation не подтверждены.
-- IPv6 tunnel transport реализован; публичный IPv6 egress требует корректного upstream route или NAT66.
-- Server deployment lifecycle автоматизирован не полностью. Не запускать непроверенные install scripts на том же хосте.
-- Физические Android/VPS тесты остаются заключительным этапом.
+Эти проверки не доказывают успешный запуск на конкретном VPS, доступность UDP-порта у провайдера, корректность host firewall, live VK TURN relay или сквозной Android → relay → VPS → Internet маршрут. До таких проверок проект остаётся исследовательской системой, а не production VPN.
