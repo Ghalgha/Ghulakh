@@ -40,7 +40,7 @@ pub enum TurnDriverError {
     Challenge(ghulakh_protocol::turn_auth::TurnChallenge),
     #[error("TURN server returned an error response (code {code})")]
     ServerError { code: u16 },
-    #[error("TURN rejected the active credentials (STUN error 401 or 441)")]
+    #[error("TURN rejected the active credentials (STUN error 401, 438, or 441)")]
     CredentialsRejected,
     #[error("TURN response was not authenticated")]
     MissingAuthentication,
