@@ -73,10 +73,10 @@ class GhulakhVpnService : VpnService() {
         var recoverySupervisor: Thread? = null
         var vkAccessToken: String? = null
         try {
-            var loadedProfile = CredentialStore(this).load()
+            var loadedProfile: ConnectionProfile? = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
-            vkAccessToken = loadedProfile.vkAccessToken
-            val profile = loadedProfile.copy(vkAccessToken = "")
+            vkAccessToken = checkNotNull(loadedProfile).vkAccessToken
+            val profile = checkNotNull(loadedProfile).copy(vkAccessToken = "")
             loadedProfile = null
             val transport = NativeTransport()
             val rejectedCredentialFingerprints = mutableSetOf<String>()
