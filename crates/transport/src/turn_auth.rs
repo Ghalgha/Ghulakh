@@ -51,7 +51,7 @@ pub struct TurnAuthContext {
     integrity_key: Zeroizing<Vec<u8>>,
     algorithm: TurnIntegrityAlgorithm,
     password_algorithm: Option<PasswordAlgorithmId>,
-    password_algorithms: Option<Vec<u8>>,
+    password_algorithms: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl TurnAuthContext {
@@ -62,7 +62,7 @@ impl TurnAuthContext {
     pub fn new_vk_calls_legacy(
         username: String,
         password: &str,
-        challenge: TurnChallenge,
+        mut challenge: TurnChallenge,
     ) -> Result<Self, TurnAuthError> {
         if challenge.password_algorithms.is_some() {
             return Err(TurnAuthError::InvalidPasswordProfile);
@@ -70,13 +70,15 @@ impl TurnAuthContext {
         let mut digest = Md5::new();
         digest.update(username.as_bytes());
         digest.update(b":");
-        digest.update(challenge.realm.as_bytes());
+        let realm = std::mem::take(&mut challenge.realm);
+        let nonce = std::mem::take(&mut challenge.nonce);
+        digest.update(realm.as_bytes());
         digest.update(b":");
         digest.update(password.as_bytes());
         Self::new(
             username,
-            challenge.realm,
-            challenge.nonce,
+            realm,
+            nonce,
             digest.finalize().to_vec(),
             TurnIntegrityAlgorithm::Sha1,
         )
@@ -159,7 +161,7 @@ impl TurnAuthContext {
             integrity_key: Zeroizing::new(integrity_key),
             algorithm,
             password_algorithm,
-            password_algorithms,
+            password_algorithms: password_algorithms.map(Zeroizing::new),
         })
     }
 
@@ -189,7 +191,7 @@ impl TurnAuthContext {
         if let Some(offered) = &self.password_algorithms {
             authenticated.attributes.push(StunAttribute {
                 kind: ghulakh_protocol::stun::ATTR_PASSWORD_ALGORITHMS,
-                value: offered.clone(),
+                value: offered.to_vec(),
             });
         }
         match self.algorithm {
