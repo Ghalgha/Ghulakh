@@ -377,19 +377,20 @@ impl TurnClientDriver {
                     return Ok(response);
                 }
                 _ = tokio::time::sleep(POLL_INTERVAL) => {
-                    for event in self.transactions.poll(Instant::now()) {
-                        match event {
+                    for mut event in self.transactions.poll(Instant::now()) {
+                        match &mut event {
                             TransactionEvent::Retransmit { request, destination, .. } => {
-                                if destination != self.relay_endpoint {
+                                if *destination != self.relay_endpoint {
                                     self.transactions.cancel(&id);
                                     anyhow::bail!("TURN retry destination changed");
                                 }
-                                if let Err(error) = actor.send_datagram(request).await {
+                                let retransmission = std::mem::take(request);
+                                if let Err(error) = actor.send_datagram(retransmission).await {
                                     self.transactions.cancel(&id);
                                     return Err(error).context("retransmit TURN request");
                                 }
                             }
-                            TransactionEvent::TimedOut { transaction_id, .. } if transaction_id == id => {
+                            TransactionEvent::TimedOut { transaction_id, .. } if *transaction_id == id => {
                                 return Err(TurnDriverError::Timeout.into());
                             }
                             TransactionEvent::TimedOut { .. } => {}
