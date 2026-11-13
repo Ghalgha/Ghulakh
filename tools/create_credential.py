@@ -66,7 +66,7 @@ def main() -> int:
                 digest_file.write(digest)
                 digest_file.flush()
                 os.fsync(digest_file.fileno())
-                sys.stdout.write(credential + "\\n")
+                sys.stdout.write(credential + "\n")
                 sys.stdout.flush()
             except BaseException:
                 os.ftruncate(digest_file.fileno(), original_size)
@@ -76,7 +76,6 @@ def main() -> int:
         sys.stderr.write(f"Credential creation refused: {error}\n")
         return 1
 
-    sys.stdout.write(credential + "\n")
     sys.stderr.write("Credential created. Store the displayed secret securely; the server file contains only its SHA-256 digest.\n")
     return 0
 
