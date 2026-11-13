@@ -84,6 +84,11 @@ if ip netns exec "$U" ping -6 -c 1 -W 1 fd77:77::2; then
   echo "FAIL: unsolicited IPv6 forwarding was not blocked" >&2
   exit 1
 fi
-ip netns exec "$R" nft list chain ip nat4 postrouting | grep -q masquerade
-ip netns exec "$R" nft list chain ip6 nat6 postrouting | grep -q masquerade
-echo "PASS: IPv4 NAT, IPv6 NAT66, return traffic and unsolicited-forward blocking"
+ip netns exec "$R" nft list chain ip nat4 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain ip6 nat6 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
+
+# Verify routed IPv6 without NAT66: the upstream has an explicit route to
+# the client prefix, so the original fd77:: source must remain routable.
+ip netns exec "$R" nft delete table ip6 nat6
+ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff
+echo "PASS: IPv4 NAT, IPv6 NAT66, native IPv6 routing, return traffic and unsolicited-forward blocking"
