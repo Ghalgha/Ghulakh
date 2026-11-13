@@ -406,7 +406,7 @@ impl TurnClientDriver {
 mod socket_actor_integration_tests {
     use super::*;
     use ghulakh_protocol::stun::{
-        StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM,
+        StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, METHOD_ALLOCATE,
     };
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 

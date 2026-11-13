@@ -251,8 +251,15 @@ mod tests {
 #[cfg(test)]
 mod keepalive_fault_injection_tests {
     use super::*;
+
+    const CHANNEL: u16 = 0x4001;
+    const SESSION: [u8; 8] = [0x31; 8];
+    const CLIENT_KEY: [u8; 32] = [0x11; 32];
+    const SERVER_KEY: [u8; 32] = [0x22; 32];
+    const CLIENT_PREFIX: [u8; 4] = [0x41; 4];
+    const SERVER_PREFIX: [u8; 4] = [0x52; 4];
     use ghulakh_protocol::{
-        secure_frame::{keepalive_request, FrameDirection, FrameOpener},
+        secure_frame::{keepalive_request, FrameDirection, FrameOpener, FrameSealer},
         turn_channel_data::decode_channel_data,
     };
     use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
