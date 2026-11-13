@@ -392,7 +392,7 @@ fn is_turn_credentials_rejected(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<crate::turn_driver::TurnDriverError>(),
-            Some(crate::turn_driver::crate::turn_driver::TurnDriverError::CredentialsRejected)
+            Some(crate::turn_driver::TurnDriverError::CredentialsRejected)
         )
     })
 }
