@@ -10,6 +10,27 @@ import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
+/** Drops references held by parsed JSON containers; JVM String contents cannot be zeroized. */
+internal fun clearJsonStringReferences(value: Any?) {
+    when (value) {
+        is JSONObject -> {
+            val keys = value.keys()
+            val names = mutableListOf<String>()
+            while (keys.hasNext()) names += keys.next()
+            names.forEach { key ->
+                clearJsonStringReferences(value.opt(key))
+                value.remove(key)
+            }
+        }
+        is JSONArray -> {
+            for (index in 0 until value.length()) {
+                clearJsonStringReferences(value.opt(index))
+                value.put(index, "")
+            }
+        }
+    }
+}
+
 class VkCallsSession(
     turnCredentialsJson: String,
     apiUrl: String,
@@ -108,6 +129,7 @@ object VkCallsCredentialProvider {
         val callToken = tokenData.getString("token")
         require(callToken.isNotBlank()) { "VK did not return a Calls token" }
         val apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
+        clearJsonStringReferences(tokenResponse)
 
         val sessionData = JSONObject()
             .put("auth_token", callToken)
@@ -129,8 +151,13 @@ object VkCallsCredentialProvider {
                 "application_key" to OK_APPLICATION_KEY,
             ),
         )
-        val sessionKey = login.getString("session_key")
-        require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
+        val sessionKey = try {
+            login.getString("session_key").also {
+                require(it.isNotBlank()) { "Calls backend returned an empty session key" }
+            }
+        } finally {
+            clearJsonStringReferences(login)
+        }
 
         val conversationId = UUID.randomUUID().toString()
         val payload = JSONObject()
@@ -186,6 +213,7 @@ object VkCallsCredentialProvider {
                 ?: throw IllegalStateException("VK Calls returned no TURN URLs")
             require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
             val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+            clearJsonStringReferences(parameters)
             return VkCallsSession(
                 turnCredentialsJson = credentialsJson,
                 apiUrl = apiUrl,
@@ -284,6 +312,7 @@ object VkCallsCredentialProvider {
         val callToken = tokenData.getString("token")
         require(callToken.isNotBlank()) { "VK did not return a Calls token" }
         val apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
+        clearJsonStringReferences(tokenResponse)
         val sessionData = JSONObject()
             .put("auth_token", callToken)
             .put("version", 3)
@@ -304,8 +333,13 @@ object VkCallsCredentialProvider {
                 "application_key" to OK_APPLICATION_KEY,
             ),
         )
-        val sessionKey = login.getString("session_key")
-        require(sessionKey.isNotBlank()) { "Calls backend returned an empty session key" }
+        val sessionKey = try {
+            login.getString("session_key").also {
+                require(it.isNotBlank()) { "Calls backend returned an empty session key" }
+            }
+        } finally {
+            clearJsonStringReferences(login)
+        }
         val parameters = postFormWithRetry(
             apiUrl,
             mapOf(
@@ -330,6 +364,7 @@ object VkCallsCredentialProvider {
             ?: throw IllegalStateException("VK Calls returned no TURN URLs")
         require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
         val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+        clearJsonStringReferences(parameters)
         // This is an auxiliary account session, not the call owner.
         // The source broker leaves these sessions alone; only the owner
         // session performs hangupConversation for the shared conversation.
