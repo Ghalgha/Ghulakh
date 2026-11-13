@@ -192,16 +192,6 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 ip netns exec "$U" nft list chain inet upstream_probe input \
   | grep -F 'ip6 saddr 2606:4700:4700::fffe' | grep -Eq 'counter packets [1-9][0-9]*'
 
-# Verify routed IPv6 without NAT66: the upstream has an explicit route to
-# the client prefix, so the original fd77:: source must remain routable. Use a
-# fresh source address: deleting a NAT chain does not remove existing conntrack
-# NAT mappings, so reusing the NAT66 probe's tuple could test stale NAT state.
-ip netns exec "$R" nft delete table ip6 ghulakh_nat6
-ip -n "$C" -6 addr add fd77:77::3/128 dev c0 nodad
-ip netns exec "$C" ping -6 -I fd77:77::3 -c 2 -W 2 2606:4700:4700::ffff
-ip netns exec "$U" nft list chain inet upstream_probe input \
-  | grep -F 'ip6 saddr fd77:77::3' | grep -Eq 'counter packets [1-9][0-9]*'
-
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
@@ -214,5 +204,19 @@ ip netns exec "$R" nft list chain inet ghulakh_egress forward \
   | grep -F 'ip daddr 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward \
   | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+
+
+# Reinstall the exact production script in routed mode. The upstream route
+# is explicit, so the original ULA source must be observed without NAT66.
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" --remove
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" rc0 ru0 routed
+if ip netns exec "$R" nft list table ip6 ghulakh_nat6 >/dev/null 2>&1; then
+  echo "FAIL: routed mode unexpectedly installed NAT66" >&2
+  exit 1
+fi
+ip -n "$C" -6 addr add fd77:77::3/128 dev c0 nodad
+ip netns exec "$C" ping -6 -I fd77:77::3 -c 2 -W 2 2606:4700:4700::ffff
+ip netns exec "$U" nft list chain inet upstream_probe input \
+  | grep -F 'ip6 saddr fd77:77::3' | grep -Eq 'counter packets [1-9][0-9]*'
 
 echo "PASS: IPv4 NAT, IPv6 NAT66/routing, stateful return traffic, source anti-spoofing, unrelated-ingress isolation and unsolicited-forward drops"
