@@ -86,6 +86,7 @@ fn destination_allowed(address: IpAddr) -> bool {
                     && (rem == 0 || (s[whole] >> (16-rem)) == (p[whole] >> (16-rem)))
             };
             prefix([0x2000,0,0,0],3)
+                && !prefix([0x2000,0,0,0],16) // IETF protocol assignments
                 && !prefix([0x2001,0,0,0],23) // IETF protocol assignments
                 && !prefix([0x2001,0x0db8,0,0],32) // documentation
                 && !prefix([0x2002,0,0,0],16) // 6to4
@@ -2708,7 +2709,7 @@ mod egress_policy_tests {
     }
     #[test]
     fn blocks_non_global_and_special_ipv6_and_allows_global_unicast() {
-        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3fff::1"] {
+        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3fff::1"] {
             assert!(!destination_allowed(a.parse().unwrap()), "{a}");
         }
         assert!(destination_allowed("2606:4700:4700::1111".parse().unwrap()));
