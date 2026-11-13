@@ -359,6 +359,24 @@ deploy() {
   old_egress_active="$(systemctl is-active ghulakh-egress.service 2>/dev/null || true)"
   old_server_active="$(systemctl is-active ghulakh-server.service 2>/dev/null || true)"
 
+  validate_previous_unit_state() {
+    local unit="$1" enabled_state="$2" active_state="$3"
+    case "$enabled_state" in
+      enabled|enabled-runtime|disabled|masked-runtime) ;;
+      *) die "Unsupported previous enablement state for $unit: ${enabled_state:-unknown}; refusing activation because rollback cannot preserve it." ;;
+    esac
+    case "$active_state" in
+      active|inactive) ;;
+      *) die "Unsupported previous activity state for $unit: ${active_state:-unknown}; refusing activation because rollback cannot preserve it." ;;
+    esac
+  }
+  if (( had_old_egress )); then
+    validate_previous_unit_state ghulakh-egress.service "$old_egress_enabled" "$old_egress_active"
+  fi
+  if (( had_old_server )); then
+    validate_previous_unit_state ghulakh-server.service "$old_server_enabled" "$old_server_active"
+  fi
+
   rollback_activation() {
     local failed=0 restore_link
     restore_link="$BASE/.rollback-current.$BASHPID.$RANDOM"
@@ -390,9 +408,10 @@ deploy() {
     systemctl daemon-reload || failed=1
     if (( had_old_egress )); then
       case "$old_egress_enabled" in
-        enabled|enabled-runtime) systemctl enable ghulakh-egress.service || failed=1 ;;
+        enabled) systemctl enable ghulakh-egress.service || failed=1 ;;
+        enabled-runtime) systemctl enable --runtime ghulakh-egress.service || failed=1 ;;
         disabled) systemctl disable ghulakh-egress.service || failed=1 ;;
-        masked|masked-runtime) systemctl mask ghulakh-egress.service || failed=1 ;;
+        masked-runtime) systemctl mask --runtime ghulakh-egress.service || failed=1 ;;
       esac
       if [[ "$old_egress_active" == active ]]; then
         systemctl restart ghulakh-egress.service || failed=1
@@ -404,9 +423,10 @@ deploy() {
     fi
     if (( had_old_server )); then
       case "$old_server_enabled" in
-        enabled|enabled-runtime) systemctl enable ghulakh-server.service || failed=1 ;;
+        enabled) systemctl enable ghulakh-server.service || failed=1 ;;
+        enabled-runtime) systemctl enable --runtime ghulakh-server.service || failed=1 ;;
         disabled) systemctl disable ghulakh-server.service || failed=1 ;;
-        masked|masked-runtime) systemctl mask ghulakh-server.service || failed=1 ;;
+        masked-runtime) systemctl mask --runtime ghulakh-server.service || failed=1 ;;
       esac
       if [[ "$old_server_active" == active ]]; then
         systemctl restart ghulakh-server.service || failed=1
