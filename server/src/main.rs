@@ -599,7 +599,7 @@ async fn main() -> Result<()> {
         let public_path = &args[3];
         anyhow::ensure!(private_path != public_path, "private and public key paths must differ");
         let mut private_hex = Zeroizing::new(hex::encode(keypair.private_key_bytes()));
-        private_hex.push('\\n');
+        private_hex.push('\n');
         let public_hex = format!("{}\n", hex::encode(keypair.public_key()));
         write_noise_key_file(private_path, private_hex.as_bytes(), true)?;
         if let Err(error) = write_noise_key_file(public_path, public_hex.as_bytes(), false) {
