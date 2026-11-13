@@ -18,6 +18,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 2
 fi
 command -v nft >/dev/null || { echo "Missing dependency: nft" >&2; exit 2; }
+command -v ip >/dev/null || { echo "Missing dependency: ip" >&2; exit 2; }
 
 if [[ ${1:-} == "--remove" ]]; then
   [[ $# -eq 1 ]] || usage
@@ -46,7 +47,7 @@ for table in "inet ghulakh_egress" "ip ghulakh_nat4"; do
     exit 2
   fi
 done
-if [[ $IPV6_MODE == "nat66" ]] && nft list table ip6 ghulakh_nat6 >/dev/null 2>&1; then
+if nft list table ip6 ghulakh_nat6 >/dev/null 2>&1; then
   echo "Refusing to overwrite existing table: ip6 ghulakh_nat6 (use --remove first)." >&2
   exit 2
 fi
@@ -70,7 +71,7 @@ table inet ghulakh_egress {
       240.0.0.0/4, 255.255.255.255/32
     } counter drop
     iifname "$TUN_IF" oifname "$WAN_IF" ip6 daddr {
-      ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8, 2001:db8::/32
+      ::/128, ::1/128, ::ffff:0:0/96, 2001::/23, fc00::/7, fe80::/10, ff00::/8, 2001:db8::/32
     } counter drop
 
     iifname "$TUN_IF" oifname "$WAN_IF" ip saddr 10.77.0.0/16 accept
