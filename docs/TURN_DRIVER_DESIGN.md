@@ -1,5 +1,7 @@
 # Проектирование TURN client driver
 
+**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+
 ## Назначение
 
 Документ фиксирует границы первого рабочего TURN-клиента. Поддерживается только UDP TURN endpoint, полученный из VK Calls `turn_server`. TCP/TLS endpoint не должен незаметно подменяться UDP и не входит в текущий вертикальный срез.
@@ -124,4 +126,9 @@ Ring buffer/SPSC и отдельный packet pool вводятся только
 
 ## Условия готовности первого вертикального среза
 
-Первый срез считается готовым только когда автоматический тест проходит всю последовательность: credentials fixture → authenticated Allocate → CreatePermission → ChannelBind → protected uplink → gateway receive/authenticate → reply to relay source tuple → protected downlink → TUN packet. До этого TURN primitives и mock forwarding нельзя называть готовым TURN VPN.
+Первый программный вертикальный срез интегрирован: VK Calls credentials → TURN Allocate/auth challenge → CreatePermission/ChannelBind → Noise XX → protected uplink → authenticated gateway → TUN → protected downlink через relay tuple. Mock UDP integration tests проверяют локальную композицию; это не доказывает совместимость с реальным VK relay.
+
+После изменения recovery logic authenticated Refresh 401 и 441 классифицируются как отказ текущих credentials; 438 сначала обрабатывается как stale-nonce challenge с ограниченным retry; только исчерпание retry для 438 переводит path в recovery с получением новых credentials. Android credential broker выдаёт отдельные credential sets для replacement paths и закрывает auxiliary sessions ровно один раз.
+
+Остаются live auth-profile validation, дополнительные fault/property tests, ресурсные проверки и security review.
+

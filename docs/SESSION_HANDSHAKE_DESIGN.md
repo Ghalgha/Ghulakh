@@ -1,5 +1,7 @@
 # Session authentication and directional key establishment
 
+**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+
 ## Implemented handshake primitive
 
 `crates/protocol/src/session_handshake.rs` implements Noise XX using the standard pattern name:
@@ -18,24 +20,15 @@ TURN allocation credentials authorize use of a relay. They do not authenticate a
 
 ## Current integration and remaining limitations
 
-- Client and server handshake tasks are integrated with the TURN runtime. The client validates the expected relay endpoint and encrypted ServerAck; the server applies bounded admission/rate limits and caches handshake responses before sending them. The authenticated session is registered before ServerAck delivery to avoid a first-uplink race.
-- Handshake response matching and state advancement remain ordered: a matched but unauthenticated response must not complete a retry transaction.
-- Retry scheduling is bounded and owned by the runtime task; retransmission and timeout behavior is covered by deterministic tests, not by live relay measurements.
-- The response cache is bounded globally and per source, uses a fixed TTL, and rejects transaction-key reuse with different request bytes. Handshake queue overload drops the newest handshake datagram and increments a dedicated counter rather than blocking the sole TURN socket reader.
-- Source tuple admission, rate limiting and response caching are implemented in the server handshake service; live traffic characteristics remain untested.
-- Device credentials are checked against configured SHA-256 digests using constant-time comparison; credential revocation currently requires updating the digest file and restarting the server.
-- Server static key persistence and keypair consistency checks are implemented. Secure distribution/rotation of the pinned public key remains an operator responsibility.
-- Server TURN handshake service completes Noise XX, validates the device credential, creates the encrypted session acknowledgement, and registers the authenticated session before the acknowledgement is sent. The mock integration suite covers this ordering; live VK relay compatibility remains unverified.
-- Snow 0.10.0 implements the Noise framework but its own project documentation states it has not received a formal security audit. Treat the integration as research-stage pending dependency review and protocol audit.
-- The current implementation has unit tests for pinned server identity, credential rejection, encrypted server acknowledgement and both directional frame keys. These tests do not establish UDP handshake reliability or VK Calls compatibility.
+The handshake is integrated into the TURN client runtime and server session service. The client driver sends bounded handshake envelopes through the shared TURN socket actor, validates the configured relay endpoint, applies bounded stop-and-wait retry delivery, and returns frame keys only after the encrypted ServerAck is accepted. The server handshake service performs Noise XX authentication, validates the device credential, allocates virtual IPv4/IPv6 addresses, and registers the authenticated session with the TURN gateway.
+
+The envelope remains a demultiplexing/retry container, not an authenticator. Authentication comes from Noise XX and subsequent directional AEAD frames. Mock integration tests exercise the client/server exchange and registration; they do not validate a live VK relay.
 
 ## Remaining validation
 
-1. Validate Noise handshake behavior across real VK TURN relay paths, including loss, duplication, reordering and reconnect.
-2. Integrate the cache lookup before Noise state advancement and cache the exact response before sending it; never advance Noise state twice for a duplicate datagram.
-3. Bind successful handshake results to the verified TURN relayed address, channel number and allocated virtual IPv4.
-4. Register the resulting directional codecs in `TurnGateway` only after the client has received and authenticated the final acknowledgement.
-5. Connect the client result to `TurnDataPlane` and the server result to `TurnGateway`.
+- Independently review the Noise library and complete handshake/session-key composition.
+- Extend deterministic loss, duplication, reordering, timeout, cancellation and concurrent-handshake fault tests.
+- Confirm behavior over a real VK Calls relay only during the late-stage controlled integration phase.
 
 ## TURN datagram envelope primitives
 
