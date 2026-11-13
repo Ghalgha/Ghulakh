@@ -461,8 +461,8 @@ object VkCallsCredentialProvider {
         val error = json.optJSONObject("error")
         if (error != null) {
             val code = error.optInt("error_code", -1)
-            val message = error.optString("error_msg").take(160)
-            throw IllegalStateException("VK Calls API error $code: $message")
+            // Remote error text is untrusted and may echo request credentials.
+            throw IllegalStateException("VK Calls API error $code")
         }
         val okCode = json.optInt("error_code", 0)
         if (okCode != 0) {
