@@ -251,7 +251,7 @@ deploy() {
   fi
   printf "Pinned Noise server public key (hex):\n"
   cat "$NOISE_PUBLIC"
-  link="$BASE/.current.$BASHPID"
+  link="$BASE/.current.$BASHPID.$RANDOM"
   ln -s "$release_dir" "$link"
   mv -Tf "$link" "$CURRENT"
   if ! write_units "$WAN" "$IPV6_MODE"; then
@@ -297,7 +297,11 @@ status() {
 uninstall() {
   require_root
   [[ -f "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
-  [[ -s "$MARKER" ]] && sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
+  if [[ -s "$MARKER" ]]; then
+    sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
+  else
+    [[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]] || die "Unverified partial systemd installation found; refusing uninstall."
+  fi
   for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
     safe_file "$unit" && grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to remove unmanaged or modified unit: $unit"
   done
