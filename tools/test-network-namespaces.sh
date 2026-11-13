@@ -112,6 +112,16 @@ NFT
 
 ip netns exec "$C" ping -c 2 -W 2 1.1.1.253
 
+# Tunnel clients must not reach services bound to the server's own addresses.
+if ip netns exec "$C" ping -c 1 -W 1 10.77.0.1; then
+  echo "FAIL: tunnel client reached the server's local IPv4 address" >&2
+  exit 1
+fi
+if ip netns exec "$C" ping -6 -c 1 -W 1 fd77:77::1; then
+  echo "FAIL: tunnel client reached the server's local IPv6 address" >&2
+  exit 1
+fi
+
 # Warm up IPv6 neighbor discovery using a client-originated packet through NAT66.
 # A bounded retry handles the initial NDP resolution without weakening the
 # subsequent packet-delivery assertion.
@@ -195,6 +205,7 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress input | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip daddr {' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 daddr {' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet host_policy forward | grep -F 'iifname "rx0" oifname "ru0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
