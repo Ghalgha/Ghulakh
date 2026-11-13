@@ -37,7 +37,8 @@ IPV6_MODE=${3:-nat66}
 [[ $WAN_IF =~ ^[a-zA-Z0-9_.-]{1,15}$ ]] || usage
 [[ $TUN_IF != "$WAN_IF" ]] || { echo "TUN and WAN interfaces must differ." >&2; exit 2; }
 [[ $IPV6_MODE == "nat66" || $IPV6_MODE == "routed" ]] || usage
-ip link show "$TUN_IF" >/dev/null 2>&1 || { echo "TUN interface not found: $TUN_IF" >&2; exit 2; }
+# The TUN may be created by the server after this script is installed.
+# nftables matches the interface name and activates the rules when it appears.
 ip link show "$WAN_IF" >/dev/null 2>&1 || { echo "WAN interface not found: $WAN_IF" >&2; exit 2; }
 
 for table in "inet ghulakh_egress" "ip ghulakh_nat4"; do
