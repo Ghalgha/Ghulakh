@@ -1,5 +1,7 @@
 # Проектирование TURN client driver
 
+**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+
 ## Назначение
 
 Документ фиксирует границы первого рабочего TURN-клиента. Поддерживается только UDP TURN endpoint, полученный из VK Calls `turn_server`. TCP/TLS endpoint не должен незаметно подменяться UDP и не входит в текущий вертикальный срез.
@@ -115,13 +117,18 @@ Ring buffer/SPSC и отдельный packet pool вводятся только
 Сопоставление TURN control core в нескольких Rust-реализациях выявило следующие решения:
 
 - Один владелец состояния, отдельные очереди control/events фиксированной ёмкости, ограниченное число pending-транзакций и таймерное обслуживание allocation/permission/channel. Эти свойства подтверждают выбранную модель единственного владельца состояния; mutex в нашем driver не требуется, поскольку операции сериализованы через `&mut self`.
-- В одной реализации начальный RTO равен 200 мс, максимальный RTO — 1600 мс, число передач ограничено семью; также предусмотрены три nonce-retry и периодические keepalive. Для нашего UDP control path сохранён RFC-ориентированный начальный RTO 500 мс, экспоненциальная задержка и ограничение числа передач: более агрессивные 200 мс без измерений на сетях с высокой RTT повышают риск лишних повторов и расхода энергии. Ограниченные nonce-retry и планировщик обслуживания остаются обязательной следующей частью session supervisor.
+- В одной реализации начальный RTO равен 200 мс, максимальный RTO — 1600 мс, число передач ограничено семью; также предусмотрены три nonce-retry и периодические keepalive. Для нашего UDP control path сохранён RFC-ориентированный начальный RTO 500 мс, экспоненциальная задержка и ограничение числа передач: более агрессивные 200 мс без измерений на сетях с высокой RTT повышают риск лишних повторов и расхода энергии. Ограниченный nonce-retry реализован в TurnSessionSupervisor. Обслуживание allocation/permission/channel и его поведение при реальном relay load всё ещё требуют длительной проверки.
 - Более сложная dataplane реализация использует отдельный поток, current-thread runtime, пакетную обработку UDP/TUN, ограниченную очередь команд и restart backoff. Это полезные идеи для последующей оптимизации, но перенос усложнит владение Android TUN и жизненный цикл потоков. До benchmark на одинаковых MTU, RTT, потерях и packet-size distribution сохраняется более простой async путь.
-- Android-реализации с передачей TUN file descriptor в native worker сокращают промежуточную обработку пакетов. Это направление следует учитывать при подключении JNI, но оно не заменяет обязательный вызов `VpnService.protect(fd)` для UDP-сокета TURN и не доказывает преимущество по энергопотреблению без измерений.
+- Android-реализации с передачей TUN file descriptor в native worker сокращают промежуточную обработку пакетов. JNI bridge уже интегрирован с Android VpnService и native TURN runtime; каждый TURN UDP socket должен быть защищён через `VpnService.protect(fd)` до использования. Это не доказывает преимущество по энергопотреблению без измерений.
 - В реализации получения VK Calls credentials обнаружен конкретный anonymous join-link flow, включающий несколько VK/OK CDN API-вызовов и извлечение `turn_server.username`, `credential`, `urls`. В ней также присутствуют фиксированные client/app параметры и имитация TLS/browser-профиля. Поэтому в Ghulakh сохраняется отдельный provider boundary; значения и профиль нельзя считать стабильным публичным API или переносить без проверки актуальности и правомерности использования.
 
 Эти выводы основаны на чтении исходного кода, а не на сопоставимом performance benchmark. Они не дают оснований объявлять одну реализацию более быстрой или энергоэффективной. До измерений выбран минимальный корректный control path с RFC-совместимой политикой retransmission, одним владельцем состояния и ограниченными ресурсами.
 
 ## Условия готовности первого вертикального среза
 
-Первый срез считается готовым только когда автоматический тест проходит всю последовательность: credentials fixture → authenticated Allocate → CreatePermission → ChannelBind → protected uplink → gateway receive/authenticate → reply to relay source tuple → protected downlink → TUN packet. До этого TURN primitives и mock forwarding нельзя называть готовым TURN VPN.
+Первый программный вертикальный срез интегрирован: VK Calls credentials → TURN Allocate/auth challenge → CreatePermission/ChannelBind → Noise XX → protected uplink → authenticated gateway → TUN → protected downlink через relay tuple. Mock UDP integration tests проверяют локальную композицию; это не доказывает совместимость с реальным VK relay.
+
+После изменения recovery logic authenticated Refresh 401 и 441 классифицируются как отказ текущих credentials; 438 сначала обрабатывается как stale-nonce challenge с ограниченным retry; только исчерпание retry для 438 переводит path в recovery с получением новых credentials. Android credential broker выдаёт отдельные credential sets для replacement paths и закрывает auxiliary sessions ровно один раз.
+
+Остаются live auth-profile validation, дополнительные fault/property tests, ресурсные проверки и security review.
+

@@ -1,5 +1,7 @@
 # VK Calls TURN credential flow
 
+**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+
 ## Purpose
 
 The client needs temporary TURN credentials and relay URLs from the VK Calls service. This provider is a control-plane component; it is separate from the TURN allocation state machine and from Ghulakh's tunnel-session authentication.
@@ -62,4 +64,4 @@ This approach avoids embedding account credentials in native networking code, bu
 4. Whether the returned credential profile uses standard TURN long-term credentials and which password algorithm is negotiated by the relay.
 5. Credential lifetime, refresh behavior, endpoint rotation and per-account relay quotas.
 
-The Android app currently implements the authenticated account flow using a manually provisioned VK access token: `messages.getCallToken`, OK CDN session initialization, conversation creation, and `getConversationParams` for additional credential sets. A shared credential broker rejects repeated TURN credential sets and closes the conversation/session group during teardown. The provider is implemented, not merely an interface; however, live VK API compatibility, account permissions, credential quotas/expiry and relay authentication remain unverified. In-app OAuth/login is not implemented; the access token is entered manually and protected by Android Keystore.
+The Android app implements the authenticated account flow using a manually provisioned VK access token: `messages.getCallToken`, OK CDN session initialization, conversation creation and conversation-parameter retrieval for additional credential sets. A shared credential broker rejects repeated TURN credential sets, supports replacement acquisition for failed paths, and closes auxiliary and owner sessions exactly once during teardown. The complete connection profile, including the VK access token, is encrypted as one AES-GCM payload with an Android Keystore key. In-app OAuth/login is not implemented; the access token is entered manually. Live VK API compatibility, account permissions, credential quotas/expiry and relay authentication remain unverified.
