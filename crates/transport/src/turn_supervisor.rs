@@ -102,12 +102,23 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
         P: 'static,
     {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_shared = std::sync::Arc::clone(&shared);
+
         tokio::spawn(async move {
             let mut supervisor = self;
             match supervisor.allocate().await {
                 Ok(lease) => {
-                    if let Err(payload) = result_tx.send(Ok((supervisor, lease))) {
-                        if let Ok((mut supervisor, _lease)) = payload {
+                    *worker_shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(supervisor);
+
+                    if result_tx.send(Ok(lease)).is_err() || handoff_rx.await.is_err() {
+                        let pending = worker_shared
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take();
+                        if let Some(mut supervisor) = pending {
                             let _ = tokio::time::timeout(
                                 Duration::from_secs(5),
                                 supervisor.deallocate(),
@@ -121,7 +132,15 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                 }
             }
         });
-        result_rx.await.context("TURN Allocate worker stopped")?
+
+        let lease = result_rx.await.context("TURN Allocate worker stopped")??;
+        let supervisor = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .context("TURN Allocate worker lost supervisor ownership")?;
+        let _ = handoff_tx.send(());
+        Ok((supervisor, lease))
     }
 
     /// Refresh the active allocation and recover from a verified 438 response.
