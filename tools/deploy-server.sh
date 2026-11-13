@@ -205,13 +205,13 @@ deploy() {
   bash -n "$egress_tool"
   install -d -o root -g root -m 0755 "$BASE" "$RELEASES"
   if [[ ! -e "$MARKER" ]]; then install -o root -g root -m 0600 /dev/null "$MARKER"; fi
-  release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | sha256sum | cut -c1-20)"
+  release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-20)"
   release_dir="$RELEASES/$release_id"
   if [[ -e "$release_dir" || -L "$release_dir" ]]; then
     [[ -d "$release_dir" && ! -L "$release_dir" && $(stat -c "%U:%G" "$release_dir") == root:root ]] || die "Release directory is not a root-owned real directory."
     safe_file "$release_dir/ghulakh-server" && safe_file "$release_dir/$EGRESS_SCRIPT_NAME" && safe_file "$release_dir/$CREDENTIAL_TOOL_NAME" || die "Release contains a missing file or symlink."
     local existing_id
-    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | sha256sum | cut -c1-20)"
+    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-20)"
     [[ "$existing_id" == "$release_id" ]] || die "Existing release content does not match its release identifier."
   else
     install -d -o root -g root -m 0755 "$release_dir"
