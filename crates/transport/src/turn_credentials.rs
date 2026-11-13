@@ -408,6 +408,26 @@ mod tests {
         }
     }"#;
 
+
+    #[test]
+    fn zeroize_json_strings_clears_nested_string_values() {
+        let mut value: serde_json::Value = serde_json::json!({
+            "turn_server": {
+                "username": "temporary-user",
+                "credential": "temporary-password",
+                "urls": ["turn:relay.example:3478?token=temporary-token"]
+            },
+            "nested": ["another-secret"]
+        });
+
+        zeroize_json_strings(&mut value);
+
+        assert_eq!(value["turn_server"]["username"], "");
+        assert_eq!(value["turn_server"]["credential"], "");
+        assert_eq!(value["turn_server"]["urls"][0], "");
+        assert_eq!(value["nested"][0], "");
+    }
+
     #[test]
     fn parses_vk_calls_turn_server_and_redacts_secrets() {
         let credentials = TurnCredentials::from_vk_response_json(RESPONSE).unwrap();
