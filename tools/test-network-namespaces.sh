@@ -47,12 +47,14 @@ ip -n "$C" addr add 10.77.0.2/16 dev c0
 ip -n "$R" addr add 10.77.0.1/16 dev rc0
 ip -n "$R" addr add 1.1.1.254/30 dev ru0
 ip -n "$U" addr add 1.1.1.253/30 dev u0
+ip -n "$U" addr add 10.99.0.1/24 dev u0
 ip -n "$R" addr add 10.88.0.1/24 dev rx0
 ip -n "$X" addr add 10.88.0.2/24 dev x0
 ip -n "$C" -6 addr add fd77:77::2/64 dev c0
 ip -n "$R" -6 addr add fd77:77::1/64 dev rc0
 ip -n "$R" -6 addr add 2606:4700:4700::fffe/64 dev ru0
 ip -n "$U" -6 addr add 2606:4700:4700::ffff/64 dev u0
+ip -n "$U" -6 addr add fd99::1/64 dev u0
 ip -n "$R" -6 addr add fd88::1/64 dev rx0
 ip -n "$X" -6 addr add fd88::2/64 dev x0
 for pair in "$C c0" "$R rc0" "$R ru0" "$R rx0" "$U u0" "$X x0"; do
@@ -62,9 +64,11 @@ done
 ip -n "$C" route add default via 10.77.0.1
 ip -n "$X" route add default via 10.88.0.1
 ip -n "$U" route add 10.77.0.0/16 via 1.1.1.254
+ip -n "$R" route add 10.99.0.0/24 via 1.1.1.253
 ip -n "$C" -6 route add default via fd77:77::1
 ip -n "$X" -6 route add default via fd88::1
 ip -n "$U" -6 route add fd77:77::/64 via 2606:4700:4700::fffe
+ip -n "$R" -6 route add fd99::/64 via 2606:4700:4700::ffff
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.default.forwarding=1
 ip netns exec "$R" ip link add v6probe0 type veth peer name v6probe1
 if [[ "$(ip netns exec "$R" sysctl -n net.ipv6.conf.v6probe0.forwarding)" != "1" ]]; then
@@ -81,6 +85,16 @@ ip netns exec "$R" sysctl -q -w net.ipv6.conf.rc0.forwarding=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.ru0.forwarding=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.rx0.forwarding=1
 
+# This represents the host administrator's independent policy for unrelated
+# interfaces. The Ghulakh script intentionally does not manage other ingress.
+ip netns exec "$R" nft -f - <<'NFT'
+table inet host_policy {
+  chain forward {
+    type filter hook forward priority 0; policy accept;
+    iifname "rx0" oifname "ru0" counter drop
+  }
+}
+NFT
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" rc0 ru0 nat66
 
@@ -134,6 +148,17 @@ if ip netns exec "$U" ping -6 -c 1 -W 1 fd77:77::2; then
   echo "FAIL: unsolicited IPv6 forwarding was not blocked" >&2
   exit 1
 fi
+
+# Private destinations are denied even when the route exists and the target
+# is reachable on the WAN-side test segment.
+if ip netns exec "$C" ping -c 1 -W 1 10.99.0.1; then
+  echo "FAIL: private IPv4 destination escaped the egress ACL" >&2
+  exit 1
+fi
+if ip netns exec "$C" ping -6 -c 1 -W 1 fd99::1; then
+  echo "FAIL: ULA IPv6 destination escaped the egress ACL" >&2
+  exit 1
+fi
 # Add deliberately invalid source addresses only when their negative probes run.
 # Keeping them off the interface during NAT66 warm-up prevents IPv6 source-address
 # selection from choosing the spoof-test ULA instead of the tunnel ULA. The synthetic
@@ -180,7 +205,7 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet host_policy forward | grep -F 'iifname "rx0" oifname "ru0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Both reverse-direction probes must hit explicit drop rules, not merely time out.
 ip netns exec "$R" nft list chain inet ghulakh_egress forward \
