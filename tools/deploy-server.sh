@@ -143,10 +143,39 @@ EOF
   fi
 }
 write_units() {
-  local wan="$1" mode="$2" tmpdir a b
-  tmpdir="$(mktemp -d)"
-  a="$tmpdir/ghulakh-egress.service"; b="$tmpdir/ghulakh-server.service"
-  cat >"$a" <<EOF
+  local wan="$1" mode="$2" tmpdir marker_tmp marker_backup
+  local had_egress=0 had_server=0 had_marker=0
+  tmpdir="$(mktemp -d /etc/systemd/system/.ghulakh-units.XXXXXX)"
+  marker_tmp="$BASE/.managed-by-ghulakh.tmp.$BASHPID"
+  marker_backup="$BASE/.managed-by-ghulakh.backup.$BASHPID"
+
+  rollback_units() {
+    local rollback_failed=0
+    if (( had_egress )); then
+      mv -f "$tmpdir/old-egress" "$EGRESS_UNIT" || rollback_failed=1
+    else
+      rm -f "$EGRESS_UNIT" || rollback_failed=1
+    fi
+    if (( had_server )); then
+      mv -f "$tmpdir/old-server" "$SERVER_UNIT" || rollback_failed=1
+    else
+      rm -f "$SERVER_UNIT" || rollback_failed=1
+    fi
+    if (( had_marker )); then
+      mv -f "$marker_backup" "$MARKER" || rollback_failed=1
+    else
+      rm -f "$MARKER" || rollback_failed=1
+    fi
+    if (( rollback_failed )); then
+      printf 'CRITICAL: unit rollback was incomplete; recovery files retained in %s\\n' "$tmpdir" >&2
+      return 1
+    fi
+    rm -f "$marker_tmp" "$marker_backup"
+    rm -rf -- "$tmpdir"
+    return 0
+  }
+
+  cat >"$tmpdir/ghulakh-egress.service" <<EOF
 # Managed by Ghulakh deployment tool
 [Unit]
 Description=Ghulakh owned VPN egress policy
@@ -161,7 +190,7 @@ ExecStop=/bin/bash $CURRENT/$EGRESS_SCRIPT_NAME --remove
 [Install]
 WantedBy=multi-user.target
 EOF
-  cat >"$b" <<EOF
+  cat >"$tmpdir/ghulakh-server.service" <<EOF
 # Managed by Ghulakh deployment tool
 [Unit]
 Description=Ghulakh protected TURN VPN gateway
@@ -200,18 +229,48 @@ StateDirectoryMode=0700
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemd-analyze verify "$a" "$b" || { rm -f "$a" "$b"; rmdir "$tmpdir"; return 1; }
-  if [[ -e "$EGRESS_UNIT" ]] && ! cmp -s "$a" "$EGRESS_UNIT"; then
-    rm -f "$a" "$b"; rmdir "$tmpdir"
+
+  systemd-analyze verify "$tmpdir/ghulakh-egress.service" "$tmpdir/ghulakh-server.service" || {
+    rm -rf -- "$tmpdir"
+    return 1
+  }
+  if [[ -e "$EGRESS_UNIT" ]]; then
+    cp -a -- "$EGRESS_UNIT" "$tmpdir/old-egress" || { rm -rf -- "$tmpdir"; return 1; }
+    had_egress=1
+  fi
+  if [[ -e "$SERVER_UNIT" ]]; then
+    cp -a -- "$SERVER_UNIT" "$tmpdir/old-server" || { rm -rf -- "$tmpdir"; return 1; }
+    had_server=1
+  fi
+  if [[ -e "$MARKER" ]]; then
+    cp -a -- "$MARKER" "$marker_backup" || { rm -rf -- "$tmpdir"; return 1; }
+    had_marker=1
+  fi
+
+  install -o root -g root -m 0644 "$tmpdir/ghulakh-egress.service" "$tmpdir/new-egress" &&
+    install -o root -g root -m 0644 "$tmpdir/ghulakh-server.service" "$tmpdir/new-server" || {
+      rollback_units || true
+      return 1
+    }
+  if ! mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"; then
+    rollback_units || true
     return 1
   fi
-  if [[ -e "$SERVER_UNIT" ]] && ! cmp -s "$b" "$SERVER_UNIT"; then
-    rm -f "$a" "$b"; rmdir "$tmpdir"
+  if ! mv -f "$tmpdir/new-server" "$SERVER_UNIT"; then
+    rollback_units || true
     return 1
   fi
-  install -o root -g root -m 0644 "$a" "$EGRESS_UNIT"
-  install -o root -g root -m 0644 "$b" "$SERVER_UNIT"
-  rm -f "$a" "$b"; rmdir "$tmpdir"
+
+  if ! sha256sum "$SERVER_UNIT" "$EGRESS_UNIT" >"$marker_tmp" ||
+     ! chmod 0600 "$marker_tmp" ||
+     ! mv -f "$marker_tmp" "$MARKER"; then
+    rollback_units || true
+    return 1
+  fi
+
+  rm -f "$marker_backup"
+  rm -rf -- "$tmpdir"
+  return 0
 }
 deploy() {
   require_root
@@ -302,11 +361,13 @@ deploy() {
 }
 credential() {
   require_root
-  [[ -f "$MARKER" && -L "$CURRENT" ]] || die "Managed deployment is not installed."
-  [[ -s "$CURRENT/$CREDENTIAL_TOOL_NAME" ]] || die "Credential tool is missing."
-  python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640
-  chown root:"$NAME" "$CREDENTIALS"
-  chmod 0640 "$CREDENTIALS"
+  [[ -f "$MARKER" && ! -L "$MARKER" && -L "$CURRENT" ]] || die "Managed deployment is not installed."
+  [[ -d "$CONFIG" && ! -L "$CONFIG" && $(stat -c '%U:%G:%a' "$CONFIG") == "root:$NAME:750" ]] || die "Credential directory ownership or mode is invalid."
+  [[ -L "$CURRENT" && "$(readlink -f "$CURRENT")" == "$RELEASES/"* ]] || die "Active release points outside the managed release directory."
+  safe_file "$CURRENT/$CREDENTIAL_TOOL_NAME" || die "Credential tool is missing or is not a regular file."
+  safe_file "$CREDENTIALS" || die "Credential digest file is missing, a symlink, or not a regular file."
+  [[ $(stat -c '%U:%G:%a' "$CREDENTIALS") == "root:$NAME:640" ]] || die "Credential digest file ownership or mode is invalid; left unchanged."
+  python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640 --expected-uid 0 --expected-gid "$(id -g "$NAME")"
 }
 status() {
   require_root
