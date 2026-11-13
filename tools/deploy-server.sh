@@ -294,6 +294,8 @@ deploy() {
   bash -n "$egress_tool"
   ensure_account
   install -d -o root -g root -m 0755 "$BASE" "$RELEASES"
+  # Reserve the new managed root before staging; rollback keeps this empty marker so retries remain verifiable.
+  if [[ ! -e "$MARKER" ]]; then install -o root -g root -m 0600 /dev/null "$MARKER"; fi
   release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-64)"
   release_dir="$RELEASES/$release_id"
   if [[ -e "$release_dir" || -L "$release_dir" ]]; then
