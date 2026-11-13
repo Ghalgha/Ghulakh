@@ -30,6 +30,7 @@ class VkCallsSession(
 
     fun finish() {
         val cleanup = synchronized(this) {
+            if (!finished.compareAndSet(false, true)) return
             pendingTurnCredentialsJson = null
             val values = Triple(apiUrl, sessionKey, finishAction)
             apiUrl = null
@@ -37,22 +38,16 @@ class VkCallsSession(
             finishAction = null
             values
         }
-        finishOnce {
-            val action = cleanup.third
-            if (action != null) {
-                action.invoke()
-            } else if (cleanup.first != null && cleanup.second != null) {
-                VkCallsCredentialProvider.finishConversation(
-                    cleanup.first!!,
-                    cleanup.second!!,
-                    conversationId,
-                )
-            }
+        val action = cleanup.third
+        if (action != null) {
+            action.invoke()
+        } else if (cleanup.first != null && cleanup.second != null) {
+            VkCallsCredentialProvider.finishConversation(
+                cleanup.first!!,
+                cleanup.second!!,
+                conversationId,
+            )
         }
-    }
-
-    internal fun finishOnce(action: () -> Unit) {
-        if (finished.compareAndSet(false, true)) action()
     }
 
     override fun toString(): String =
