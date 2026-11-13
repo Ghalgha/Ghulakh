@@ -32,6 +32,9 @@ data class VkCallsSession(
     internal fun finishOnce(action: () -> Unit) {
         if (finished.compareAndSet(false, true)) action()
     }
+
+    override fun toString(): String =
+        "VkCallsSession(turnCredentialsJson=<redacted>, apiUrl=<redacted>, sessionKey=<redacted>, conversationId=<redacted>)"
 }
 
 internal data class VkCallsCredentialGroup(
@@ -43,6 +46,9 @@ internal data class VkCallsCredentialGroup(
         credentialBroker.finish()
         ownerSession.finish()
     }
+
+    override fun toString(): String =
+        "VkCallsCredentialGroup(turnCredentialsJson=<redacted>, ownerSession=<redacted>, credentialBroker=<redacted>)"
 }
 
 /**
