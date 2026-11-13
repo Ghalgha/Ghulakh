@@ -197,7 +197,7 @@ impl TurnClientRuntime {
             .with_requested_relay_family(gateway_peer.is_ipv4());
         let provider = VkCallsTurnAuthProvider::from_credentials(credentials)
             .context("initialize VK Calls TURN authentication provider")?;
-        let mut supervisor = TurnSessionSupervisor::new(driver, provider);
+        let supervisor = TurnSessionSupervisor::new(driver, provider);
 
         let (mut supervisor, _lease) = supervisor
             .allocate_owned()
