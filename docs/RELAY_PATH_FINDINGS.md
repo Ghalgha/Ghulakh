@@ -1,5 +1,7 @@
 # Исследование двустороннего TURN data path
 
+**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+
 Статус: архитектура реализована и проверяется mock integration tests; совместимость с текущей внешней relay инфраструктурой ещё не подтверждена физическими испытаниями.
 
 ## Модель передачи
@@ -40,6 +42,9 @@ TURN relay source tuple подтверждает маршрут через alloc
 
 ## Проверки
 
-Mock tests проверяют TURN control flow, ChannelData forwarding, Noise handshake, registration-before-uplink, source tuple binding, protected uplink/downlink, replay rejection, multipath flow distribution, simultaneous relay loss, fresh allocation/handshake replacement и сохранение virtual IPv4. Эти проверки не являются доказательством live compatibility.
+Mock tests cover TURN control flow, ChannelData forwarding, Noise handshake, registration-before-uplink, source tuple binding, protected uplink/downlink, replay rejection, multipath flow distribution, simultaneous relay loss, fresh allocation/handshake replacement and virtual address retention. The Linux namespace suite separately covers host forwarding/NAT/firewall behavior.
 
-Следующие программные проверки: partial control-plane failures, stale nonce/refresh recovery, deterministic queue saturation, concurrent session churn, gateway load and bounded resource behavior. Физические Android/VPS испытания — только ближе к завершению проекта.
+The merged recovery change covers authenticated Refresh 401/441 classification and bounded 438 stale-nonce retry exhaustion before replacement credential acquisition. These are deterministic software tests, not live relay tests.
+
+Remaining software work includes longer fuzz/property/fault runs, deeper secret-lifetime review, dependency supply-chain controls and additional IPv4/IPv6 egress edge cases. Live VK Calls and physical Android/VPS tests remain deferred until the software audit is complete.
+

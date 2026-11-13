@@ -1,72 +1,92 @@
-# Server deployment notes
+# Развёртывание сервера (текущая ручная процедура)
 
-These steps describe the current TURN-only runtime. Automated mock integration tests cover the client/server path, but live VK Calls API, relay allocation and TURN authentication compatibility remain unverified.
+Документ описывает существующий runtime и административные действия. Полного автоматического installer/update/uninstaller в репозитории нет. Системные sysctl, маршруты и host firewall настраивает и подтверждает администратор; приложение не меняет их скрытно. Автоматические тесты проверяют локальную композицию и изолированную Linux egress policy, но live VK Calls relay и сквозной Android/VPS путь не подтверждены.
 
-## 1. Generate the persistent Noise keypair
+## 1. Создать постоянную Noise keypair
 
-Run the key generator once on the server. It refuses to overwrite existing files and creates the private key with mode 0600 on Unix:
+Выполнить один раз на сервере:
 
-    cargo run -p ghulakh-server -- --generate-noise-keypair /etc/ghulakh/noise_private.hex /etc/ghulakh/noise_public.hex
+~~~sh
+cargo run -p ghulakh-server -- --generate-noise-keypair /etc/ghulakh/noise_private.hex /etc/ghulakh/noise_public.hex
+~~~
 
-Keep noise_private.hex secret and readable only by the server service account. Copy the hex value from noise_public.hex into the Android profile as the pinned Noise public key. Do not regenerate the key during ordinary restarts.
+Команда отказывается перезаписывать существующие файлы; private key создаётся с правами 0600 на Unix. Хранить private key только для service account. Публичный ключ закрепить в Android profile. Не генерировать новую пару при обычном перезапуске.
 
-## 2. Provision device credentials
+## 2. Создать device credential
 
-Generate a high-entropy credential for each device. Store only its SHA-256 digest in the server credential file, one lowercase hexadecimal digest per line. The raw credential is entered into the Android profile and is never stored in the server digest file.
+Создать высокоэнтропийный отдельный credential для каждого устройства. На сервере хранить только SHA-256 digest — по одному lowercase hex digest на строку:
 
-    printf '%s' "$DEVICE_CREDENTIAL" | sha256sum | awk '{print $1}'
+~~~sh
+printf '%s' "$DEVICE_CREDENTIAL" | sha256sum | awk '{print $1}'
+~~~
 
-Protect the credential file with filesystem permissions appropriate to the server service account. The credential is distinct from the VK access token and from temporary VK TURN credentials.
+Raw credential вводится в Android profile. Не смешивать его с VK access token, временными TURN credentials или Noise private key. Файл digest должен быть доступен только серверному service account.
 
-## 3. Configure the server
+## 3. Настроить серверный runtime
 
-Required environment:
+~~~sh
+GHULAKH_CREDENTIAL_HASHES=/etc/ghulakh/device-credentials.sha256
+GHULAKH_TUN_ENABLED=true
+GHULAKH_FORWARDING_ENABLED=true
+GHULAKH_TUN_NAME=ghulakh0
+GHULAKH_TURN_GATEWAY_BIND=0.0.0.0:4434
+GHULAKH_NOISE_PRIVATE_KEY=/etc/ghulakh/noise_private.hex
+GHULAKH_NOISE_PUBLIC_KEY=/etc/ghulakh/noise_public.hex
+~~~
 
-    GHULAKH_CREDENTIAL_HASHES=/etc/ghulakh/device-credentials.sha256
-    GHULAKH_TUN_ENABLED=true
-    GHULAKH_FORWARDING_ENABLED=true
-    GHULAKH_TUN_NAME=ghulakh0
-    GHULAKH_TURN_GATEWAY_BIND=0.0.0.0:4434
-    GHULAKH_NOISE_PRIVATE_KEY=/etc/ghulakh/noise_private.hex
-    GHULAKH_NOISE_PUBLIC_KEY=/etc/ghulakh/noise_public.hex
+Открыть выбранный UDP gateway port только в соответствии с проверенной host firewall policy. Точные VK relay address ranges не придумывать: они не подтверждены live capture.
 
-The TURN gateway listens for raw UDP payloads from VK TURN relays. Open the configured UDP port in the host firewall. The gateway validates relay source tuples and authenticated frames, but the actual VK relay address ranges have not yet been live-verified; do not invent an allowlist.
+Сервер проверяет наличие включённого IPv4 forwarding и global IPv6 forwarding, но не включает их автоматически. Администратор должен настроить persistent sysctl после оценки влияния на хост:
 
-The server checks that Linux IPv4 forwarding, global IPv6 forwarding are enabled. Configure them persistently through the host's sysctl configuration:
+~~~ini
+net.ipv4.ip_forward=1
+net.ipv6.conf.all.forwarding=1
+~~~
 
-    net.ipv4.ip_forward=1
-    net.ipv6.conf.all.forwarding=1
+TUN использует IPv4 10.77.0.1/16, IPv6 fd77:77::1/64, MTU 1100. Клиентские IPv4/IPv6 адреса выделяются и проверяются сервером отдельно. Публичный IPv6 egress не возникает автоматически из-за наличия IPv6 адреса в TUN.
 
-The dual-stack TUN interface uses 10.77.0.1/16 and fd77:77::1/64 with MTU 1100. Authenticated sessions receive paired IPv4 and IPv6 addresses; the gateway validates both source addresses and routes downlink packets by their full IP address. Android configures both default routes and passes both packet families to the native TURN dataplane.
+## 4. Проверить маршруты и установить egress policy
 
-## 4. Configure egress routing
+Сначала определить фактический WAN interface и выбрать режим:
+- nat66 — если upstream не маршрутизирует клиентский ULA prefix;
+- routed — только если upstream имеет явный рабочий маршрут к выделенному клиентскому IPv6 prefix.
 
-The server TUN uses `10.77.0.0/16` and `fd77:77::/64`. Configure the actual WAN interface and enable IPv4/IPv6 forwarding persistently. If the IPv6 default route is learned through Router Advertisements, set `net.ipv6.conf.<WAN_IF>.accept_ra=2` only for that WAN interface.
+Установка policy:
 
-Install the scoped nftables policy after verifying the host's existing firewall:
-
-```sh
+~~~sh
 sudo bash tools/configure-egress-nftables.sh ghulakh0 <WAN_IF> nat66
-```
+~~~
 
-The script owns only `inet ghulakh_egress`, `ip ghulakh_nat4` and `ip6 ghulakh_nat6`. It restricts TUN source prefixes, blocks non-public destinations and unsolicited return-direction traffic, permits established replies, and applies IPv4 NAT plus NAT66. Use `routed` instead of `nat66` only when the upstream has an explicit working route and valid egress for the client IPv6 prefix. The default `fd77::/64` prefix is ULA; public IPv6 egress therefore normally requires NAT66 or a separately designed globally routable prefix.
+Для routed IPv6 заменить последний аргумент на routed.
 
-The script does not change global FORWARD policy, INPUT rules, sysctls, routes or unrelated firewall tables. Its accept verdict does not override a drop in another nftables base chain: the host firewall must independently permit the intended traffic. It intentionally does not manage forwarding from unrelated interfaces. Inspect the complete ruleset and verify routing before setting `GHULAKH_FORWARDING_ENABLED=true`. Remove only its tables with `sudo bash tools/configure-egress-nftables.sh --remove`.
+Скрипт управляет только таблицами inet ghulakh_egress, ip ghulakh_nat4 и ip6 ghulakh_nat6. Он ограничивает TUN source prefixes, блокирует private/special destinations и unsolicited return traffic, разрешает established replies и настраивает IPv4 NAT плюс выбранную IPv6 policy. Он не меняет глобальный FORWARD policy, INPUT rules, sysctl, маршруты или чужие nftables tables. Drop в другой base chain по-прежнему может блокировать traffic.
 
-The server does not configure IP forwarding or firewall rules automatically. `GHULAKH_FORWARDING_ENABLED=true` is an administrator confirmation, not a firewall health check.
+Проверить полную конфигурацию до включения GHULAKH_FORWARDING_ENABLED=true. Удалить только собственные таблицы:
 
-## 5. Configure Android
+~~~sh
+sudo bash tools/configure-egress-nftables.sh --remove
+~~~
 
-Enter the gateway hostname/IP and UDP port, the per-device tunnel credential, a VK access token with the permissions required by VK Calls, and the pinned Noise public key. The app obtains fresh temporary TURN credentials at connection time and attempts to close the VK Calls conversation when the VPN stops.
+Удаление этих таблиц не восстанавливает sysctl или маршруты, поскольку скрипт их не меняет.
 
-The VK access token is currently entered manually and encrypted with Android Keystore. An in-app OAuth flow is not implemented. The first real connection must be tested with a controlled VK account and a reachable gateway before general use.
+## 5. Настроить Android profile
 
-## 6. Current limitations
+Указать gateway hostname/IP и UDP port, отдельный device credential, VK account access token и pinned Noise server public key. VK access token вводится вручную и сохраняется в составе полного connection profile, зашифрованного Android Keystore AES-GCM. In-app OAuth/login не реализован. При потере Keystore key профиль не расшифровывается и не заменяется автоматически.
 
-- Only UDP TURN endpoints are supported; TCP and TURNS/TLS endpoints are rejected.
-- IPv4 and IPv6 packet transport, source validation, dual-stack virtual-address allocation and routing are implemented in the client/server code and covered by automated tests. Public IPv6 egress still depends on the host's upstream route or NAT66 configuration and has not been validated on a live server.
-- The legacy VK TURN authentication candidate uses MD5(username:realm:password) and HMAC-SHA1. Vendor attribute 0x8021 and PASSWORD-ALGORITHMS behavior remain unverified.
-- Live VK Calls API and relay compatibility, real allocation quotas/expiry/rotation, and physical Android/VPS end-to-end tests have not yet been completed. Mock tests are not evidence of live relay compatibility.
-- The server exposes only the TURN gateway; there is no alternative transport fallback.
+Во время соединения приложение получает временные TURN credentials через VK Calls provider. Эти credentials краткоживущие и не являются ключами шифрования туннеля.
 
-Treat this configuration as a development deployment until the remaining integration and live-network tests pass.
+## 6. Проверить изолированную сетевую политику
+
+~~~sh
+sudo bash tools/test-network-namespaces.sh
+~~~
+
+Тест создаёт network namespaces/veth, проверяет IPv4 NAT, IPv6 NAT66 и routed mode, обратный established traffic и firewall drops. Он не меняет внешние маршруты хоста и не подтверждает поведение конкретного VPS provider. Дополнительно вручную проверить WAN interface/default routes, конфликты nftables, UDP gateway port, sysctl/IPv6 RA и отсутствие forwarding к private, loopback, link-local и multicast destinations.
+
+## 7. Ограничения
+
+- Только UDP TURN endpoint; TCP/TLS/TURNS не поддерживаются текущим socket driver.
+- Live VK Calls API, relay allocation, auth profile, quota/expiry и endpoint rotation не подтверждены.
+- IPv6 tunnel transport реализован; публичный IPv6 egress требует корректного upstream route или NAT66.
+- Server deployment lifecycle автоматизирован не полностью. Не запускать непроверенные install scripts на том же хосте.
+- Физические Android/VPS тесты остаются заключительным этапом.
