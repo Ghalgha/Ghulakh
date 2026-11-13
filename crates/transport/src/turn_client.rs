@@ -1756,19 +1756,6 @@ mod path_group_tests {
 mod turn_credential_recovery_tests {
     use super::*;
 
-    fn packet(source_port: u16) -> Vec<u8> {
-        let mut packet = vec![0u8; 24];
-        packet[0] = 0x45;
-        let length = packet.len() as u16;
-        packet[2..4].copy_from_slice(&length.to_be_bytes());
-        packet[9] = 17;
-        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
-        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
-        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
-        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
-        packet
-    }
-
     #[test]
     fn only_explicit_credential_rejection_triggers_path_recovery() {
         let rejected_401 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected);
@@ -1794,6 +1781,24 @@ mod turn_credential_recovery_tests {
 
         let transient = anyhow::Error::new(crate::turn_driver::TurnDriverError::Timeout);
         assert!(!is_turn_credentials_rejected(&transient));
+    }
+}
+
+#[cfg(test)]
+mod turn_downlink_fault_tests {
+    use super::*;
+
+    fn packet(source_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 24];
+        packet[0] = 0x45;
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet
     }
 
     #[test]
@@ -1851,5 +1856,4 @@ mod turn_credential_recovery_tests {
         assert!(buffer.pop_ready().is_none());
         assert_eq!(buffer.gap_deadline(), None);
     }
-
 }
