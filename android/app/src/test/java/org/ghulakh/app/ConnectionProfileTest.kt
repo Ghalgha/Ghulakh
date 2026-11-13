@@ -25,7 +25,7 @@ class ConnectionProfileTest {
 
     @Test
     fun profileFieldsAreStoredAsOneEncryptedPayload() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         val store = CredentialStore(context, TestProfileKeyProvider())
         val profile = sampleProfile()
         store.save(profile)
@@ -38,7 +38,7 @@ class ConnectionProfileTest {
 
     @Test
     fun missingKeystoreKeyIsReportedAndNeverRecreatedDuringLoad() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         val keys = TestProfileKeyProvider()
         val store = CredentialStore(context, keys)
         store.save(sampleProfile())
@@ -49,7 +49,7 @@ class ConnectionProfileTest {
 
     @Test
     fun authenticatedPayloadRejectsTampering() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         val store = CredentialStore(context, TestProfileKeyProvider())
         store.save(sampleProfile())
         val prefs = context.getSharedPreferences("ghulakh_connection_profile", Context.MODE_PRIVATE)
@@ -60,7 +60,7 @@ class ConnectionProfileTest {
 
     @Test
     fun clearRemovesProfileAndItsEncryptionKey() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         val keys = TestProfileKeyProvider()
         val store = CredentialStore(context, keys)
         store.save(sampleProfile())
