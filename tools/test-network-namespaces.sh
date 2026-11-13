@@ -56,8 +56,10 @@ table inet filter {
     type filter hook forward priority filter; policy drop;
     iifname "rc0" oifname "ru0" ip saddr 10.77.0.0/24 accept
     iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/24 ct state established,related accept
+    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/24 counter drop
     iifname "rc0" oifname "ru0" ip6 saddr fd77:77::/64 accept
     iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 ct state established,related accept
+    iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 counter drop
   }
 }
 table ip nat4 {
@@ -70,6 +72,17 @@ table ip6 nat6 {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     ip6 saddr fd77:77::/64 oifname "ru0" counter masquerade
+  }
+}
+NFT
+
+ip netns exec "$U" nft -f - <<'NFT'
+table inet upstream_probe {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    ip saddr 1.1.1.254 icmp type echo-request counter
+    ip6 saddr 2606:4700:4700::fffe icmpv6 type echo-request counter
+    ip6 saddr fd77:77::2 icmpv6 type echo-request counter
   }
 }
 NFT
@@ -87,8 +100,23 @@ fi
 ip netns exec "$R" nft list chain ip nat4 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain ip6 nat6 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
 
+# Confirm the upstream sees translated source addresses, not merely successful pings.
+ip netns exec "$U" nft list chain inet upstream_probe input \
+  | grep -F 'ip saddr 1.1.1.254' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$U" nft list chain inet upstream_probe input \
+  | grep -F 'ip6 saddr 2606:4700:4700::fffe' | grep -Eq 'counter packets [1-9][0-9]*'
+
 # Verify routed IPv6 without NAT66: the upstream has an explicit route to
 # the client prefix, so the original fd77:: source must remain routable.
 ip netns exec "$R" nft delete table ip6 nat6
 ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff
-echo "PASS: IPv4 NAT, IPv6 NAT66, native IPv6 routing, return traffic and unsolicited-forward blocking"
+ip netns exec "$U" nft list chain inet upstream_probe input \
+  | grep -F 'ip6 saddr fd77:77::2' | grep -Eq 'counter packets [1-9][0-9]*'
+
+# Both reverse-direction probes must hit explicit drop rules, not merely time out.
+ip netns exec "$R" nft list chain inet filter forward \
+  | grep -F 'ip daddr 10.77.0.0/24 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet filter forward \
+  | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+
+echo "PASS: IPv4 NAT source translation, IPv6 NAT66 source translation, native IPv6 routing, stateful return traffic and unsolicited-forward drops"
