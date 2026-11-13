@@ -105,7 +105,7 @@ ensure_config() {
     safe_file "$CREDENTIALS" || die "Credential digest path must be a regular file."
     [[ $(stat -c '%U:%G:%a' "$CREDENTIALS") == "root:$NAME:640" ]] || die "Credential digest file must be owned by root:$NAME mode 0640; left unchanged."
   fi
-  if [[ -e "$NOISE_PRIVATE" || -e "$NOISE_PUBLIC" ]]; then
+  if [[ -e "$NOISE_PRIVATE" || -L "$NOISE_PRIVATE" || -e "$NOISE_PUBLIC" || -L "$NOISE_PUBLIC" ]]; then
     safe_file "$NOISE_PRIVATE" && safe_file "$NOISE_PUBLIC" || die "Both Noise key files must be regular files."
     [[ $(stat -c '%U:%G:%a' "$NOISE_PRIVATE") == "$NAME:$NAME:600" ]] || die "Noise private key must be owned by $NAME:$NAME mode 0600."
     [[ $(stat -c '%U:%G:%a' "$NOISE_PUBLIC") == "$NAME:$NAME:644" ]] || die "Noise public key must be owned by $NAME:$NAME mode 0644."
@@ -123,7 +123,7 @@ ensure_config() {
     fi
     rm -f "$generated_private" "$generated_public"
   fi
-  if [[ ! -e "$ENV_FILE" ]]; then
+  if [[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]; then
     local tmp
     tmp="$(mktemp "$CONFIG/server.env.XXXXXX")"
     cat >"$tmp" <<EOF
