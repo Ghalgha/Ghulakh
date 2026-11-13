@@ -38,7 +38,7 @@ class SafeErrorSummaryTest {
         }.exceptionOrNull()
 
         val summary = safeErrorSummary(requireNotNull(error))
-        assertEquals("Operation failed (IllegalStateException)", summary)
+        assertEquals("Операция завершилась ошибкой (IllegalStateException)", summary)
         assertFalse(error.message.orEmpty().contains("vk-secret"))
         assertFalse(error.message.orEmpty().contains("turn-secret"))
     }
