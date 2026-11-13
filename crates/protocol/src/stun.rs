@@ -294,7 +294,7 @@ pub fn append_fingerprint(input: &[u8]) -> Result<Vec<u8>, StunError> {
     if message.attributes.iter().any(|a| a.kind == ATTR_FINGERPRINT) {
         return Err(StunError::InvalidFingerprintLayout);
     }
-    let mut out = input.to_vec();
+    let mut out = Zeroizing::new(input.to_vec());
     let new_len = out.len().checked_add(8).ok_or(StunError::MessageTooLarge)?;
     if new_len > MAX_MESSAGE_LEN { return Err(StunError::MessageTooLarge); }
     let body_len = u16::try_from(new_len - HEADER_LEN).map_err(|_| StunError::MessageTooLarge)?;
@@ -303,7 +303,7 @@ pub fn append_fingerprint(input: &[u8]) -> Result<Vec<u8>, StunError> {
     out.extend_from_slice(&ATTR_FINGERPRINT.to_be_bytes());
     out.extend_from_slice(&4u16.to_be_bytes());
     out.extend_from_slice(&crc.to_be_bytes());
-    Ok(out)
+    Ok(std::mem::take(&mut *out))
 }
 
 /// Verify a final FINGERPRINT attribute. This is corruption detection, not authentication.
