@@ -90,7 +90,7 @@ fn destination_allowed(address: IpAddr) -> bool {
                 && !prefix([0x2001,0,0,0],23) // IETF protocol assignments
                 && !prefix([0x2001,0x0db8,0,0],32) // documentation
                 && !prefix([0x2002,0,0,0],16) // 6to4
-                && !prefix([0x3fff,0,0,0],20) // documentation
+                && !prefix([0x3f00,0,0,0],8) // IANA-reserved 3f00::/8, including documentation space
         }
     }
 }
@@ -2709,11 +2709,13 @@ mod egress_policy_tests {
     }
     #[test]
     fn blocks_non_global_and_special_ipv6_and_allows_global_unicast() {
-        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3fff::1"] {
+        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3f00::1","3f80::1","3fc0::1","3fe0::1","3ff0::1","3ff8::1","3ffc::1","3ffe::1","3fff::1"] {
             assert!(!destination_allowed(a.parse().unwrap()), "{a}");
         }
         assert!(destination_allowed("2606:4700:4700::1111".parse().unwrap()));
         assert!(destination_allowed("2001:4860:4860::8888".parse().unwrap()));
+        assert!(destination_allowed("2001:200::1".parse().unwrap()));
+        assert!(destination_allowed("3eff::1".parse().unwrap()));
     }
     #[test]
     fn rejects_truncated_or_wrong_version_packets() {
