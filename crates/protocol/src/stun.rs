@@ -144,7 +144,9 @@ impl StunMessage {
             body.extend_from_slice(&attr.kind.to_be_bytes());
             body.extend_from_slice(&(attr.value.len() as u16).to_be_bytes());
             body.extend_from_slice(&attr.value);
-            body.resize(body.len() + ((4 - attr.value.len() % 4) % 4), 0);
+            let padding = (4 - attr.value.len() % 4) % 4;
+            let new_len = body.len() + padding;
+            body.resize(new_len, 0);
         }
         if body.len() > u16::MAX as usize { return Err(StunError::MessageTooLarge); }
         let method = self.method;
