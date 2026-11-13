@@ -79,6 +79,16 @@ pub struct StunMessage {
     pub attributes: Vec<StunAttribute>,
 }
 
+struct SensitiveAttributes(Vec<StunAttribute>);
+
+impl Drop for SensitiveAttributes {
+    fn drop(&mut self) {
+        for attribute in &mut self.0 {
+            attribute.value.zeroize();
+        }
+    }
+}
+
 impl Drop for StunMessage {
     fn drop(&mut self) {
         for attribute in &mut self.attributes {
@@ -103,7 +113,7 @@ impl StunMessage {
         }
         let mut transaction_id = [0u8; 12];
         transaction_id.copy_from_slice(&input[8..20]);
-        let mut attributes = Vec::new();
+        let mut attributes = SensitiveAttributes(Vec::new());
         let mut offset = HEADER_LEN;
         while offset < input.len() {
             if input.len() - offset < 4 { return Err(StunError::Truncated); }
@@ -113,7 +123,7 @@ impl StunMessage {
             let value_end = value_start.checked_add(len).ok_or(StunError::InvalidLength)?;
             let padded_end = value_start.checked_add((len + 3) & !3).ok_or(StunError::InvalidLength)?;
             if padded_end > input.len() || value_end > input.len() { return Err(StunError::Truncated); }
-            attributes.push(StunAttribute { kind, value: input[value_start..value_end].to_vec() });
+            attributes.0.push(StunAttribute { kind, value: input[value_start..value_end].to_vec() });
             offset = padded_end;
         }
         let method = (ty & 0x000F) | ((ty & 0x00E0) >> 1) | ((ty & 0x3E00) >> 2);
@@ -123,7 +133,7 @@ impl StunMessage {
             2 => StunClass::SuccessResponse,
             _ => StunClass::ErrorResponse,
         };
-        Ok(Self { method, class, transaction_id, attributes })
+        Ok(Self { method, class, transaction_id, attributes: std::mem::take(&mut attributes.0) })
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, StunError> {
@@ -168,13 +178,13 @@ pub fn append_message_integrity(message: &StunMessage, key: &[u8]) -> Result<Vec
     }
     let mut signed = message.clone();
     signed.attributes.push(StunAttribute { kind: ATTR_MESSAGE_INTEGRITY, value: vec![0; 20] });
-    let mut encoded = signed.encode()?;
+    let mut encoded = Zeroizing::new(signed.encode()?);
     let attr_offset = encoded.len() - 24;
     let mut mac = Hmac::<Sha1>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
     mac.update(&encoded[..attr_offset]);
     let tag = mac.finalize().into_bytes();
     encoded[attr_offset + 4..attr_offset + 24].copy_from_slice(&tag);
-    Ok(encoded)
+    Ok(std::mem::take(&mut *encoded))
 }
 
 /// Verify MESSAGE-INTEGRITY before any received request can mutate TURN state.
@@ -232,13 +242,13 @@ pub fn append_message_integrity_sha256(message: &StunMessage, key: &[u8]) -> Res
         kind: ATTR_MESSAGE_INTEGRITY_SHA256,
         value: vec![0; 32],
     });
-    let mut encoded = signed.encode()?;
+    let mut encoded = Zeroizing::new(signed.encode()?);
     let attr_offset = encoded.len() - 36;
     let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| StunError::InvalidIntegrityKey)?;
     mac.update(&encoded[..attr_offset]);
     let tag = mac.finalize().into_bytes();
     encoded[attr_offset + 4..attr_offset + 36].copy_from_slice(&tag);
-    Ok(encoded)
+    Ok(std::mem::take(&mut *encoded))
 }
 
 /// Verify a full-length RFC 8489 MESSAGE-INTEGRITY-SHA256 attribute.
