@@ -598,7 +598,8 @@ async fn main() -> Result<()> {
         let private_path = &args[2];
         let public_path = &args[3];
         anyhow::ensure!(private_path != public_path, "private and public key paths must differ");
-        let private_hex = format!("{}\n", hex::encode(keypair.private_key_bytes()));
+        let mut private_hex = Zeroizing::new(hex::encode(keypair.private_key_bytes()));
+        private_hex.push('\\n');
         let public_hex = format!("{}\n", hex::encode(keypair.public_key()));
         write_noise_key_file(private_path, private_hex.as_bytes(), true)?;
         if let Err(error) = write_noise_key_file(public_path, public_hex.as_bytes(), false) {
@@ -830,9 +831,17 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("noise-private.key");
-        std::fs::write(&path, "00112233").unwrap();
+        std::fs::write(&path, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(read_noise_private_key(path.to_str().unwrap()).unwrap().as_slice(), [0, 0x11, 0x22, 0x33]);
+        assert_eq!(
+            read_noise_private_key(path.to_str().unwrap()).unwrap().as_slice(),
+            &[
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+            ]
+        );
     }
 
     #[test]
