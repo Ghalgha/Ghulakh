@@ -37,7 +37,7 @@ check_platform() {
   [[ -c /dev/net/tun ]] || die "/dev/net/tun is unavailable."
   [[ -r /proc/sys/net/ipv4/ip_forward && $(< /proc/sys/net/ipv4/ip_forward) == 1 ]] || die "Enable net.ipv4.ip_forward=1 administratively."
   [[ -r /proc/sys/net/ipv6/conf/all/forwarding && $(< /proc/sys/net/ipv6/conf/all/forwarding) == 1 ]] || die "Enable net.ipv6.conf.all.forwarding=1 administratively."
-  for cmd in systemctl systemd-analyze install ip nft runuser useradd python3 sha256sum readlink stat; do require_command "$cmd"; done
+  for cmd in systemctl systemd-analyze install ip nft runuser useradd getent python3 sha256sum readlink stat; do require_command "$cmd"; done
 }
 parse_args() {
   ACTION="$1"; shift
@@ -70,6 +70,9 @@ assert_managed_layout() {
       grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to replace unmanaged systemd unit: $unit"
     fi
   done
+  if [[ -e "$MARKER" ]]; then
+    [[ $(stat -c "%U:%G:%a" "$MARKER") == root:root:600 ]] || die "Managed marker permissions are invalid."
+  fi
   if [[ -s "$MARKER" ]]; then sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum mismatch; refusing to overwrite or remove modified units."; fi
 }
 ensure_account() {
@@ -77,7 +80,10 @@ ensure_account() {
     [[ ! -e "$MARKER" && ! -e "$BASE" ]] || die "Managed marker exists but service account is missing."
     useradd --system --home-dir /var/lib/ghulakh --no-create-home --shell /usr/sbin/nologin "$NAME"
   else
-    [[ -f "$MARKER" ]] || die "Service account ghulakh already exists outside a managed installation; refusing to adopt it."
+    local account_entry account_home account_shell
+    account_entry="$(getent passwd "$NAME")"
+    IFS=: read -r _ _ _ _ account_home account_shell <<<"$account_entry"
+    [[ "$account_home" == /var/lib/ghulakh && "$account_shell" == /usr/sbin/nologin ]] || die "Existing ghulakh account has an unexpected home or shell; refusing to adopt it."
   fi
   for directory in /var/lib/ghulakh "$CONFIG"; do
     if [[ -e "$directory" ]]; then
@@ -197,12 +203,12 @@ deploy() {
   check_platform
   parse_args "$@"
   assert_managed_layout
-  ensure_account
   local egress_tool credential_tool release_id release_dir old_target link
   egress_tool="$(cd "$(dirname "$0")" && pwd)/$EGRESS_SCRIPT_NAME"
   credential_tool="$(cd "$(dirname "$0")" && pwd)/$CREDENTIAL_TOOL_NAME"
   safe_file "$egress_tool" && safe_file "$credential_tool" || die "Deployment helper files are missing."
   bash -n "$egress_tool"
+  ensure_account
   install -d -o root -g root -m 0755 "$BASE" "$RELEASES"
   if [[ ! -e "$MARKER" ]]; then install -o root -g root -m 0600 /dev/null "$MARKER"; fi
   release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-20)"
@@ -222,6 +228,16 @@ deploy() {
   STAGED_BINARY="$release_dir/ghulakh-server"
   [[ -x "$STAGED_BINARY" ]] || die "Staged binary is missing."
   ensure_config
+  for required in \
+    "GHULAKH_CREDENTIAL_HASHES=$CREDENTIALS" \
+    "GHULAKH_TUN_ENABLED=true" \
+    "GHULAKH_FORWARDING_ENABLED=true" \
+    "GHULAKH_TUN_NAME=ghulakh0" \
+    "GHULAKH_TURN_GATEWAY_BIND=0.0.0.0:4434" \
+    "GHULAKH_NOISE_PRIVATE_KEY=$NOISE_PRIVATE" \
+    "GHULAKH_NOISE_PUBLIC_KEY=$NOISE_PUBLIC"; do
+    grep -Fqx "$required" "$ENV_FILE" || die "Required server.env setting is missing or changed: $required"
+  done
   [[ ! -e "$CURRENT" || -L "$CURRENT" ]] || die "Current release path is not a symlink; refusing to replace it."
   old_target=""
   if [[ -L "$CURRENT" ]]; then

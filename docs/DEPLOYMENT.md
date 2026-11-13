@@ -50,7 +50,7 @@ sudo bash tools/deploy-server.sh install \
 - ghulakh-egress.service: устанавливает только принадлежащие приложению nftables tables через configure-egress-nftables.sh; при остановке удаляет только эти таблицы после проверки ownership marker;
 - ghulakh-server.service: запускает сервер от непривилегированного пользователя ghulakh с CAP_NET_ADMIN и доступом к /dev/net/tun.
 
-Сервис не может менять sysctl благодаря systemd hardening. Серверный EnvironmentFile находится в /etc/ghulakh/server.env.
+Сервис не может менять sysctl благодаря systemd hardening. Серверный EnvironmentFile находится в /etc/ghulakh/server.env. Для согласованности egress policy установщик проверяет фиксированные значения TUN name, gateway bind (0.0.0.0:4434), forwarding flags и путей к секретам; изменение этих параметров требует отдельного изменения deployment unit и firewall policy.
 
 ## Добавление устройства
 
