@@ -71,9 +71,13 @@ class GhulakhVpnService : VpnService() {
         val credentialGroups = Collections.synchronizedList(mutableListOf<VkCallsCredentialGroup>())
         var recoveryToken: AtomicBoolean? = null
         var recoverySupervisor: Thread? = null
+        var vkAccessToken: String? = null
         try {
-            val profile = CredentialStore(this).load()
+            var loadedProfile = CredentialStore(this).load()
                 ?: throw IllegalStateException("Профиль соединения не настроен")
+            vkAccessToken = loadedProfile.vkAccessToken
+            val profile = loadedProfile.copy(vkAccessToken = "")
+            loadedProfile = null
             val transport = NativeTransport()
             val rejectedCredentialFingerprints = mutableSetOf<String>()
             var connectAttempt = 0
@@ -81,7 +85,7 @@ class GhulakhVpnService : VpnService() {
             var handle = 0L
             while (true) {
                 if (!isCurrent(generation)) return
-                val candidate = VkCallsCredentialProvider.obtainGroup(profile.vkAccessToken, DEFAULT_TURN_PATHS)
+                val candidate = VkCallsCredentialProvider.obtainGroup(checkNotNull(vkAccessToken), DEFAULT_TURN_PATHS)
                 // Credential acquisition performs blocking HTTPS requests. The VPN may be
                 // stopped while they are in flight, so serialize the generation check,
                 // native connect and handle publication with native shutdown.
@@ -250,6 +254,7 @@ class GhulakhVpnService : VpnService() {
                 updateNotification("Ошибка VPN · ${safeErrorSummary(error)}")
             }
         } finally {
+            vkAccessToken = null
             val ownsLifecycle = isCurrent(generation)
             if (ownsLifecycle) stopTunnel(generation)
             // The broker owns the VK Calls sessions used to obtain replacement
