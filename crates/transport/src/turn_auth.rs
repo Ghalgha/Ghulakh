@@ -432,7 +432,8 @@ mod tests {
         let mut wire = append_message_integrity(&response, &[0x5a; 32]).unwrap();
         *wire.last_mut().unwrap() ^= 1;
         assert!(matches!(auth.verify_response(&wire), Err(TurnAuthError::IntegrityFailure)));
-        let indication = StunMessage { class: StunClass::Indication, ..response };
+        let mut indication = response;
+        indication.class = StunClass::Indication;
         let indication_wire = indication.encode().unwrap();
         assert!(matches!(auth.verify_response(&indication_wire), Err(TurnAuthError::InvalidResponse)));
     }

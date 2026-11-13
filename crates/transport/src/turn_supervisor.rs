@@ -378,8 +378,8 @@ mod authenticated_stale_nonce_tests {
                 let key = if challenge.nonce == "nonce-1" { vec![0x11; 32] } else { vec![0x22; 32] };
                 TurnAuthContext::new(
                     "test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     key,
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -524,8 +524,8 @@ mod server_error_state_tests {
                 self.calls += 1;
                 TurnAuthContext::new(
                     "test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x44; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -856,8 +856,8 @@ mod peer_stale_nonce_retry_tests {
                 let key = if challenge.nonce == "nonce-1" { vec![0x44; 32] } else { vec![0x55; 32] };
                 TurnAuthContext::new(
                     "test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     key,
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1027,8 +1027,8 @@ mod stale_nonce_retry_budget_tests {
                 self.calls += 1;
                 TurnAuthContext::new(
                     "test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x66; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1141,8 +1141,8 @@ mod authenticated_allocation_quota_tests {
             Box::pin(async move {
                 TurnAuthContext::new(
                     "quota-test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x44; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1235,8 +1235,8 @@ mod control_response_loss_tests {
             Box::pin(async move {
                 TurnAuthContext::new(
                     "loss-test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x66; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1395,8 +1395,8 @@ mod stale_nonce_retry_limit_tests {
                 self.calls += 1;
                 TurnAuthContext::new(
                     "nonce-budget-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x77; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1512,8 +1512,8 @@ mod graceful_deallocation_tests {
             Box::pin(async move {
                 TurnAuthContext::new(
                     "test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x55; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
@@ -1624,8 +1624,8 @@ mod cancelled_allocate_cleanup_tests {
             Box::pin(async move {
                 TurnAuthContext::new(
                     "cancel-test-user".into(),
-                    challenge.realm,
-                    challenge.nonce,
+                    challenge.realm.clone(),
+                    challenge.nonce.clone(),
                     vec![0x5a; 32],
                     TurnIntegrityAlgorithm::Sha1,
                 ).map_err(anyhow::Error::new)
