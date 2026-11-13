@@ -362,11 +362,14 @@ deploy() {
 credential() {
   require_root
   [[ -f "$MARKER" && ! -L "$MARKER" && -L "$CURRENT" ]] || die "Managed deployment is not installed."
+  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G' "$RELEASES") == root:root ]] || die "Managed releases directory is invalid."
+  sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum mismatch; refusing credential changes."
   [[ -d "$CONFIG" && ! -L "$CONFIG" && $(stat -c '%U:%G:%a' "$CONFIG") == "root:$NAME:750" ]] || die "Credential directory ownership or mode is invalid."
-  [[ -L "$CURRENT" && "$(readlink -f "$CURRENT")" == "$RELEASES/"* ]] || die "Active release points outside the managed release directory."
+  [[ "$(readlink -f "$CURRENT")" == "$RELEASES/"* ]] || die "Active release points outside the managed release directory."
+  [[ -d "$(readlink -f "$CURRENT")" && ! -L "$(readlink -f "$CURRENT")" && $(stat -c '%U:%G' "$(readlink -f "$CURRENT")") == root:root ]] || die "Active release directory is invalid."
   safe_file "$CURRENT/$CREDENTIAL_TOOL_NAME" || die "Credential tool is missing or is not a regular file."
   safe_file "$CREDENTIALS" || die "Credential digest file is missing, a symlink, or not a regular file."
-  [[ $(stat -c '%U:%G:%a' "$CREDENTIALS") == "root:$NAME:640" ]] || die "Credential digest file ownership or mode is invalid; left unchanged."
+  [[ $(stat -c '%U:%G:%a:%h' "$CREDENTIALS") == "root:$NAME:640:1" ]] || die "Credential digest file ownership, mode or link count is invalid; left unchanged."
   python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640 --expected-uid 0 --expected-gid "$(id -g "$NAME")"
 }
 status() {
