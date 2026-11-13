@@ -97,6 +97,17 @@ jobs:
       - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4.4.3
       - name: Run Android JVM unit tests
         run: ./android/gradlew -p android testDebugUnitTest
+      - name: Generate Gradle dependency locks and verification metadata
+        run: ./android/gradlew -p android --write-locks --write-verification-metadata sha256 testDebugUnitTest assembleDebug
+      - name: Upload generated Gradle dependency controls
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gradle-dependency-controls
+          path: |
+            android/**/gradle.lockfile
+            android/gradle/verification-metadata.xml
+          if-no-files-found: error
+          retention-days: 3
       - name: Assemble debug APK
         run: ./android/gradlew -p android assembleDebug
       - name: Verify APK output
