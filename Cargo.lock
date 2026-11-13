@@ -631,10 +631,14 @@ name = "ghulakh-transport"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "ghulakh-protocol",
  "jni",
  "md-5",
+ "quinn",
+ "quinn-proto",
  "rand 0.8.8",
+ "rustls",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
