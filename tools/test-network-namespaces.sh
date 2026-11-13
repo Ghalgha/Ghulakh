@@ -81,34 +81,8 @@ ip netns exec "$R" sysctl -q -w net.ipv6.conf.rc0.forwarding=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.ru0.forwarding=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.rx0.forwarding=1
 
-ip netns exec "$R" nft -f - <<'NFT'
-table inet filter {
-  chain forward {
-    type filter hook forward priority filter; policy drop;
-    iifname "rc0" oifname "ru0" ip saddr 10.77.0.0/16 accept
-    iifname "rc0" oifname "ru0" ip saddr != 10.77.0.0/16 counter drop
-    iifname "rx0" oifname "ru0" counter drop
-    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/16 ct state established,related accept
-    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/16 counter drop
-    iifname "rc0" oifname "ru0" ip6 saddr fd77:77::/64 accept
-    iifname "rc0" oifname "ru0" ip6 saddr != fd77:77::/64 counter drop
-    iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 ct state established,related accept
-    iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 counter drop
-  }
-}
-table ip nat4 {
-  chain postrouting {
-    type nat hook postrouting priority srcnat; policy accept;
-    ip saddr 10.77.0.0/16 oifname "ru0" counter masquerade
-  }
-}
-table ip6 nat6 {
-  chain postrouting {
-    type nat hook postrouting priority srcnat; policy accept;
-    ip6 saddr fd77:77::/64 oifname "ru0" counter masquerade
-  }
-}
-NFT
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" rc0 ru0 nat66
 
 ip netns exec "$U" nft -f - <<'NFT'
 table inet upstream_probe {
@@ -184,8 +158,8 @@ if ip netns exec "$X" ping -6 -c 1 -W 1 2606:4700:4700::ffff; then
   echo "FAIL: unrelated IPv6 ingress reached the upstream" >&2
   exit 1
 fi
-ip netns exec "$R" nft list chain ip nat4 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain ip6 nat6 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain ip ghulakh_nat4 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain ip6 ghulakh_nat6 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Confirm the upstream sees translated source addresses, not merely successful pings.
 ip netns exec "$U" nft list chain inet upstream_probe input \
@@ -197,21 +171,21 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 # the client prefix, so the original fd77:: source must remain routable. Use a
 # fresh source address: deleting a NAT chain does not remove existing conntrack
 # NAT mappings, so reusing the NAT66 probe's tuple could test stale NAT state.
-ip netns exec "$R" nft delete table ip6 nat6
+ip netns exec "$R" nft delete table ip6 ghulakh_nat6
 ip -n "$C" -6 addr add fd77:77::3/128 dev c0 nodad
 ip netns exec "$C" ping -6 -I fd77:77::3 -c 2 -W 2 2606:4700:4700::ffff
 ip netns exec "$U" nft list chain inet upstream_probe input \
   | grep -F 'ip6 saddr fd77:77::3' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
-ip netns exec "$R" nft list chain inet filter forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet filter forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet filter forward | grep -F 'iifname "rx0" oifname "ru0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Both reverse-direction probes must hit explicit drop rules, not merely time out.
-ip netns exec "$R" nft list chain inet filter forward \
+ip netns exec "$R" nft list chain inet ghulakh_egress forward \
   | grep -F 'ip daddr 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet filter forward \
+ip netns exec "$R" nft list chain inet ghulakh_egress forward \
   | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
 echo "PASS: IPv4 NAT, IPv6 NAT66/routing, stateful return traffic, source anti-spoofing, unrelated-ingress isolation and unsolicited-forward drops"
