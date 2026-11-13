@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
+import android.util.Base64
 import android.view.ViewGroup
 import android.widget.Button
 import android.widget.EditText
@@ -15,6 +16,8 @@ class MainActivity : Activity() {
     private lateinit var store: CredentialStore
     private lateinit var hostInput: EditText
     private lateinit var portInput: EditText
+    private lateinit var serverNameInput: EditText
+    private lateinit var rootCertificateInput: EditText
     private lateinit var credentialInput: EditText
     private lateinit var vkAccessTokenInput: EditText
     private lateinit var pinnedServerKeyInput: EditText
@@ -23,70 +26,42 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CredentialStore(this)
-
         val content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(32, 40, 32, 32)
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            )
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
         }
-
-        content.addView(TextView(this).apply {
-            text = "ГӀулакх"
-            textSize = 28f
-        })
-        content.addView(TextView(this).apply {
-            text = "Ghulakh · исследовательская сборка 0.1.0"
-            textSize = 14f
-        })
+        content.addView(TextView(this).apply { text = "ГӀулакх"; textSize = 28f })
+        content.addView(TextView(this).apply { text = "Ghulakh · исследовательская сборка 0.1.0"; textSize = 14f })
 
         hostInput = addField(content, "Адрес TURN gateway", "vpn.example.org")
         portInput = addField(content, "UDP-порт TURN gateway", "4434", numeric = true)
-        credentialInput = addField(content, "Индивидуальный ключ устройства", "Вставьте credential")
-        credentialInput.inputType = android.text.InputType.TYPE_CLASS_TEXT or
-            android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
-        credentialInput.isSaveEnabled = false
-
-        vkAccessTokenInput = addField(
+        serverNameInput = addField(content, "TLS server name (необязательно)", "vpn.example.org")
+        rootCertificateInput = addField(
             content,
-            "VK access token",
-            "Вставьте пользовательский токен VK",
-        ).apply {
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or
-                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            "Корневой сертификат DER в Base64 (необязательно)",
+            "Оставьте пустым для системного хранилища сертификатов",
+        ).apply { minLines = 2; maxLines = 4 }
+        credentialInput = addField(content, "Индивидуальный ключ устройства", "Вставьте credential").apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
             isSaveEnabled = false
         }
-        pinnedServerKeyInput = addField(
-            content,
-            "Закреплённый Noise public key сервера (64 hex)",
-            "64 шестнадцатеричных символа",
-        )
+        vkAccessTokenInput = addField(content, "VK access token", "Вставьте пользовательский токен VK").apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSaveEnabled = false
+        }
+        pinnedServerKeyInput = addField(content, "Закреплённый Noise public key сервера (64 hex)", "64 шестнадцатеричных символа")
 
-        content.addView(Button(this).apply {
-            text = "Сохранить настройки"
-            setOnClickListener { saveProfile() }
-        })
-        content.addView(Button(this).apply {
-            text = "Проверить профиль TURN"
-            setOnClickListener { testConnection() }
-        })
-        content.addView(Button(this).apply {
-            text = "Очистить сохранённые данные"
-            setOnClickListener { clearProfile() }
-        })
-
+        content.addView(Button(this).apply { text = "Сохранить настройки"; setOnClickListener { saveProfile() } })
+        content.addView(Button(this).apply { text = "Проверить профиль TURN"; setOnClickListener { testConnection() } })
+        content.addView(Button(this).apply { text = "Очистить сохранённые данные"; setOnClickListener { clearProfile() } })
         status = TextView(this).apply {
             text = "Используется защищённый VPN-туннель через TURN-реле VK Calls."
             textSize = 15f
             setPadding(0, 24, 0, 16)
         }
         content.addView(status)
-        content.addView(Button(this).apply {
-            text = "Запустить VPN"
-            setOnClickListener { startVpn() }
-        })
+        content.addView(Button(this).apply { text = "Запустить VPN"; setOnClickListener { startVpn() } })
         content.addView(Button(this).apply {
             text = "Остановить VPN"
             setOnClickListener {
@@ -94,32 +69,16 @@ class MainActivity : Activity() {
                 status.text = "Запрос на остановку VPN отправлен."
             }
         })
-
-        setContentView(ScrollView(this).apply {
-            addView(content)
-        })
+        setContentView(ScrollView(this).apply { addView(content) })
         restoreProfile()
     }
 
-    private fun addField(
-        parent: LinearLayout,
-        label: String,
-        hint: String,
-        numeric: Boolean = false,
-    ): EditText {
-        parent.addView(TextView(this).apply {
-            text = label
-            setPadding(0, 18, 0, 4)
-        })
+    private fun addField(parent: LinearLayout, label: String, hint: String, numeric: Boolean = false): EditText {
+        parent.addView(TextView(this).apply { text = label; setPadding(0, 18, 0, 4) })
         return EditText(this).apply {
             this.hint = hint
-            if (numeric) {
-                inputType = android.text.InputType.TYPE_CLASS_NUMBER
-            }
-            parent.addView(this, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ))
+            if (numeric) inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            parent.addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
     }
 
@@ -128,29 +87,31 @@ class MainActivity : Activity() {
             val profile = store.load() ?: return
             hostInput.setText(profile.host)
             portInput.setText(profile.port.toString())
+            serverNameInput.setText(profile.serverName)
+            rootCertificateInput.setText(Base64.encodeToString(profile.rootCertificateDer, Base64.NO_WRAP))
             credentialInput.setText(profile.credential)
             vkAccessTokenInput.setText(profile.vkAccessToken)
             pinnedServerKeyInput.setText(profile.pinnedServerPublicKeyHex)
-            status.text = "Настройки загружены. VPN-туннель не запущен."
+            status.text = "Полный профиль загружен из Android Keystore. VPN-туннель не запущен."
         } catch (error: Exception) {
-            status.text = "Не удалось расшифровать настройки: ${error.message}"
+            status.text = "Не удалось восстановить профиль: ${error.message}"
         }
     }
 
     private fun saveProfile() {
         try {
-            val port = portInput.text.toString().toInt()
-            val key = pinnedServerKeyInput.text.toString().trim()
+            val certificateText = rootCertificateInput.text.toString().filterNot(Char::isWhitespace)
+            val certificateDer = if (certificateText.isEmpty()) byteArrayOf() else Base64.decode(certificateText, Base64.DEFAULT)
             store.save(ConnectionProfile(
                 host = hostInput.text.toString().trim(),
-                port = port,
-                serverName = "",
+                port = portInput.text.toString().toInt(),
+                serverName = serverNameInput.text.toString().trim(),
                 credential = credentialInput.text.toString(),
-                rootCertificateDer = byteArrayOf(),
+                rootCertificateDer = certificateDer,
                 vkAccessToken = vkAccessTokenInput.text.toString(),
-                pinnedServerPublicKeyHex = key,
+                pinnedServerPublicKeyHex = pinnedServerKeyInput.text.toString().trim(),
             ))
-            status.text = "Профиль TURN и секреты зашифрованы ключом Android Keystore."
+            status.text = "Полный профиль зашифрован и сохранён ключом Android Keystore."
         } catch (error: Exception) {
             status.text = "Не удалось сохранить настройки: ${error.message}"
         }
@@ -183,6 +144,8 @@ class MainActivity : Activity() {
             credentialInput.text.clear()
             vkAccessTokenInput.text.clear()
             pinnedServerKeyInput.text.clear()
+            rootCertificateInput.text.clear()
+            serverNameInput.text.clear()
             hostInput.text.clear()
             portInput.text.clear()
             status.text = "Локальный профиль и ключ Android Keystore удалены."
@@ -207,9 +170,7 @@ class MainActivity : Activity() {
             return
         }
         val permissionIntent = VpnService.prepare(this)
-        if (permissionIntent == null) {
-            startVpnService()
-        } else {
+        if (permissionIntent == null) startVpnService() else {
             @Suppress("DEPRECATION")
             startActivityForResult(permissionIntent, REQUEST_VPN_PERMISSION)
         }
@@ -224,7 +185,5 @@ class MainActivity : Activity() {
         }
     }
 
-    private companion object {
-        const val REQUEST_VPN_PERMISSION = 1001
-    }
+    private companion object { const val REQUEST_VPN_PERMISSION = 1001 }
 }
