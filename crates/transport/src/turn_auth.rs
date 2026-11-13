@@ -245,13 +245,12 @@ pub struct VkCallsTurnAuthProvider {
 
 impl VkCallsTurnAuthProvider {
     pub fn new(username: String, password: String) -> anyhow::Result<Self> {
+        let username = Zeroizing::new(username);
+        let password = Zeroizing::new(password);
         anyhow::ensure!(!username.is_empty(), "VK Calls TURN username is empty");
         anyhow::ensure!(!password.is_empty(), "VK Calls TURN password is empty");
         anyhow::ensure!(username.len() <= 4096 && password.len() <= 4096, "VK Calls TURN credential is too large");
-        Ok(Self {
-            username: Zeroizing::new(username),
-            password: Zeroizing::new(password),
-        })
+        Ok(Self { username, password })
     }
 
     pub fn from_credentials(credentials: TurnCredentials) -> anyhow::Result<Self> {
