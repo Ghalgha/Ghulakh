@@ -210,6 +210,7 @@ class VkCallsCredentialGroupCleanupTest {
             conversationId = "test-conversation",
             finishAction = { finishCalls.incrementAndGet() },
         )
+        assertEquals(ownerJson, owner.takeTurnCredentialsJson())
         val issued = java.util.concurrent.atomic.AtomicInteger()
         val broker = VkCallsCredentialProvider.CredentialBroker(
             accessToken = "test-token",
