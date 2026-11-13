@@ -1,20 +1,20 @@
 //! Shared, versioned control-plane and data-plane message types.
 
-pub mod stun;
-pub mod turn_auth;
-pub mod turn_transaction;
-pub mod turn_request;
-pub mod turn_password;
-pub mod turn_allocation;
-pub mod turn_channel_data;
-pub mod secure_frame;
-pub mod session_handshake;
 pub mod handshake_datagram;
-pub mod turn_handshake;
-pub mod turn_path_context;
 pub mod ip_flow;
 pub mod ordered_datagram;
+pub mod secure_frame;
+pub mod session_handshake;
+pub mod stun;
+pub mod turn_allocation;
+pub mod turn_auth;
+pub mod turn_channel_data;
+pub mod turn_handshake;
+pub mod turn_password;
+pub mod turn_path_context;
 pub mod turn_peer;
+pub mod turn_request;
+pub mod turn_transaction;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -102,7 +102,6 @@ pub enum DatagramError {
     InvalidIpPacket,
 }
 
-
 fn validate_ip_packet(kind: IpPacketKind, packet: &[u8]) -> Result<(), DatagramError> {
     let first_byte = *packet.first().ok_or(DatagramError::InvalidLength)?;
     let version = first_byte >> 4;
@@ -142,8 +141,7 @@ impl DataDatagram {
         }
         validate_ip_packet(self.kind, &self.packet)?;
 
-        let payload_len = u16::try_from(self.packet.len())
-            .map_err(|_| DatagramError::TooLarge)?;
+        let payload_len = u16::try_from(self.packet.len()).map_err(|_| DatagramError::TooLarge)?;
         let mut encoded = Vec::with_capacity(total_len);
         encoded.extend_from_slice(DATAGRAM_MAGIC);
         encoded.push(DATAGRAM_VERSION);

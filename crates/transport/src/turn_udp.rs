@@ -3,12 +3,12 @@
 //! Android callers may supply a socket protected from the VPN route through
 //! VpnService.protect(). This module never creates a fallback network transport.
 
+use crate::turn_credentials::{TurnEndpoint, TurnWireTransport};
 use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::stun::StunMessage;
 use ghulakh_protocol::turn_channel_data::{
     encode_channel_data, CHANNEL_DATA_HEADER_LEN, MAX_UDP_CHANNEL_DATA_PAYLOAD,
 };
-use crate::turn_credentials::{TurnEndpoint, TurnWireTransport};
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use tokio::net::UdpSocket;
 
@@ -39,7 +39,9 @@ impl TurnUdpSocket {
     /// Bind a new UDP socket. On Android, prefer from_protected_socket so the
     /// caller can protect the descriptor before it is attached to the VPN.
     pub async fn bind(local: SocketAddr, server: SocketAddr) -> Result<Self> {
-        let socket = UdpSocket::bind(local).await.context("bind TURN UDP socket")?;
+        let socket = UdpSocket::bind(local)
+            .await
+            .context("bind TURN UDP socket")?;
         Ok(Self { socket, server })
     }
 
@@ -47,7 +49,9 @@ impl TurnUdpSocket {
     /// VpnService.protect(fd) has excluded it from the VPN's own routing.
     /// Must be called while a Tokio I/O runtime is active.
     pub fn from_protected_socket(socket: StdUdpSocket, server: SocketAddr) -> Result<Self> {
-        socket.set_nonblocking(true).context("set protected TURN socket nonblocking")?;
+        socket
+            .set_nonblocking(true)
+            .context("set protected TURN socket nonblocking")?;
         let socket = UdpSocket::from_std(socket).context("adopt protected TURN UDP socket")?;
         Ok(Self { socket, server })
     }
@@ -57,7 +61,9 @@ impl TurnUdpSocket {
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().context("read TURN socket local address")
+        self.socket
+            .local_addr()
+            .context("read TURN socket local address")
     }
 
     /// Send one raw STUN/TURN control datagram to the configured endpoint.
@@ -72,8 +78,8 @@ impl TurnUdpSocket {
             frame.len() <= MAX_UDP_CHANNEL_DATA_PAYLOAD,
             "TURN ChannelData payload exceeds UDP limit"
         );
-        let encoded = encode_channel_data(channel_number, frame)
-            .context("encode TURN ChannelData")?;
+        let encoded =
+            encode_channel_data(channel_number, frame).context("encode TURN ChannelData")?;
         self.send_datagram(&encoded).await
     }
 
@@ -83,7 +89,10 @@ impl TurnUdpSocket {
             datagram.len() <= MAX_UDP_DATAGRAM_SIZE,
             "TURN UDP datagram exceeds maximum size"
         );
-        let sent = self.socket.send_to(datagram, self.server).await
+        let sent = self
+            .socket
+            .send_to(datagram, self.server)
+            .await
             .context("send datagram to TURN endpoint")?;
         ensure!(sent == datagram.len(), "partial UDP datagram send");
         Ok(sent)
@@ -96,7 +105,10 @@ impl TurnUdpSocket {
             buffer.len() >= MAX_UDP_DATAGRAM_SIZE,
             "TURN receive buffer must hold a maximum-sized UDP datagram"
         );
-        self.socket.recv_from(buffer).await.context("receive TURN UDP datagram")
+        self.socket
+            .recv_from(buffer)
+            .await
+            .context("receive TURN UDP datagram")
     }
 
     pub fn minimum_channel_data_buffer() -> usize {
@@ -113,7 +125,8 @@ mod tests {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server.local_addr().unwrap();
         let client = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), server_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         let payload = b"turn-control-test";
         assert_eq!(client.send_datagram(payload).await.unwrap(), payload.len());
@@ -134,12 +147,16 @@ mod tests {
         let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server.local_addr().unwrap();
         let client = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), server_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
 
         client.send_channel_data(0x4001, b"frame").await.unwrap();
         let mut buffer = [0u8; 64];
         let (length, _) = server.recv_from(&mut buffer).await.unwrap();
-        assert_eq!(&buffer[..length], &[0x40, 0x01, 0, 5, b'f', b'r', b'a', b'm', b'e']);
+        assert_eq!(
+            &buffer[..length],
+            &[0x40, 0x01, 0, 5, b'f', b'r', b'a', b'm', b'e']
+        );
     }
 
     #[tokio::test]
@@ -154,7 +171,8 @@ mod tests {
             query: vec![("transport".to_owned(), "udp".to_owned())],
         };
         let client = TurnUdpSocket::bind_endpoint("127.0.0.1:0".parse().unwrap(), &endpoint)
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(client.server_addr(), address);
     }
 
@@ -167,8 +185,11 @@ mod tests {
             transport: TurnWireTransport::Tcp,
             query: vec![("transport".to_owned(), "tcp".to_owned())],
         };
-        assert!(TurnUdpSocket::bind_endpoint("127.0.0.1:0".parse().unwrap(), &endpoint)
-            .await.is_err());
+        assert!(
+            TurnUdpSocket::bind_endpoint("127.0.0.1:0".parse().unwrap(), &endpoint)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

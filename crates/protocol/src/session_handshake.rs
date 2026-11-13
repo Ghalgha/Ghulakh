@@ -8,8 +8,8 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 use snow::{params::NoiseParams, Builder, HandshakeState, TransportState};
-use zeroize::{Zeroize, Zeroizing};
 use std::net::{Ipv4Addr, Ipv6Addr};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     secure_frame::{FrameDirection, FrameOpener, FrameSealer},
@@ -92,9 +92,9 @@ pub enum SessionHandshakeError {
 }
 
 fn noise_params() -> Result<NoiseParams, SessionHandshakeError> {
-    NOISE_PATTERN.parse().map_err(|error: snow::Error| {
-        SessionHandshakeError::Noise(error.to_string())
-    })
+    NOISE_PATTERN
+        .parse()
+        .map_err(|error: snow::Error| SessionHandshakeError::Noise(error.to_string()))
 }
 
 fn noise_error(error: snow::Error) -> SessionHandshakeError {
@@ -162,8 +162,13 @@ pub struct NoiseClientFinish {
 }
 
 impl NoiseClientFinish {
-    pub fn accept_server_ack(self, acknowledgement: &[u8]) -> Result<SessionFrameKeys, SessionHandshakeError> {
-        let (keys, payload) = self.pending.accept_server_ack_with_payload(acknowledgement)?;
+    pub fn accept_server_ack(
+        self,
+        acknowledgement: &[u8],
+    ) -> Result<SessionFrameKeys, SessionHandshakeError> {
+        let (keys, payload) = self
+            .pending
+            .accept_server_ack_with_payload(acknowledgement)?;
         if !payload.is_empty() {
             return Err(SessionHandshakeError::InvalidAcknowledgement);
         }
@@ -204,7 +209,8 @@ impl NoiseClientPendingAuth {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
         let mut plaintext = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = self.transport
+        let length = self
+            .transport
             .read_message(acknowledgement, &mut plaintext)
             .map_err(noise_error)?;
         if length < AUTH_ACCEPTED.len() || &plaintext[..AUTH_ACCEPTED.len()] != AUTH_ACCEPTED {
@@ -222,10 +228,7 @@ impl NoiseClientHandshake {
         if credential.is_empty() || credential.len() > MAX_CREDENTIAL_SIZE {
             return Err(SessionHandshakeError::InvalidCredential);
         }
-        Self::new_with_encoded_credential(
-            pinned_server_key,
-            Zeroizing::new(credential.to_vec()),
-        )
+        Self::new_with_encoded_credential(pinned_server_key, Zeroizing::new(credential.to_vec()))
     }
 
     pub fn new_with_path_context(
@@ -264,7 +267,9 @@ impl NoiseClientHandshake {
             .map_err(noise_error)?;
 
         let mut message = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = state.write_message(&[], &mut message).map_err(noise_error)?;
+        let length = state
+            .write_message(&[], &mut message)
+            .map_err(noise_error)?;
         Ok((
             Self {
                 state: Some(state),
@@ -282,9 +287,14 @@ impl NoiseClientHandshake {
         if message.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
-        let mut state = self.state.take().ok_or(SessionHandshakeError::InvalidState)?;
+        let mut state = self
+            .state
+            .take()
+            .ok_or(SessionHandshakeError::InvalidState)?;
         let mut payload = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = state.read_message(message, &mut payload).map_err(noise_error)?;
+        let length = state
+            .read_message(message, &mut payload)
+            .map_err(noise_error)?;
         if length != 0 {
             return Err(SessionHandshakeError::InvalidState);
         }
@@ -293,7 +303,8 @@ impl NoiseClientHandshake {
         }
 
         let mut third_message = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = state.write_message(&self.credential, &mut third_message)
+        let length = state
+            .write_message(&self.credential, &mut third_message)
             .map_err(noise_error)?;
         let keys = SessionFrameKeys::derive(state.get_handshake_hash())?;
         let transport = state.into_transport_mode().map_err(noise_error)?;
@@ -331,14 +342,21 @@ impl NoiseServerHandshake {
         if message.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
-        let state = self.state.as_mut().ok_or(SessionHandshakeError::InvalidState)?;
+        let state = self
+            .state
+            .as_mut()
+            .ok_or(SessionHandshakeError::InvalidState)?;
         let mut payload = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = state.read_message(message, &mut payload).map_err(noise_error)?;
+        let length = state
+            .read_message(message, &mut payload)
+            .map_err(noise_error)?;
         if length != 0 {
             return Err(SessionHandshakeError::InvalidState);
         }
         let mut response = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let length = state.write_message(&[], &mut response).map_err(noise_error)?;
+        let length = state
+            .write_message(&[], &mut response)
+            .map_err(noise_error)?;
         Ok(response[..length].to_vec())
     }
 
@@ -370,25 +388,29 @@ impl NoiseServerHandshake {
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), SessionHandshakeError> {
-        self.receive_client_finish_with_path_context_builder(
-            message,
-            verify_credential,
-            |_| Ok(acknowledgement_payload.to_vec()),
-        )
+        self.receive_client_finish_with_path_context_builder(message, verify_credential, |_| {
+            Ok(acknowledgement_payload.to_vec())
+        })
     }
 
     pub fn receive_client_finish_with_path_context_builder(
         mut self,
         message: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
-        build_acknowledgement: impl FnOnce(Option<TurnPathContext>) -> Result<Vec<u8>, SessionHandshakeError>,
+        build_acknowledgement: impl FnOnce(
+            Option<TurnPathContext>,
+        ) -> Result<Vec<u8>, SessionHandshakeError>,
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), SessionHandshakeError> {
         if message.len() > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::MessageTooLarge);
         }
-        let mut state = self.state.take().ok_or(SessionHandshakeError::InvalidState)?;
+        let mut state = self
+            .state
+            .take()
+            .ok_or(SessionHandshakeError::InvalidState)?;
         let mut plaintext = Zeroizing::new([0u8; MAX_HANDSHAKE_MESSAGE]);
-        let length = state.read_message(message, plaintext.as_mut())
+        let length = state
+            .read_message(message, plaintext.as_mut())
             .map_err(noise_error)?;
         if length == 0 || length > MAX_HANDSHAKE_MESSAGE {
             return Err(SessionHandshakeError::InvalidCredential);
@@ -419,10 +441,12 @@ impl NoiseServerHandshake {
         let keys = SessionFrameKeys::derive(state.get_handshake_hash())?;
         let mut transport = state.into_transport_mode().map_err(noise_error)?;
         let mut acknowledgement = [0u8; MAX_HANDSHAKE_MESSAGE];
-        let mut acknowledgement_plaintext = Vec::with_capacity(AUTH_ACCEPTED.len() + acknowledgement_payload.len());
+        let mut acknowledgement_plaintext =
+            Vec::with_capacity(AUTH_ACCEPTED.len() + acknowledgement_payload.len());
         acknowledgement_plaintext.extend_from_slice(AUTH_ACCEPTED);
         acknowledgement_plaintext.extend_from_slice(&acknowledgement_payload);
-        let ack_length = transport.write_message(&acknowledgement_plaintext, &mut acknowledgement)
+        let ack_length = transport
+            .write_message(&acknowledgement_plaintext, &mut acknowledgement)
             .map_err(noise_error)?;
         Ok((acknowledgement[..ack_length].to_vec(), keys, path_context))
     }
@@ -522,7 +546,10 @@ mod tests {
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
         packet[2..4].copy_from_slice(&20u16.to_be_bytes());
-        DataDatagram { kind: IpPacketKind::Ipv4, packet }
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet,
+        }
     }
 
     #[test]
@@ -530,16 +557,14 @@ mod tests {
         let server_key = NoiseServerKeyPair::generate().unwrap();
         let token = b"one-time-test-device-token";
 
-        let (client, message1) =
-            NoiseClientHandshake::new(server_key.public_key(), token).unwrap();
+        let (client, message1) = NoiseClientHandshake::new(server_key.public_key(), token).unwrap();
         let mut server = NoiseServerHandshake::new(&server_key).unwrap();
         let message2 = server.receive_client_hello(&message1).unwrap();
         let finish = client.receive_server_hello(&message2).unwrap();
 
-        let (ack, server_keys) = server.receive_client_finish(
-            &finish.message,
-            |candidate| candidate == token,
-        ).unwrap();
+        let (ack, server_keys) = server
+            .receive_client_finish(&finish.message, |candidate| candidate == token)
+            .unwrap();
         let client_keys = finish.accept_server_ack(&ack).unwrap();
         assert_eq!(client_keys.session_id(), server_keys.session_id());
 
@@ -558,14 +583,16 @@ mod tests {
         let loaded = NoiseServerKeyPair::from_bytes(
             Zeroizing::new(generated.private_key_bytes().to_vec()),
             generated.public_key().to_vec(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(loaded.public_key(), generated.public_key());
 
         let wrong = NoiseServerKeyPair::generate().unwrap();
         assert!(NoiseServerKeyPair::from_bytes(
             Zeroizing::new(generated.private_key_bytes().to_vec()),
             wrong.public_key().to_vec(),
-        ).is_err());
+        )
+        .is_err());
     }
 
     #[test]
@@ -586,13 +613,15 @@ mod tests {
     fn rejects_invalid_client_credential_without_server_ack() {
         let server_key = NoiseServerKeyPair::generate().unwrap();
         let token = b"bad-credential";
-        let (client, message1) =
-            NoiseClientHandshake::new(server_key.public_key(), token).unwrap();
+        let (client, message1) = NoiseClientHandshake::new(server_key.public_key(), token).unwrap();
         let mut server = NoiseServerHandshake::new(&server_key).unwrap();
         let message2 = server.receive_client_hello(&message1).unwrap();
         let finish = client.receive_server_hello(&message2).unwrap();
         assert_eq!(
-            server.receive_client_finish(&finish.message, |_| false).err().unwrap(),
+            server
+                .receive_client_finish(&finish.message, |_| false)
+                .err()
+                .unwrap(),
             SessionHandshakeError::CredentialRejected
         );
     }

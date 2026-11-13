@@ -19,29 +19,38 @@ pub struct TurnDataSender {
 
 impl TurnDataSender {
     pub fn new(channel_number: u16, sealer: FrameSealer) -> Self {
-        Self { channel_number, sealer }
+        Self {
+            channel_number,
+            sealer,
+        }
     }
 
     /// Encode one IP packet as AEAD-protected bytes inside TURN ChannelData.
     pub fn encode_packet(&mut self, packet: &DataDatagram) -> Result<Vec<u8>> {
         let encoded_packet = packet.encode().context("encode IP datagram")?;
-        let protected = self.sealer.seal(&encoded_packet).context("protect tunnel frame")?;
-        encode_channel_data(self.channel_number, &protected)
-            .context("encode TURN ChannelData")
+        let protected = self
+            .sealer
+            .seal(&encoded_packet)
+            .context("protect tunnel frame")?;
+        encode_channel_data(self.channel_number, &protected).context("encode TURN ChannelData")
     }
 
     /// Encode a sequenced IP packet for a multipath uplink.
     pub fn encode_sequenced_packet(&mut self, packet: &SequencedDataDatagram) -> Result<Vec<u8>> {
         let encoded_packet = packet.encode().context("encode sequenced IP datagram")?;
-        let protected = self.sealer.seal(&encoded_packet).context("protect tunnel frame")?;
-        encode_channel_data(self.channel_number, &protected)
-            .context("encode TURN ChannelData")
+        let protected = self
+            .sealer
+            .seal(&encoded_packet)
+            .context("protect tunnel frame")?;
+        encode_channel_data(self.channel_number, &protected).context("encode TURN ChannelData")
     }
 
     /// Encode an authenticated path-health probe without injecting an IP packet.
     pub fn encode_keepalive(&mut self, nonce: u64) -> Result<Vec<u8>> {
         let payload = ghulakh_protocol::secure_frame::keepalive_request(nonce);
-        let protected = self.sealer.seal(&payload)
+        let protected = self
+            .sealer
+            .seal(&payload)
             .context("protect TURN session keepalive probe")?;
         encode_channel_data(self.channel_number, &protected)
             .context("encode TURN keepalive ChannelData")
@@ -61,7 +70,10 @@ pub struct TurnDataReceiver {
 
 impl TurnDataReceiver {
     pub fn new(channel_number: u16, opener: FrameOpener) -> Self {
-        Self { channel_number, opener }
+        Self {
+            channel_number,
+            opener,
+        }
     }
 
     /// Validate channel framing and authenticate/decrypt one server payload.
@@ -71,13 +83,15 @@ impl TurnDataReceiver {
             channel_data.channel_number == self.channel_number,
             "TURN ChannelData arrived on an unexpected channel"
         );
-        let plaintext = self.opener.open(channel_data.data)
+        let plaintext = self
+            .opener
+            .open(channel_data.data)
             .context("authenticate tunnel frame")?;
         if let Some(nonce) = ghulakh_protocol::secure_frame::parse_keepalive_ack(&plaintext) {
             return Ok(TurnDataPayload::KeepaliveAck(nonce));
         }
         Ok(TurnDataPayload::Packet(
-            SequencedDataDatagram::decode(&plaintext).context("decode protected IP datagram")?
+            SequencedDataDatagram::decode(&plaintext).context("decode protected IP datagram")?,
         ))
     }
 
@@ -85,7 +99,9 @@ impl TurnDataReceiver {
     pub fn decode_packet(&mut self, datagram: &[u8]) -> Result<DataDatagram> {
         match self.decode_payload(datagram)? {
             TurnDataPayload::Packet(packet) => Ok(packet.datagram),
-            TurnDataPayload::KeepaliveAck(_) => anyhow::bail!("received keepalive acknowledgement where an IP packet was expected"),
+            TurnDataPayload::KeepaliveAck(_) => {
+                anyhow::bail!("received keepalive acknowledgement where an IP packet was expected")
+            }
         }
     }
 }
@@ -154,13 +170,18 @@ mod tests {
         let session = [0x77; 8];
         let nonce = 0x0102_0304_0506_0708;
         let mut server = FrameSealer::new(key, prefix, session, FrameDirection::ServerToClient);
-        let protected = server.seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce)).unwrap();
+        let protected = server
+            .seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce))
+            .unwrap();
         let encoded = encode_channel_data(0x4001, &protected).unwrap();
         let mut client = TurnDataReceiver::new(
             0x4001,
             FrameOpener::new(key, prefix, session, FrameDirection::ServerToClient),
         );
-        assert_eq!(client.decode_payload(&encoded).unwrap(), TurnDataPayload::KeepaliveAck(nonce));
+        assert_eq!(
+            client.decode_payload(&encoded).unwrap(),
+            TurnDataPayload::KeepaliveAck(nonce)
+        );
     }
 
     #[test]
@@ -180,7 +201,6 @@ mod tests {
         assert!(receiver.decode_packet(&encoded).is_err());
     }
 }
-
 
 #[cfg(test)]
 mod relay_path_tests {
@@ -227,7 +247,10 @@ mod relay_path_tests {
             loop {
                 let (length, source) = relay.recv_from(&mut buffer).await.unwrap();
                 if source == client_addr {
-                    relay.send_to(&buffer[..length], gateway_addr).await.unwrap();
+                    relay
+                        .send_to(&buffer[..length], gateway_addr)
+                        .await
+                        .unwrap();
                 } else if source == gateway_addr {
                     relay.send_to(&buffer[..length], client_addr).await.unwrap();
                     return;
@@ -296,13 +319,11 @@ mod relay_path_tests {
         gateway.send_to(&downlink, relay_source).await.unwrap();
 
         let mut client_buffer = vec![0u8; 2048];
-        let (length, source) = timeout(
-            Duration::from_secs(2),
-            client.recv_from(&mut client_buffer),
-        )
-        .await
-        .expect("client did not receive relayed downlink")
-        .unwrap();
+        let (length, source) =
+            timeout(Duration::from_secs(2), client.recv_from(&mut client_buffer))
+                .await
+                .expect("client did not receive relayed downlink")
+                .unwrap();
         assert_eq!(source, relay_addr);
         let returned = client_rx.decode_packet(&client_buffer[..length]).unwrap();
         assert_eq!(returned, original);

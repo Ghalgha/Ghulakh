@@ -19,8 +19,8 @@ use anyhow::{ensure, Context, Result};
 use ghulakh_protocol::{
     ordered_datagram::SequencedDataDatagram,
     secure_frame::{protected_frame_session_id, FrameOpener, FrameSealer},
-    DataDatagram, IpPacketKind,
     turn_path_context::TurnPathContext,
+    DataDatagram, IpPacketKind,
 };
 use tokio::{
     net::UdpSocket,
@@ -64,18 +64,29 @@ fn destination_allowed(address: IpAddr) -> bool {
         IpAddr::V4(a) => {
             let o = a.octets();
             let subnet = |x: u8, y: u8, z: u8, bits: u8| {
-                let v = u32::from(o[0]) << 24 | u32::from(o[1]) << 16 | u32::from(o[2]) << 8 | u32::from(o[3]);
+                let v = u32::from(o[0]) << 24
+                    | u32::from(o[1]) << 16
+                    | u32::from(o[2]) << 8
+                    | u32::from(o[3]);
                 let n = u32::from(x) << 24 | u32::from(y) << 16 | u32::from(z) << 8;
                 let mask = u32::MAX << (32 - bits);
                 v & mask == n & mask
             };
-            !a.is_private() && !a.is_loopback() && !a.is_link_local()
-                && !a.is_multicast() && !a.is_unspecified() && !a.is_broadcast()
-                && o[0] != 0 && o[0] < 224
+            !a.is_private()
+                && !a.is_loopback()
+                && !a.is_link_local()
+                && !a.is_multicast()
+                && !a.is_unspecified()
+                && !a.is_broadcast()
+                && o[0] != 0
+                && o[0] < 224
                 && !(o[0] == 100 && (64..=127).contains(&o[1]))
-                && !subnet(192,0,0,24) && !subnet(192,0,2,24)
-                && !subnet(192,88,99,24) && !subnet(198,18,0,15)
-                && !subnet(198,51,100,24) && !subnet(203,0,113,24)
+                && !subnet(192, 0, 0, 24)
+                && !subnet(192, 0, 2, 24)
+                && !subnet(192, 88, 99, 24)
+                && !subnet(198, 18, 0, 15)
+                && !subnet(198, 51, 100, 24)
+                && !subnet(203, 0, 113, 24)
         }
         IpAddr::V6(a) => {
             let s = a.segments();
@@ -83,7 +94,7 @@ fn destination_allowed(address: IpAddr) -> bool {
                 let whole = (bits / 16) as usize;
                 let rem = bits % 16;
                 s[..whole] == p[..whole]
-                    && (rem == 0 || (s[whole] >> (16-rem)) == (p[whole] >> (16-rem)))
+                    && (rem == 0 || (s[whole] >> (16 - rem)) == (p[whole] >> (16 - rem)))
             };
             prefix([0x2000,0,0,0],3)
                 && !prefix([0x2000,0,0,0],16) // IETF protocol assignments
@@ -97,12 +108,26 @@ fn destination_allowed(address: IpAddr) -> bool {
 
 fn packet_endpoints(d: &DataDatagram) -> Option<(IpAddr, IpAddr)> {
     match d.kind {
-        IpPacketKind::Ipv4 if d.packet.len() >= 20 && d.packet[0] >> 4 == 4 =>
-            Some((IpAddr::V4(Ipv4Addr::new(d.packet[12],d.packet[13],d.packet[14],d.packet[15])),
-                  IpAddr::V4(Ipv4Addr::new(d.packet[16],d.packet[17],d.packet[18],d.packet[19])))),
-        IpPacketKind::Ipv6 if d.packet.len() >= 40 && d.packet[0] >> 4 == 6 =>
-            Some((IpAddr::V6(Ipv6Addr::from(<[u8;16]>::try_from(&d.packet[8..24]).ok()?)),
-                  IpAddr::V6(Ipv6Addr::from(<[u8;16]>::try_from(&d.packet[24..40]).ok()?)))),
+        IpPacketKind::Ipv4 if d.packet.len() >= 20 && d.packet[0] >> 4 == 4 => Some((
+            IpAddr::V4(Ipv4Addr::new(
+                d.packet[12],
+                d.packet[13],
+                d.packet[14],
+                d.packet[15],
+            )),
+            IpAddr::V4(Ipv4Addr::new(
+                d.packet[16],
+                d.packet[17],
+                d.packet[18],
+                d.packet[19],
+            )),
+        )),
+        IpPacketKind::Ipv6 if d.packet.len() >= 40 && d.packet[0] >> 4 == 6 => Some((
+            IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&d.packet[8..24]).ok()?)),
+            IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&d.packet[24..40]).ok()?,
+            )),
+        )),
         _ => None,
     }
 }
@@ -127,7 +152,11 @@ struct DownlinkRateController {
 
 impl DownlinkRateController {
     fn new() -> Self {
-        Self { rate: DOWNLINK_RATE_BYTES_PER_SEC, congested: false, last_adjust: None }
+        Self {
+            rate: DOWNLINK_RATE_BYTES_PER_SEC,
+            congested: false,
+            last_adjust: None,
+        }
     }
 
     fn mark_congested(&mut self) {
@@ -146,8 +175,7 @@ impl DownlinkRateController {
             self.rate = (self.rate * 0.85).max(DOWNLINK_MIN_RATE_BYTES_PER_SEC);
             self.congested = false;
         } else {
-            self.rate = (self.rate + DOWNLINK_RATE_RECOVERY_STEP)
-                .min(DOWNLINK_RATE_BYTES_PER_SEC);
+            self.rate = (self.rate + DOWNLINK_RATE_RECOVERY_STEP).min(DOWNLINK_RATE_BYTES_PER_SEC);
         }
         self.last_adjust = Some(now);
     }
@@ -181,13 +209,18 @@ impl DownlinkScheduler {
     }
 
     fn mark_congested(&mut self, session_id: [u8; 8]) {
-        self.rates.entry(session_id).or_insert_with(DownlinkRateController::new)
+        self.rates
+            .entry(session_id)
+            .or_insert_with(DownlinkRateController::new)
             .mark_congested();
     }
 
     fn refill(&mut self, id: [u8; 8], now: Instant) {
         let rate = {
-            let controller = self.rates.entry(id).or_insert_with(DownlinkRateController::new);
+            let controller = self
+                .rates
+                .entry(id)
+                .or_insert_with(DownlinkRateController::new);
             controller.tick(now);
             controller.rate
         };
@@ -245,12 +278,10 @@ impl DownlinkScheduler {
             return None;
         }
         self.evict_counter = self.evict_counter.wrapping_add(1);
-        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY)
-            || self.flows.len() >= FLOW_TABLE_MAX
+        if self.evict_counter.is_multiple_of(FLOW_EVICT_EVERY) || self.flows.len() >= FLOW_TABLE_MAX
         {
-            self.flows.retain(|_, state| {
-                now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL
-            });
+            self.flows
+                .retain(|_, state| now.saturating_duration_since(state.last_seen) < FLOW_IDLE_TTL);
             if self.flows.len() >= FLOW_TABLE_MAX {
                 self.flows.clear();
             }
@@ -282,7 +313,9 @@ impl DownlinkScheduler {
                 state.sticky_until = Some(now + SMALL_UDP_STICKY);
             }
             let sticky = state.sticky_until.is_some_and(|until| now < until);
-            let assigned_sendable = active.iter().position(|id| *id == state.session_id)
+            let assigned_sendable = active
+                .iter()
+                .position(|id| *id == state.session_id)
                 .is_some_and(|index| sendable[index]);
             if assigned_sendable && (sticky || state.burst_left >= packet.len()) {
                 state.burst_left = state.burst_left.saturating_sub(packet.len());
@@ -298,15 +331,18 @@ impl DownlinkScheduler {
             }
         } else {
             let id = self.choose(active, sendable, now, packet.len())?;
-            self.flows.insert(key, DownlinkFlowState {
-                session_id: id,
-                last_seen: now,
-                burst_left: FLOW_BURST_BYTES.saturating_sub(packet.len()),
-                sticky_until: small_udp.then_some(now + SMALL_UDP_STICKY),
-                window_start: now,
-                window_bytes: packet.len(),
-                bulk_until: None,
-            });
+            self.flows.insert(
+                key,
+                DownlinkFlowState {
+                    session_id: id,
+                    last_seen: now,
+                    burst_left: FLOW_BURST_BYTES.saturating_sub(packet.len()),
+                    sticky_until: small_udp.then_some(now + SMALL_UDP_STICKY),
+                    window_start: now,
+                    window_bytes: packet.len(),
+                    bulk_until: None,
+                },
+            );
             id
         };
         self.refill(selected, now);
@@ -329,8 +365,6 @@ impl DownlinkScheduler {
             .expect("test scheduler requires at least one sendable path")
     }
 }
-
-
 
 fn dispatch_shard_for_key(key: &[u8]) -> usize {
     let hash = key.iter().fold(0x811c_9dc5u32, |state, byte| {
@@ -525,10 +559,10 @@ pub struct TurnGateway {
 }
 
 impl TurnGateway {
-    pub async fn bind(
-        address: SocketAddr,
-    ) -> Result<(Arc<Self>, mpsc::Receiver<DataDatagram>)> {
-        let socket = UdpSocket::bind(address).await.context("bind TURN gateway UDP socket")?;
+    pub async fn bind(address: SocketAddr) -> Result<(Arc<Self>, mpsc::Receiver<DataDatagram>)> {
+        let socket = UdpSocket::bind(address)
+            .await
+            .context("bind TURN gateway UDP socket")?;
         let (tun_ingress, tun_receiver) = mpsc::channel(TUN_INGRESS_CAPACITY);
         Ok((
             Arc::new(Self {
@@ -545,7 +579,9 @@ impl TurnGateway {
     }
 
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.socket.local_addr().context("read TURN gateway address")
+        self.socket
+            .local_addr()
+            .context("read TURN gateway address")
     }
 
     /// Install the bounded Noise handshake processor before starting the UDP
@@ -556,16 +592,15 @@ impl TurnGateway {
         service: super::turn_handshake_service::TurnHandshakeService,
     ) -> Result<()> {
         let mut slot = self.handshake.lock().await;
-        ensure!(slot.is_none(), "TURN handshake service is already installed");
+        ensure!(
+            slot.is_none(),
+            "TURN handshake service is already installed"
+        );
         *slot = Some(service);
         Ok(())
     }
 
-    async fn process_handshake(
-        &self,
-        payload: &[u8],
-        relay_peer: SocketAddr,
-    ) -> Result<()> {
+    async fn process_handshake(&self, payload: &[u8], relay_peer: SocketAddr) -> Result<()> {
         use super::turn_handshake_service::TurnHandshakeOutcome;
 
         // Keep the handshake-service lock through gateway registration and
@@ -573,12 +608,17 @@ impl TurnGateway {
         // a path slot: a newer generation cannot reserve the slot while an older
         // generation is still being installed in the gateway.
         let mut handshake = self.handshake.lock().await;
-        let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+        let service = handshake
+            .as_mut()
+            .context("TURN handshake service is not installed")?;
         let outcome = service.process(payload, relay_peer, std::time::Instant::now())?;
 
         let (response, established) = match outcome {
             TurnHandshakeOutcome::Cached { response } => (response, None),
-            TurnHandshakeOutcome::Response { response, established } => (response, established),
+            TurnHandshakeOutcome::Response {
+                response,
+                established,
+            } => (response, established),
         };
         // Register the authenticated data plane before committing ServerAck.
         // A duplicate ClientFinish during registration is rejected and can retry;
@@ -594,7 +634,9 @@ impl TurnGateway {
             // The handshake-service mutex serializes duplicate ClientFinish
             // processing, so no peer can observe the cached ServerAck until
             // this transaction releases the lock.
-            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            let service = handshake
+                .as_mut()
+                .context("TURN handshake service is not installed")?;
             if let Err(error) = service.commit_established_response(
                 payload,
                 &response,
@@ -604,27 +646,39 @@ impl TurnGateway {
                 // Keep the staged authenticated handshake and its address/path lease.
                 // A retransmitted ClientFinish can retry gateway registration without
                 // attempting to advance the completed Noise state again.
-                return Err(error).context("commit ServerAck replay protection before gateway registration");
+                return Err(error)
+                    .context("commit ServerAck replay protection before gateway registration");
             }
 
-            if let Err(error) = self.register_session_with_path_generation(SessionRegistration {
-                session_id,
-                client_ipv4,
-                client_ipv6,
-                relay_peer: established.relay_peer,
-                opener,
-                sealer,
-                path_lease: path_context.map(|context| (context, Some(handshake_id))),
-            }).await {
-                let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            if let Err(error) = self
+                .register_session_with_path_generation(SessionRegistration {
+                    session_id,
+                    client_ipv4,
+                    client_ipv6,
+                    relay_peer: established.relay_peer,
+                    opener,
+                    sealer,
+                    path_lease: path_context.map(|context| (context, Some(handshake_id))),
+                })
+                .await
+            {
+                let service = handshake
+                    .as_mut()
+                    .context("TURN handshake service is not installed")?;
                 let cache_rollback = service.remove_cached_response(payload, relay_peer);
                 // Keep the staged keys and path lease for a retry of this exact
                 // ClientFinish. Only the replay-cache entry is rolled back because
                 // the gateway has not installed the route yet.
-                cache_rollback.context("rollback ServerAck replay cache after gateway registration failure")?;
-                return Err(error).context("register authenticated TURN session after ServerAck cache reservation");
+                cache_rollback.context(
+                    "rollback ServerAck replay cache after gateway registration failure",
+                )?;
+                return Err(error).context(
+                    "register authenticated TURN session after ServerAck cache reservation",
+                );
             }
-            let service = handshake.as_mut().context("TURN handshake service is not installed")?;
+            let service = handshake
+                .as_mut()
+                .context("TURN handshake service is not installed")?;
             ensure!(
                 service.finalize_established_response(handshake_id, relay_peer),
                 "completed handshake staging entry disappeared after gateway registration",
@@ -632,9 +686,15 @@ impl TurnGateway {
         }
 
         drop(handshake);
-        let sent = self.socket.send_to(&response, relay_peer).await
+        let sent = self
+            .socket
+            .send_to(&response, relay_peer)
+            .await
             .context("send raw handshake response through TURN relay")?;
-        ensure!(sent == response.len(), "partial TURN handshake response send");
+        ensure!(
+            sent == response.len(),
+            "partial TURN handshake response send"
+        );
         Ok(())
     }
 
@@ -648,9 +708,8 @@ impl TurnGateway {
         opener: FrameOpener,
         sealer: FrameSealer,
     ) -> Result<()> {
-        self.register_session_with_path(
-            session_id, client_ipv4, relay_peer, opener, sealer, None,
-        ).await
+        self.register_session_with_path(session_id, client_ipv4, relay_peer, opener, sealer, None)
+            .await
     }
 
     async fn register_session_with_path(
@@ -670,7 +729,8 @@ impl TurnGateway {
             opener,
             sealer,
             path_lease: path_context.map(|context| (context, None)),
-        }).await
+        })
+        .await
     }
 
     async fn register_session_with_path_generation(
@@ -688,36 +748,73 @@ impl TurnGateway {
         } = registration;
         let path_context = path_lease.map(|(context, _)| context);
         let lease_generation = path_lease.and_then(|(_, generation)| generation);
-        ensure!(client_ipv4 != Ipv4Addr::UNSPECIFIED, "client IPv4 address is unspecified");
-        ensure!(client_ipv4 != Ipv4Addr::BROADCAST, "client IPv4 address is broadcast");
-        ensure!(!client_ipv6.is_unspecified() && !client_ipv6.is_multicast(), "client IPv6 address is invalid");
+        ensure!(
+            client_ipv4 != Ipv4Addr::UNSPECIFIED,
+            "client IPv4 address is unspecified"
+        );
+        ensure!(
+            client_ipv4 != Ipv4Addr::BROADCAST,
+            "client IPv4 address is broadcast"
+        );
+        ensure!(
+            !client_ipv6.is_unspecified() && !client_ipv6.is_multicast(),
+            "client IPv6 address is invalid"
+        );
         ensure!(relay_peer.port() != 0, "TURN relay peer port is zero");
-        ensure!(opener.session_id() == session_id, "opener session identifier mismatch");
-        ensure!(sealer.session_id() == session_id, "sealer session identifier mismatch");
+        ensure!(
+            opener.session_id() == session_id,
+            "opener session identifier mismatch"
+        );
+        ensure!(
+            sealer.session_id() == session_id,
+            "sealer session identifier mismatch"
+        );
         if let Some(context) = path_context {
-            context.validate().context("validate registered TURN path context")?;
+            context
+                .validate()
+                .context("validate registered TURN path context")?;
         }
 
         let mut sessions = self.sessions.write().await;
         let mut clients = self.clients.write().await;
-        ensure!(!sessions.contains_key(&session_id), "TURN session already exists");
+        ensure!(
+            !sessions.contains_key(&session_id),
+            "TURN session already exists"
+        );
         let group_id = path_context.map(|context| context.group_id);
         let mut replaced_sessions = Vec::new();
         let ipv4_key = IpAddr::V4(client_ipv4);
         let ipv6_key = IpAddr::V6(client_ipv6);
         let uplink_reorder = if clients.contains_key(&ipv4_key) {
-            ensure!(group_id.is_some() && clients.get(&ipv4_key).map(|route| route.group_id) == Some(group_id),
-                "client IPv4 address is already owned by another tunnel group");
-            ensure!(clients.get(&ipv6_key).is_some_and(|route| route.group_id == group_id),
-                "client IPv6 address is already owned by another tunnel group");
+            ensure!(
+                group_id.is_some()
+                    && clients.get(&ipv4_key).map(|route| route.group_id) == Some(group_id),
+                "client IPv4 address is already owned by another tunnel group"
+            );
+            ensure!(
+                clients
+                    .get(&ipv6_key)
+                    .is_some_and(|route| route.group_id == group_id),
+                "client IPv6 address is already owned by another tunnel group"
+            );
             let updated_route = {
                 let route = clients.get_mut(&ipv4_key).expect("checked IPv4 route");
-                ensure!(!route.sessions.contains(&session_id), "TURN session already routed");
+                ensure!(
+                    !route.sessions.contains(&session_id),
+                    "TURN session already routed"
+                );
                 let context = path_context.context("multipath route requires path context")?;
-                let replaced: Vec<[u8; 8]> = route.sessions.iter().copied().filter(|id| {
-                    sessions.get(id).and_then(|entry| entry.path_context)
-                        .is_some_and(|existing| existing.path_id == context.path_id)
-                }).collect();
+                let replaced: Vec<[u8; 8]> = route
+                    .sessions
+                    .iter()
+                    .copied()
+                    .filter(|id| {
+                        sessions
+                            .get(id)
+                            .and_then(|entry| entry.path_context)
+                            .is_some_and(|existing| existing.path_id == context.path_id)
+                    })
+                    .collect();
                 for old_id in replaced {
                     sessions.remove(&old_id);
                     route.sessions.retain(|id| *id != old_id);
@@ -730,7 +827,10 @@ impl TurnGateway {
             clients.insert(ipv6_key, updated_route);
             reorder
         } else {
-            ensure!(!clients.contains_key(&ipv6_key), "client IPv6 address is already assigned");
+            ensure!(
+                !clients.contains_key(&ipv6_key),
+                "client IPv6 address is already assigned"
+            );
             let reorder = Arc::new(Mutex::new(UplinkReorderBuffer::default()));
             let route = ClientRoute {
                 group_id,
@@ -799,10 +899,22 @@ impl TurnGateway {
                     route.sessions.retain(|id| *id != session_id);
                     group_empty = route.sessions.is_empty();
                     (!group_empty).then(|| route.clone())
-                } else { None };
-                if let Some(route) = updated { clients.insert(ipv6_key, route); }
-                if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
-                Some((session.client_ipv4, session.path_context, session.lease_generation, group_empty))
+                } else {
+                    None
+                };
+                if let Some(route) = updated {
+                    clients.insert(ipv6_key, route);
+                }
+                if group_empty {
+                    clients.remove(&ipv4_key);
+                    clients.remove(&ipv6_key);
+                }
+                Some((
+                    session.client_ipv4,
+                    session.path_context,
+                    session.lease_generation,
+                    group_empty,
+                ))
             } else {
                 None
             }
@@ -811,7 +923,8 @@ impl TurnGateway {
             if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
                 scheduler.remove_session(session_id);
             }
-            self.release_session_lease(address, path_context, generation, group_empty).await;
+            self.release_session_lease(address, path_context, generation, group_empty)
+                .await;
             true
         } else {
             false
@@ -820,11 +933,16 @@ impl TurnGateway {
 
     /// Remove sessions that have had no authenticated traffic for the idle
     /// timeout and return their virtual addresses to the handshake allocator.
-    pub async fn expire_idle_sessions(&self, now: Instant, idle_timeout: Duration) -> Vec<Ipv4Addr> {
+    pub async fn expire_idle_sessions(
+        &self,
+        now: Instant,
+        idle_timeout: Duration,
+    ) -> Vec<Ipv4Addr> {
         let expired = {
             let mut sessions = self.sessions.write().await;
             let mut clients = self.clients.write().await;
-            let expired_ids: Vec<[u8; 8]> = sessions.iter()
+            let expired_ids: Vec<[u8; 8]> = sessions
+                .iter()
                 .filter_map(|(session_id, session)| {
                     let last = session.last_activity.lock().ok().map(|value| *value)?;
                     (now.saturating_duration_since(last) >= idle_timeout).then_some(*session_id)
@@ -840,10 +958,23 @@ impl TurnGateway {
                         route.sessions.retain(|id| *id != session_id);
                         group_empty = route.sessions.is_empty();
                         (!group_empty).then(|| route.clone())
-                    } else { None };
-                    if let Some(route) = updated { clients.insert(ipv6_key, route); }
-                    if group_empty { clients.remove(&ipv4_key); clients.remove(&ipv6_key); }
-                    leases.push((session_id, session.client_ipv4, session.path_context, session.lease_generation, group_empty));
+                    } else {
+                        None
+                    };
+                    if let Some(route) = updated {
+                        clients.insert(ipv6_key, route);
+                    }
+                    if group_empty {
+                        clients.remove(&ipv4_key);
+                        clients.remove(&ipv6_key);
+                    }
+                    leases.push((
+                        session_id,
+                        session.client_ipv4,
+                        session.path_context,
+                        session.lease_generation,
+                        group_empty,
+                    ));
                 }
             }
             leases
@@ -853,7 +984,8 @@ impl TurnGateway {
             if let Ok(mut scheduler) = self.downlink_scheduler.lock() {
                 scheduler.remove_session(session_id);
             }
-            self.release_session_lease(address, path_context, generation, group_empty).await;
+            self.release_session_lease(address, path_context, generation, group_empty)
+                .await;
             if group_empty {
                 released.push(address);
             }
@@ -882,7 +1014,8 @@ impl TurnGateway {
             return 0;
         };
         let session = self.sessions.read().await.get(&session_id).cloned();
-        let group_id = session.and_then(|session| session.path_context.map(|context| context.group_id));
+        let group_id =
+            session.and_then(|session| session.path_context.map(|context| context.group_id));
         session_dispatch_shard(session_id, group_id)
     }
 
@@ -915,9 +1048,8 @@ impl TurnGateway {
         let mut senders = Vec::with_capacity(DATAGRAM_DISPATCH_SHARDS);
         let mut workers = tokio::task::JoinSet::new();
         for _ in 0..DATAGRAM_DISPATCH_SHARDS {
-            let (sender, mut receiver) = mpsc::channel::<(Vec<u8>, SocketAddr)>(
-                DATAGRAM_DISPATCH_CAPACITY,
-            );
+            let (sender, mut receiver) =
+                mpsc::channel::<(Vec<u8>, SocketAddr)>(DATAGRAM_DISPATCH_CAPACITY);
             senders.push(sender);
             let gateway = Arc::clone(&self);
             workers.spawn(async move {
@@ -964,7 +1096,9 @@ impl TurnGateway {
         // the peer. The gateway therefore receives raw UDP payloads.
         if datagram.starts_with(b"GHHS") {
             if self.process_handshake(datagram, source).await.is_err() {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .rejected_packet
+                    .fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
@@ -977,18 +1111,24 @@ impl TurnGateway {
         };
         let session = self.sessions.read().await.get(&session_id).cloned();
         let Some(session) = session else {
-            self.counters.rejected_session.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .rejected_session
+                .fetch_add(1, Ordering::Relaxed);
             return;
         };
         if source != session.relay_peer {
-            self.counters.rejected_source.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .rejected_source
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         let decoded = {
             let mut crypto = match session.crypto.lock() {
                 Ok(crypto) => crypto,
                 Err(_) => {
-                    self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                    self.counters
+                        .rejected_packet
+                        .fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             };
@@ -997,7 +1137,9 @@ impl TurnGateway {
         let plaintext = match decoded {
             Ok(plaintext) => plaintext,
             Err(_) => {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .rejected_packet
+                    .fetch_add(1, Ordering::Relaxed);
                 return;
             }
         };
@@ -1008,31 +1150,49 @@ impl TurnGateway {
                 *last_activity = Instant::now();
             }
             session.downlink_failed.store(false, Ordering::Release);
-            let nonce = u64::from_be_bytes(plaintext[4..12].try_into().expect("validated keepalive length"));
+            let nonce = u64::from_be_bytes(
+                plaintext[4..12]
+                    .try_into()
+                    .expect("validated keepalive length"),
+            );
             let response = {
                 let mut crypto = match session.crypto.lock() {
                     Ok(crypto) => crypto,
                     Err(_) => {
-                        self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                        self.counters
+                            .rejected_packet
+                            .fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 };
-                match crypto.sealer.seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce)) {
+                match crypto
+                    .sealer
+                    .seal(&ghulakh_protocol::secure_frame::keepalive_ack(nonce))
+                {
                     Ok(response) => response,
                     Err(_) => {
-                        self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                        self.counters
+                            .rejected_packet
+                            .fetch_add(1, Ordering::Relaxed);
                         return;
                     }
                 }
             };
             if self.socket.send_to(&response, source).await.is_err() {
-                self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+                self.counters
+                    .rejected_packet
+                    .fetch_add(1, Ordering::Relaxed);
             }
             return;
         }
         let packet = match SequencedDataDatagram::decode(&plaintext) {
             Ok(packet) => packet,
-            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
+            _ => {
+                self.counters
+                    .rejected_packet
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
+            }
         };
         let datagram = &packet.datagram;
         if let Ok(mut last_activity) = session.last_activity.lock() {
@@ -1040,15 +1200,23 @@ impl TurnGateway {
         }
         session.downlink_failed.store(false, Ordering::Release);
         let Some((source_ip, destination_ip)) = packet_endpoints(datagram) else {
-            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .rejected_packet
+                .fetch_add(1, Ordering::Relaxed);
             return;
         };
-        if source_ip != IpAddr::V4(session.client_ipv4) && source_ip != IpAddr::V6(session.client_ipv6) {
-            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+        if source_ip != IpAddr::V4(session.client_ipv4)
+            && source_ip != IpAddr::V6(session.client_ipv6)
+        {
+            self.counters
+                .rejected_packet
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         if !destination_allowed(destination_ip) {
-            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .rejected_packet
+                .fetch_add(1, Ordering::Relaxed);
             return;
         }
         if !update_and_deliver_uplink(
@@ -1063,7 +1231,9 @@ impl TurnGateway {
                 }
             },
         ) {
-            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            self.counters
+                .rejected_packet
+                .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -1071,16 +1241,31 @@ impl TurnGateway {
     /// virtual IPv4 address is the packet destination.
     pub async fn send_downlink(&self, packet: &DataDatagram) -> Result<()> {
         let destination = match packet.kind {
-            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(packet.packet[16], packet.packet[17], packet.packet[18], packet.packet[19])),
-            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&packet.packet[24..40]).expect("validated IPv6 destination length"))),
+            IpPacketKind::Ipv4 if packet.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(
+                packet.packet[16],
+                packet.packet[17],
+                packet.packet[18],
+                packet.packet[19],
+            )),
+            IpPacketKind::Ipv6 if packet.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(
+                <[u8; 16]>::try_from(&packet.packet[24..40])
+                    .expect("validated IPv6 destination length"),
+            )),
             IpPacketKind::Ipv4 => anyhow::bail!("IPv4 packet is truncated"),
             IpPacketKind::Ipv6 => anyhow::bail!("IPv6 packet is truncated"),
         };
-        let route = self.clients.read().await.get(&destination).cloned()
+        let route = self
+            .clients
+            .read()
+            .await
+            .get(&destination)
+            .cloned()
             .context("no active TURN session group for packet destination")?;
         let now = Instant::now();
         let sessions = self.sessions.read().await;
-        let active_paths: Vec<([u8; 8], Arc<GatewaySession>)> = route.sessions.iter()
+        let active_paths: Vec<([u8; 8], Arc<GatewaySession>)> = route
+            .sessions
+            .iter()
             .filter_map(|session_id| {
                 let session = sessions.get(session_id)?.clone();
                 let last_activity = *session.last_activity.lock().ok()?;
@@ -1089,14 +1274,21 @@ impl TurnGateway {
             })
             .collect();
         drop(sessions);
-        ensure!(!active_paths.is_empty(), "TURN session group has no recently authenticated paths");
+        ensure!(
+            !active_paths.is_empty(),
+            "TURN session group has no recently authenticated paths"
+        );
         let active_ids: Vec<[u8; 8]> = active_paths.iter().map(|(id, _)| *id).collect();
-        let sendable: Vec<bool> = active_paths.iter().map(|(_, session)| {
-            !session.downlink_failed.load(Ordering::Acquire)
-                && session.downlink_sender.capacity() > 0
-        }).collect();
+        let sendable: Vec<bool> = active_paths
+            .iter()
+            .map(|(_, session)| {
+                !session.downlink_failed.load(Ordering::Acquire)
+                    && session.downlink_sender.capacity() > 0
+            })
+            .collect();
         let selected_id = {
-            self.downlink_scheduler.lock()
+            self.downlink_scheduler
+                .lock()
                 .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
                 .select_sendable(&active_ids, &sendable, destination, &packet.packet, now)
         };
@@ -1104,20 +1296,28 @@ impl TurnGateway {
             self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         };
-        let session = active_paths.iter().find(|(id, _)| *id == selected_id)
+        let session = active_paths
+            .iter()
+            .find(|(id, _)| *id == selected_id)
             .map(|(_, session)| Arc::clone(session))
             .context("selected TURN downlink path disappeared")?;
-        let sequence = route.next_downlink_sequence.try_update(
-            Ordering::AcqRel,
-            Ordering::Acquire,
-            |current| current.checked_add(1),
-        ).map_err(|_| anyhow::anyhow!("TURN downlink sequence space exhausted"))?;
+        let sequence = route
+            .next_downlink_sequence
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(1)
+            })
+            .map_err(|_| anyhow::anyhow!("TURN downlink sequence space exhausted"))?;
         let ordered_packet = SequencedDataDatagram::new(sequence, packet.clone())
-            .encode().context("encode ordered downlink IP packet")?;
+            .encode()
+            .context("encode ordered downlink IP packet")?;
         let encoded = {
-            let mut crypto = session.crypto.lock()
+            let mut crypto = session
+                .crypto
+                .lock()
                 .map_err(|_| anyhow::anyhow!("TURN session crypto lock poisoned"))?;
-            crypto.sealer.seal(&ordered_packet)
+            crypto
+                .sealer
+                .seal(&ordered_packet)
                 .context("protect TURN downlink frame")?
         };
         match session.downlink_sender.try_send(encoded) {
@@ -1125,7 +1325,8 @@ impl TurnGateway {
             Err(mpsc::error::TrySendError::Full(_)) => {
                 // Drop newest rather than moving it to another path after the
                 // capacity snapshot; this preserves FIFO for the selected flowlet.
-                self.downlink_scheduler.lock()
+                self.downlink_scheduler
+                    .lock()
                     .map_err(|_| anyhow::anyhow!("TURN downlink scheduler lock poisoned"))?
                     .mark_congested(selected_id);
                 self.counters.queue_drops.fetch_add(1, Ordering::Relaxed);
@@ -1133,7 +1334,9 @@ impl TurnGateway {
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 session.downlink_failed.store(true, Ordering::Release);
-                Err(anyhow::anyhow!("selected TURN downlink path queue is closed"))
+                Err(anyhow::anyhow!(
+                    "selected TURN downlink path queue is closed"
+                ))
             }
         }
     }
@@ -1155,7 +1358,10 @@ impl TurnGateway {
 mod tests {
     use super::*;
     use ghulakh_protocol::secure_frame::FrameDirection;
-    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+    use tokio::{
+        net::UdpSocket,
+        time::{timeout, Duration},
+    };
 
     const SESSION: [u8; 8] = [0x61; 8];
     const CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
@@ -1179,10 +1385,15 @@ mod tests {
             bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
             bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
             bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
-            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+            DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: bytes,
+            }
         };
         let mut reorder = UplinkReorderBuffer::default();
-        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        assert!(reorder
+            .push(SequencedDataDatagram::new(1, make_packet(3)), now)
+            .is_empty());
         let ready = reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now);
         assert_eq!(ready.len(), 2);
         assert_eq!(ready[0].packet[5], 2);
@@ -1204,14 +1415,24 @@ mod tests {
             bytes[20..22].copy_from_slice(&12000u16.to_be_bytes());
             bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
             bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
-            DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+            DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: bytes,
+            }
         };
         let mut reorder = UplinkReorderBuffer::default();
-        assert!(reorder.push(SequencedDataDatagram::new(1, make_packet(3)), now).is_empty());
+        assert!(reorder
+            .push(SequencedDataDatagram::new(1, make_packet(3)), now)
+            .is_empty());
         let ready = reorder.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT);
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].packet[5], 3);
-        assert!(reorder.push(SequencedDataDatagram::new(0, make_packet(2)), now + UPLINK_REORDER_GAP_TIMEOUT).is_empty());
+        assert!(reorder
+            .push(
+                SequencedDataDatagram::new(0, make_packet(2)),
+                now + UPLINK_REORDER_GAP_TIMEOUT
+            )
+            .is_empty());
     }
 
     #[test]
@@ -1237,7 +1458,10 @@ mod tests {
         bytes[9] = 17;
         bytes[12..16].copy_from_slice(&source.octets());
         bytes[16..20].copy_from_slice(&destination.octets());
-        DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: bytes,
+        }
     }
 
     async fn spawn_mock_turn_allocation(
@@ -1246,16 +1470,19 @@ mod tests {
         username: &str,
         password: &str,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        use std::{collections::{HashMap, HashSet}, net::IpAddr};
-        use md5::{Digest, Md5};
         use ghulakh_protocol::stun::{
-            append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
-            decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-            ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
-            ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
-            METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
+            append_message_integrity, decode_xor_address, encode_xor_address, StunAttribute,
+            StunClass, StunMessage, ATTR_CHANNEL_NUMBER, ATTR_ERROR_CODE, ATTR_LIFETIME,
+            ATTR_NONCE, ATTR_REALM, ATTR_REQUESTED_ADDRESS_FAMILY, ATTR_REQUESTED_TRANSPORT,
+            ATTR_USERNAME, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS, METHOD_ALLOCATE,
+            METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
         };
         use ghulakh_protocol::turn_channel_data::{decode_channel_data, encode_channel_data};
+        use md5::{Digest, Md5};
+        use std::{
+            collections::{HashMap, HashSet},
+            net::IpAddr,
+        };
 
         let client_facing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = client_facing.local_addr().unwrap();
@@ -1378,9 +1605,11 @@ mod tests {
         bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
         bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
         bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
-        DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: bytes,
+        }
     }
-
 
     #[test]
     fn path_group_sessions_share_one_fifo_dispatch_shard() {
@@ -1411,48 +1640,102 @@ mod tests {
 
     #[tokio::test]
     async fn registers_multiple_authenticated_paths_for_one_virtual_client() {
-        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let group_id = [0x73; 16];
         let session_a = [0x81; 8];
         let session_b = [0x82; 8];
 
-        let context_a = TurnPathContext { group_id, path_id: 0, path_count: 2 };
-        let context_b = TurnPathContext { group_id, path_id: 1, path_count: 2 };
+        let context_a = TurnPathContext {
+            group_id,
+            path_id: 0,
+            path_count: 2,
+        };
+        let context_b = TurnPathContext {
+            group_id,
+            path_id: 1,
+            path_count: 2,
+        };
 
-        gateway.register_session_with_path(
-            session_a,
-            CLIENT_IP,
-            relay_a.local_addr().unwrap(),
-            FrameOpener::new([0x11; 32], [0x31; 4], session_a, FrameDirection::ClientToServer),
-            FrameSealer::new([0x22; 32], [0x42; 4], session_a, FrameDirection::ServerToClient),
-            Some(context_a),
-        ).await.unwrap();
-        gateway.register_session_with_path(
-            session_b,
-            CLIENT_IP,
-            relay_b.local_addr().unwrap(),
-            FrameOpener::new([0x12; 32], [0x32; 4], session_b, FrameDirection::ClientToServer),
-            FrameSealer::new([0x23; 32], [0x43; 4], session_b, FrameDirection::ServerToClient),
-            Some(context_b),
-        ).await.unwrap();
+        gateway
+            .register_session_with_path(
+                session_a,
+                CLIENT_IP,
+                relay_a.local_addr().unwrap(),
+                FrameOpener::new(
+                    [0x11; 32],
+                    [0x31; 4],
+                    session_a,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    [0x22; 32],
+                    [0x42; 4],
+                    session_a,
+                    FrameDirection::ServerToClient,
+                ),
+                Some(context_a),
+            )
+            .await
+            .unwrap();
+        gateway
+            .register_session_with_path(
+                session_b,
+                CLIENT_IP,
+                relay_b.local_addr().unwrap(),
+                FrameOpener::new(
+                    [0x12; 32],
+                    [0x32; 4],
+                    session_b,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    [0x23; 32],
+                    [0x43; 4],
+                    session_b,
+                    FrameDirection::ServerToClient,
+                ),
+                Some(context_b),
+            )
+            .await
+            .unwrap();
 
-        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
+        let route = gateway
+            .clients
+            .read()
+            .await
+            .get(&IpAddr::V4(CLIENT_IP))
+            .cloned()
+            .unwrap();
         assert_eq!(route.group_id, Some(group_id));
         assert_eq!(route.sessions.len(), 2);
 
         assert!(gateway.unregister_session(session_a).await);
-        let route = gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).cloned().unwrap();
+        let route = gateway
+            .clients
+            .read()
+            .await
+            .get(&IpAddr::V4(CLIENT_IP))
+            .cloned()
+            .unwrap();
         assert_eq!(route.sessions, vec![session_b]);
 
         assert!(gateway.unregister_session(session_b).await);
-        assert!(!gateway.clients.read().await.contains_key(&IpAddr::V4(CLIENT_IP)));
+        assert!(!gateway
+            .clients
+            .read()
+            .await
+            .contains_key(&IpAddr::V4(CLIENT_IP)));
     }
 
     #[tokio::test]
     async fn downlink_skips_path_without_recent_authenticated_client_traffic() {
-        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let group_id = [0x74; 16];
@@ -1463,18 +1746,31 @@ mod tests {
             (session_a, &relay_a, 0u16, [0x51; 32]),
             (session_b, &relay_b, 1u16, [0x52; 32]),
         ] {
-            let context = TurnPathContext { group_id, path_id, path_count: 2 };
-            gateway.register_session_with_path(
-                session_id,
-                CLIENT_IP,
-                relay.local_addr().unwrap(),
-                FrameOpener::new(key, [0x61; 4], session_id, FrameDirection::ClientToServer),
-                FrameSealer::new(key, [0x71; 4], session_id, FrameDirection::ServerToClient),
-                Some(context),
-            ).await.unwrap();
+            let context = TurnPathContext {
+                group_id,
+                path_id,
+                path_count: 2,
+            };
+            gateway
+                .register_session_with_path(
+                    session_id,
+                    CLIENT_IP,
+                    relay.local_addr().unwrap(),
+                    FrameOpener::new(key, [0x61; 4], session_id, FrameDirection::ClientToServer),
+                    FrameSealer::new(key, [0x71; 4], session_id, FrameDirection::ServerToClient),
+                    Some(context),
+                )
+                .await
+                .unwrap();
         }
 
-        let stale = gateway.sessions.read().await.get(&session_a).cloned().unwrap();
+        let stale = gateway
+            .sessions
+            .read()
+            .await
+            .get(&session_a)
+            .cloned()
+            .unwrap();
         *stale.last_activity.lock().unwrap() =
             Instant::now() - PATH_HEALTH_TIMEOUT - Duration::from_secs(1);
 
@@ -1483,15 +1779,22 @@ mod tests {
 
         let mut buffer = [0u8; 1500];
         let (length, _) = timeout(Duration::from_secs(1), relay_b.recv_from(&mut buffer))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(length > 0);
-        assert!(timeout(Duration::from_millis(30), relay_a.recv_from(&mut buffer)).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(30), relay_a.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn multipath_gateway_forwards_authenticated_uplink_and_flow_affine_downlink() {
-        let (gateway, mut tun_rx) =
-            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let group_id = [0x75; 16];
@@ -1507,27 +1810,50 @@ mod tests {
         let server_prefix_b = [0x42; 4];
 
         for (session_id, relay, path_id, client_key, client_prefix, server_key, server_prefix) in [
-            (session_a, &relay_a, 0u16, client_key_a, client_prefix_a, server_key_a, server_prefix_a),
-            (session_b, &relay_b, 1u16, client_key_b, client_prefix_b, server_key_b, server_prefix_b),
+            (
+                session_a,
+                &relay_a,
+                0u16,
+                client_key_a,
+                client_prefix_a,
+                server_key_a,
+                server_prefix_a,
+            ),
+            (
+                session_b,
+                &relay_b,
+                1u16,
+                client_key_b,
+                client_prefix_b,
+                server_key_b,
+                server_prefix_b,
+            ),
         ] {
-            gateway.register_session_with_path(
-                session_id,
-                CLIENT_IP,
-                relay.local_addr().unwrap(),
-                FrameOpener::new(
-                    client_key,
-                    client_prefix,
+            gateway
+                .register_session_with_path(
                     session_id,
-                    FrameDirection::ClientToServer,
-                ),
-                FrameSealer::new(
-                    server_key,
-                    server_prefix,
-                    session_id,
-                    FrameDirection::ServerToClient,
-                ),
-                Some(TurnPathContext { group_id, path_id, path_count: 2 }),
-            ).await.unwrap();
+                    CLIENT_IP,
+                    relay.local_addr().unwrap(),
+                    FrameOpener::new(
+                        client_key,
+                        client_prefix,
+                        session_id,
+                        FrameDirection::ClientToServer,
+                    ),
+                    FrameSealer::new(
+                        server_key,
+                        server_prefix,
+                        session_id,
+                        FrameDirection::ServerToClient,
+                    ),
+                    Some(TurnPathContext {
+                        group_id,
+                        path_id,
+                        path_count: 2,
+                    }),
+                )
+                .await
+                .unwrap();
         }
 
         // Each independent path authenticates an uplink with its own key and
@@ -1535,24 +1861,40 @@ mod tests {
         let uplink_a = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
         let uplink_b = packet(CLIENT_IP, Ipv4Addr::new(8, 8, 8, 8));
         for (session_id, relay, key, prefix, uplink) in [
-            (session_a, &relay_a, client_key_a, client_prefix_a, uplink_a.clone()),
-            (session_b, &relay_b, client_key_b, client_prefix_b, uplink_b.clone()),
+            (
+                session_a,
+                &relay_a,
+                client_key_a,
+                client_prefix_a,
+                uplink_a.clone(),
+            ),
+            (
+                session_b,
+                &relay_b,
+                client_key_b,
+                client_prefix_b,
+                uplink_b.clone(),
+            ),
         ] {
-            let mut sealer = FrameSealer::new(
-                key,
-                prefix,
-                session_id,
-                FrameDirection::ClientToServer,
-            );
+            let mut sealer =
+                FrameSealer::new(key, prefix, session_id, FrameDirection::ClientToServer);
             let frame = sealer.seal(&uplink.encode().unwrap()).unwrap();
-            gateway.process_datagram(&frame, relay.local_addr().unwrap()).await;
+            gateway
+                .process_datagram(&frame, relay.local_addr().unwrap())
+                .await;
         }
         assert_eq!(
-            timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(1), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
             uplink_a
         );
         assert_eq!(
-            timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(1), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
             uplink_b
         );
 
@@ -1583,7 +1925,10 @@ mod tests {
             bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
             bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
             bytes[24..26].copy_from_slice(&8u16.to_be_bytes());
-            let flow = DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes };
+            let flow = DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: bytes,
+            };
             let path = (ghulakh_protocol::ip_flow::flow_hash(&flow.packet) as usize) % 2;
             if flows[path].is_none() {
                 flows[path] = Some((path, flow));
@@ -1599,19 +1944,34 @@ mod tests {
             let mut buffer = [0u8; 1500];
             let (length, _) = if expected_path == 0 {
                 timeout(Duration::from_secs(1), relay_a.recv_from(&mut buffer))
-                    .await.unwrap().unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap()
             } else {
                 timeout(Duration::from_secs(1), relay_b.recv_from(&mut buffer))
-                    .await.unwrap().unwrap()
+                    .await
+                    .unwrap()
+                    .unwrap()
             };
             let plaintext = if expected_path == 0 {
                 opener_a.open(&buffer[..length]).unwrap()
             } else {
                 opener_b.open(&buffer[..length]).unwrap()
             };
-            assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, flow);
-            let other = if expected_path == 0 { &relay_b } else { &relay_a };
-            assert!(timeout(Duration::from_millis(25), other.recv_from(&mut buffer)).await.is_err());
+            assert_eq!(
+                SequencedDataDatagram::decode(&plaintext).unwrap().datagram,
+                flow
+            );
+            let other = if expected_path == 0 {
+                &relay_b
+            } else {
+                &relay_a
+            };
+            assert!(
+                timeout(Duration::from_millis(25), other.recv_from(&mut buffer))
+                    .await
+                    .is_err()
+            );
         }
 
         assert_eq!(gateway.stats().accepted, 2);
@@ -1620,26 +1980,26 @@ mod tests {
 
     #[tokio::test]
     async fn full_mock_turn_client_to_server_to_client_tunnel() {
-        use std::{
-            collections::{HashMap, HashSet},
-            net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
-        };
         use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
-        use md5::{Digest, Md5};
         use ghulakh_protocol::{
             session_handshake::NoiseServerKeyPair,
             stun::{
-                append_message_integrity, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, ATTR_USERNAME,
-                decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-                ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
-                ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
-                METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
+                append_message_integrity, decode_xor_address, encode_xor_address, StunAttribute,
+                StunClass, StunMessage, ATTR_CHANNEL_NUMBER, ATTR_ERROR_CODE, ATTR_LIFETIME,
+                ATTR_NONCE, ATTR_REALM, ATTR_REQUESTED_ADDRESS_FAMILY, ATTR_REQUESTED_TRANSPORT,
+                ATTR_USERNAME, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS, METHOD_ALLOCATE,
+                METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
             },
             turn_channel_data::{decode_channel_data, encode_channel_data},
         };
         use ghulakh_transport::{
             turn_client::{TurnClientRuntime, DEFAULT_TURN_CHANNEL},
             turn_credentials::TurnCredentials,
+        };
+        use md5::{Digest, Md5};
+        use std::{
+            collections::{HashMap, HashSet},
+            net::{IpAddr, SocketAddr, UdpSocket as StdUdpSocket},
         };
         use tokio::{net::UdpSocket as TokioUdpSocket, sync::oneshot};
 
@@ -1650,7 +2010,9 @@ mod tests {
         let relay_addr = relay.local_addr().unwrap();
         let peer_socket = TokioUdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer_addr = peer_socket.local_addr().unwrap();
-        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
 
         let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
@@ -1671,7 +2033,8 @@ mod tests {
                 "credential": "temporary-password",
                 "urls": [format!("turn:{}?transport=udp", relay_addr)]
             }
-        }).to_string();
+        })
+        .to_string();
         let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
 
         let pinned_key = keypair.public_key();
@@ -1792,7 +2155,9 @@ mod tests {
             gateway_addr,
             pinned_key,
             b"device-secret",
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         let config = client.config();
         assert_eq!(config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
         assert_eq!(config.mtu, 1100);
@@ -1801,13 +2166,17 @@ mod tests {
         let uplink = packet(config.virtual_ipv4, Ipv4Addr::new(1, 1, 1, 1));
         client.send_packet(uplink.clone()).await.unwrap();
         let received_uplink = timeout(Duration::from_secs(2), tun_rx.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received_uplink, uplink);
 
         let downlink = packet(Ipv4Addr::new(1, 1, 1, 1), config.virtual_ipv4);
         gateway.send_downlink(&downlink).await.unwrap();
         let received_downlink = timeout(Duration::from_secs(2), client.receive_packet())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received_downlink.sequence, Some(0));
         assert_eq!(received_downlink.datagram, downlink);
         assert_eq!(gateway.stats().accepted, 1);
@@ -1820,24 +2189,23 @@ mod tests {
 
     #[tokio::test]
     async fn full_mock_multipath_turn_allocations_recover_after_simultaneous_relay_loss() {
-        use std::net::UdpSocket as StdUdpSocket;
         use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
         use ghulakh_protocol::{
-            session_handshake::NoiseServerKeyPair,
+            ip_flow::flow_hash, session_handshake::NoiseServerKeyPair,
             turn_path_context::TurnPathContext,
-            ip_flow::flow_hash,
         };
         use ghulakh_transport::{
             turn_client::{TurnClientPathGroup, TurnClientRuntime},
             turn_credentials::TurnCredentials,
         };
+        use std::net::UdpSocket as StdUdpSocket;
 
-        let (gateway, mut tun_rx) =
-            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
-        let verifier: Arc<CredentialVerifier> =
-            Arc::new(|candidate| candidate == b"device-secret");
+        let verifier: Arc<CredentialVerifier> = Arc::new(|candidate| candidate == b"device-secret");
         let service = TurnHandshakeService::new(Arc::clone(&keypair), verifier).unwrap();
         gateway.install_handshake_service(service).await.unwrap();
         let gateway_task = {
@@ -1852,13 +2220,13 @@ mod tests {
             let protected = StdUdpSocket::bind("127.0.0.1:0").unwrap();
             protected.set_nonblocking(true).unwrap();
             let client_addr = protected.local_addr().unwrap();
-            let (relay_addr, relay_task) =
-                spawn_mock_turn_allocation(
-                    client_addr,
-                    gateway_addr,
-                    "temporary-user",
-                    "temporary-password",
-                ).await;
+            let (relay_addr, relay_task) = spawn_mock_turn_allocation(
+                client_addr,
+                gateway_addr,
+                "temporary-user",
+                "temporary-password",
+            )
+            .await;
             relay_tasks.push(relay_task);
 
             let credentials_json = serde_json::json!({
@@ -1867,10 +2235,15 @@ mod tests {
                     "credential": "temporary-password",
                     "urls": [format!("turn:{}?transport=udp", relay_addr)]
                 }
-            }).to_string();
+            })
+            .to_string();
             let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
             let pinned_key = keypair.public_key().to_vec();
-            let context = TurnPathContext { group_id, path_id, path_count: 2 };
+            let context = TurnPathContext {
+                group_id,
+                path_id,
+                path_count: 2,
+            };
             connect_tasks.push(tokio::spawn(async move {
                 TurnClientRuntime::connect_with_path_context(
                     protected,
@@ -1879,7 +2252,8 @@ mod tests {
                     &pinned_key,
                     b"device-secret",
                     context,
-                ).await
+                )
+                .await
             }));
         }
 
@@ -1911,8 +2285,14 @@ mod tests {
         }
 
         let mut received = vec![
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
         ];
         received.sort_by_key(|packet| packet.packet[20..22].to_vec());
         let mut expected = uplinks.to_vec();
@@ -1938,8 +2318,14 @@ mod tests {
             gateway.send_downlink(downlink).await.unwrap();
         }
         let mut merged = vec![
-            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
-            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet())
+                .await
+                .unwrap()
+                .unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet())
+                .await
+                .unwrap()
+                .unwrap(),
         ];
         merged.sort_by_key(|packet| packet.packet[20..22].to_vec());
         let mut expected_downlinks = downlinks.to_vec();
@@ -1960,7 +2346,9 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("both relay failures must be detected by path-health timeout");
+        })
+        .await
+        .expect("both relay failures must be detected by path-health timeout");
         assert_eq!(group.active_paths(), 0);
 
         let mut replacement_tasks = Vec::new();
@@ -1971,12 +2359,8 @@ mod tests {
             let client_addr = protected.local_addr().unwrap();
             let username = format!("recovery-user-{path_id}");
             let password = format!("recovery-password-{path_id}");
-            let (relay_addr, relay_task) = spawn_mock_turn_allocation(
-                client_addr,
-                gateway_addr,
-                &username,
-                &password,
-            ).await;
+            let (relay_addr, relay_task) =
+                spawn_mock_turn_allocation(client_addr, gateway_addr, &username, &password).await;
             replacement_relays.push(relay_task);
 
             // A new credentials response is issued for each replacement
@@ -1988,10 +2372,15 @@ mod tests {
                     "credential": password,
                     "urls": [format!("turn:{}?transport=udp", relay_addr)]
                 }
-            }).to_string();
+            })
+            .to_string();
             let credentials = TurnCredentials::from_vk_response_json(&credentials_json).unwrap();
             let pinned_key = keypair.public_key().to_vec();
-            let context = TurnPathContext { group_id, path_id, path_count: 2 };
+            let context = TurnPathContext {
+                group_id,
+                path_id,
+                path_count: 2,
+            };
             replacement_tasks.push(tokio::spawn(async move {
                 TurnClientRuntime::connect_with_path_context(
                     protected,
@@ -2000,7 +2389,8 @@ mod tests {
                     &pinned_key,
                     b"device-secret",
                     context,
-                ).await
+                )
+                .await
             }));
         }
 
@@ -2014,7 +2404,14 @@ mod tests {
         assert_eq!(group.active_paths(), 2);
         assert!(group.failed_path_ids().is_empty());
         assert_eq!(
-            gateway.clients.read().await.get(&IpAddr::V4(CLIENT_IP)).unwrap().sessions.len(),
+            gateway
+                .clients
+                .read()
+                .await
+                .get(&IpAddr::V4(CLIENT_IP))
+                .unwrap()
+                .sessions
+                .len(),
             2,
             "gateway must contain exactly the two newly authenticated paths",
         );
@@ -2035,8 +2432,14 @@ mod tests {
             group.send_packet(packet.clone()).await.unwrap();
         }
         let mut recovered_at_gateway = vec![
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
         ];
         recovered_at_gateway.sort_by_key(|packet| packet.packet[20..22].to_vec());
         let mut expected_recovered = recovered_uplinks.to_vec();
@@ -2058,8 +2461,14 @@ mod tests {
             gateway.send_downlink(packet).await.unwrap();
         }
         let mut received_recovered = vec![
-            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
-            timeout(Duration::from_secs(2), group.receive_packet()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet())
+                .await
+                .unwrap()
+                .unwrap(),
+            timeout(Duration::from_secs(2), group.receive_packet())
+                .await
+                .unwrap()
+                .unwrap(),
         ];
         received_recovered.sort_by_key(|packet| packet.packet[20..22].to_vec());
         let mut expected_downlinks = recovered_downlinks.to_vec();
@@ -2076,16 +2485,18 @@ mod tests {
 
     #[tokio::test]
     async fn completes_noise_handshake_and_registers_session_before_uplink() {
+        use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
         use ghulakh_protocol::{
             session_handshake::{NoiseServerKeyPair, TurnSessionConfig},
             turn_handshake::TurnHandshakeClient,
         };
-        use super::super::turn_handshake_service::{CredentialVerifier, TurnHandshakeService};
 
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let _ = relay_addr;
-        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         let keypair = Arc::new(NoiseServerKeyPair::generate().unwrap());
         let verifier: Arc<CredentialVerifier> = Arc::new(|candidate| candidate == b"test-device");
@@ -2104,15 +2515,21 @@ mod tests {
 
         let mut buffer = [0u8; 2048];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(source, gateway_addr);
         let client_finish = client.receive_server_response(&buffer[..length]).unwrap();
         relay.send_to(&client_finish, gateway_addr).await.unwrap();
 
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(source, gateway_addr);
-        let (keys, config_payload) = client.receive_server_ack_with_payload(&buffer[..length]).unwrap();
+        let (keys, config_payload) = client
+            .receive_server_ack_with_payload(&buffer[..length])
+            .unwrap();
         let config = TurnSessionConfig::decode(&config_payload).unwrap();
         assert_eq!(config.virtual_ipv4, Ipv4Addr::new(10, 77, 0, 2));
         assert_eq!(config.mtu, 1100);
@@ -2123,9 +2540,14 @@ mod tests {
         let session = session.unwrap();
         let previous_activity = *session.last_activity.lock().unwrap();
         let nonce = 0x0102_0304_0506_0708;
-        let keepalive = client_tx.seal(&ghulakh_protocol::secure_frame::keepalive_request(nonce)).unwrap();
+        let keepalive = client_tx
+            .seal(&ghulakh_protocol::secure_frame::keepalive_request(nonce))
+            .unwrap();
         relay.send_to(&keepalive, gateway_addr).await.unwrap();
-        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(source, gateway_addr);
         assert_eq!(
             client_rx.open(&buffer[..length]).unwrap(),
@@ -2138,7 +2560,10 @@ mod tests {
         let uplink = packet(config.virtual_ipv4, Ipv4Addr::new(1, 1, 1, 1));
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
-        let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        let received = timeout(Duration::from_secs(2), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received, uplink);
         assert_eq!(gateway.stats().accepted, 1);
         gateway_task.abort();
@@ -2149,15 +2574,30 @@ mod tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let _ = relay_addr;
-        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
-        gateway.register_session(
-            SESSION,
-            CLIENT_IP,
-            relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        gateway
+            .register_session(
+                SESSION,
+                CLIENT_IP,
+                relay_addr,
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+            )
+            .await
+            .unwrap();
 
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
@@ -2165,21 +2605,40 @@ mod tests {
         };
 
         let uplink = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
-        let mut client_tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
+        let mut client_tx = FrameSealer::new(
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
+        );
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
 
-        let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        let received = timeout(Duration::from_secs(2), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(received, uplink);
 
         let downlink = packet(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP);
         gateway.send_downlink(&downlink).await.unwrap();
         let mut buffer = [0u8; 2048];
-        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
+        let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(source, gateway_addr);
-        let mut client_rx = FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient);
+        let mut client_rx = FrameOpener::new(
+            SERVER_KEY,
+            SERVER_PREFIX,
+            SESSION,
+            FrameDirection::ServerToClient,
+        );
         let plaintext = client_rx.open(&buffer[..length]).unwrap();
-        assert_eq!(SequencedDataDatagram::decode(&plaintext).unwrap().datagram, downlink);
+        assert_eq!(
+            SequencedDataDatagram::decode(&plaintext).unwrap().datagram,
+            downlink
+        );
 
         assert_eq!(gateway.stats().accepted, 1);
         assert_eq!(gateway.stats().downlink_sent, 1);
@@ -2191,20 +2650,40 @@ mod tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let _ = relay_addr;
-        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
-        gateway.register_session(
-            SESSION, CLIENT_IP, relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        gateway
+            .register_session(
+                SESSION,
+                CLIENT_IP,
+                relay_addr,
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+            )
+            .await
+            .unwrap();
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
             tokio::spawn(async move { gateway.run().await })
         };
 
         let mut client_tx = FrameSealer::new(
-            CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
         );
         let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(1, 1, 1, 1));
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
@@ -2218,7 +2697,10 @@ mod tests {
         let valid_datagram = valid_frame;
         relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
         assert_eq!(
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
             valid
         );
         relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
@@ -2232,21 +2714,35 @@ mod tests {
     async fn expires_idle_session_and_removes_client_route() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
-        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        gateway.register_session(
-            SESSION,
-            CLIENT_IP,
-            relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        gateway
+            .register_session(
+                SESSION,
+                CLIENT_IP,
+                relay_addr,
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+            )
+            .await
+            .unwrap();
 
         let session = gateway.sessions.read().await.get(&SESSION).unwrap().clone();
         *session.last_activity.lock().unwrap() = Instant::now() - Duration::from_secs(120);
-        let expired = gateway.expire_idle_sessions(
-            Instant::now(),
-            Duration::from_secs(60),
-        ).await;
+        let expired = gateway
+            .expire_idle_sessions(Instant::now(), Duration::from_secs(60))
+            .await;
         assert_eq!(expired, vec![IpAddr::V4(CLIENT_IP)]);
         assert!(gateway.sessions.read().await.is_empty());
         assert!(gateway.clients.read().await.is_empty());
@@ -2257,19 +2753,47 @@ mod tests {
         let _relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let wrong_relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = _relay.local_addr().unwrap();
-        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        gateway.register_session(
-            SESSION, CLIENT_IP, relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        let (gateway, _tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        gateway
+            .register_session(
+                SESSION,
+                CLIENT_IP,
+                relay_addr,
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+            )
+            .await
+            .unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
             tokio::spawn(async move { gateway.run().await })
         };
-        let mut tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
-        let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1)).encode().unwrap()).unwrap();
+        let mut tx = FrameSealer::new(
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
+        );
+        let protected = tx
+            .seal(
+                &packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1))
+                    .encode()
+                    .unwrap(),
+            )
+            .unwrap();
         let datagram = protected;
         wrong_relay.send_to(&datagram, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2277,19 +2801,33 @@ mod tests {
         gateway_task.abort();
     }
 
-
     #[tokio::test]
     async fn accepts_packet_loss_and_reordering_but_rejects_replay() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
-        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
-        gateway.register_session(
-            SESSION,
-            CLIENT_IP,
-            relay_addr,
-            FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-        ).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
+        gateway
+            .register_session(
+                SESSION,
+                CLIENT_IP,
+                relay_addr,
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+            )
+            .await
+            .unwrap();
 
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
@@ -2306,23 +2844,44 @@ mod tests {
 
         // Sequence 0 is intentionally lost. Deliver sequence 2 before 1 to
         // model network loss and reordering without weakening replay protection.
-        let lost = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
-        let reordered = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
-        let first = client_tx.seal(&packet(CLIENT_IP, destination).encode().unwrap()).unwrap();
+        let lost = client_tx
+            .seal(&packet(CLIENT_IP, destination).encode().unwrap())
+            .unwrap();
+        let reordered = client_tx
+            .seal(&packet(CLIENT_IP, destination).encode().unwrap())
+            .unwrap();
+        let first = client_tx
+            .seal(&packet(CLIENT_IP, destination).encode().unwrap())
+            .unwrap();
         drop(lost);
 
-        relay.send_to(&first, gateway.local_addr().unwrap()).await.unwrap();
-        relay.send_to(&reordered, gateway.local_addr().unwrap()).await.unwrap();
+        relay
+            .send_to(&first, gateway.local_addr().unwrap())
+            .await
+            .unwrap();
+        relay
+            .send_to(&reordered, gateway.local_addr().unwrap())
+            .await
+            .unwrap();
 
-        let received_a = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
-        let received_b = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
+        let received_a = timeout(Duration::from_secs(2), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let received_b = timeout(Duration::from_secs(2), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         let expected = packet(CLIENT_IP, destination);
         assert_eq!(received_a, expected);
         assert_eq!(received_b, expected);
         assert_eq!(gateway.stats().accepted, 2);
 
         // Replaying an authenticated datagram must still be rejected.
-        relay.send_to(&reordered, gateway.local_addr().unwrap()).await.unwrap();
+        relay
+            .send_to(&reordered, gateway.local_addr().unwrap())
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(gateway.stats().accepted, 2);
         assert_eq!(gateway.stats().rejected_packet, 1);
@@ -2350,7 +2909,10 @@ mod tests {
         scheduler.tokens.insert(active[1], 1.0);
         scheduler.tokens.insert(active[2], 1.0);
 
-        assert_eq!(scheduler.choose(&active, &[true, true, true], Instant::now(), 100), Some(active[0]));
+        assert_eq!(
+            scheduler.choose(&active, &[true, true, true], Instant::now(), 100),
+            Some(active[0])
+        );
     }
 
     #[test]
@@ -2365,7 +2927,12 @@ mod tests {
         for id in first_group {
             scheduler.refill(id, now);
         }
-        scheduler.select(&first_group, CLIENT_IP, &scheduler_udp_flow(16_101, 1200), now);
+        scheduler.select(
+            &first_group,
+            CLIENT_IP,
+            &scheduler_udp_flow(16_101, 1200),
+            now,
+        );
         let first_group_tokens = first_group.map(|id| scheduler.tokens[&id]);
         for id in second_group {
             scheduler.refill(id, now + Duration::from_millis(1));
@@ -2397,13 +2964,33 @@ mod tests {
         let start = Instant::now();
         let flow = scheduler_udp_flow(16_000, 1200);
         let original = scheduler.select(&active, CLIENT_IP, &flow, start);
-        let surviving = if original == active[0] { active[1] } else { active[0] };
-        assert_eq!(scheduler.select(&[surviving], CLIENT_IP, &flow, start + Duration::from_millis(1)), surviving);
+        let surviving = if original == active[0] {
+            active[1]
+        } else {
+            active[0]
+        };
+        assert_eq!(
+            scheduler.select(
+                &[surviving],
+                CLIENT_IP,
+                &flow,
+                start + Duration::from_millis(1)
+            ),
+            surviving
+        );
 
         scheduler.evict_counter = FLOW_EVICT_EVERY - 1;
         let expired_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
-        scheduler.select(&[surviving], CLIENT_IP, &scheduler_udp_flow(16_001, 1200), expired_at);
-        let key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap());
+        scheduler.select(
+            &[surviving],
+            CLIENT_IP,
+            &scheduler_udp_flow(16_001, 1200),
+            expired_at,
+        );
+        let key = (
+            IpAddr::V4(CLIENT_IP),
+            ghulakh_protocol::ip_flow::ip_flow_key(&flow).unwrap(),
+        );
         assert!(!scheduler.flows.contains_key(&key));
     }
 
@@ -2457,7 +3044,12 @@ mod tests {
 
         for (index, port) in (10_000..10_000 + FLOW_TABLE_MAX as u16).enumerate() {
             let flow = scheduler_udp_flow(port, 1200);
-            scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
+            scheduler.select(
+                &active,
+                CLIENT_IP,
+                &flow,
+                start + Duration::from_micros(index as u64),
+            );
         }
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
 
@@ -2485,9 +3077,17 @@ mod tests {
 
         for (index, port) in (10_000..10_000 + FLOW_TABLE_MAX as u16).enumerate() {
             let flow = scheduler_udp_flow(port, 1200);
-            scheduler.select(&active, CLIENT_IP, &flow, start + Duration::from_micros(index as u64));
+            scheduler.select(
+                &active,
+                CLIENT_IP,
+                &flow,
+                start + Duration::from_micros(index as u64),
+            );
         }
-        let expired_key = (IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap());
+        let expired_key = (
+            IpAddr::V4(CLIENT_IP),
+            ghulakh_protocol::ip_flow::ip_flow_key(&scheduler_udp_flow(10_000, 1200)).unwrap(),
+        );
         let sweep_at = start + FLOW_IDLE_TTL + Duration::from_secs(1);
         for (key, state) in &mut scheduler.flows {
             state.last_seen = if *key == expired_key { start } else { sweep_at };
@@ -2498,7 +3098,10 @@ mod tests {
 
         assert_eq!(scheduler.flows.len(), FLOW_TABLE_MAX);
         assert!(!scheduler.flows.contains_key(&expired_key));
-        assert!(scheduler.flows.contains_key(&(IpAddr::V4(CLIENT_IP), ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap())));
+        assert!(scheduler.flows.contains_key(&(
+            IpAddr::V4(CLIENT_IP),
+            ghulakh_protocol::ip_flow::ip_flow_key(&new_flow).unwrap()
+        )));
     }
 
     #[test]
@@ -2520,7 +3123,10 @@ mod tests {
         let game_path = scheduler.select(&active, CLIENT_IP, &game_flow, start);
         for index in 1..250 {
             let now = start + Duration::from_micros(index * 100);
-            assert_eq!(scheduler.select(&active, CLIENT_IP, &game_flow, now), game_path);
+            assert_eq!(
+                scheduler.select(&active, CLIENT_IP, &game_flow, now),
+                game_path
+            );
         }
 
         let another_flow = scheduler_udp_flow(12002, 1200);
@@ -2538,7 +3144,10 @@ mod tests {
         let first_path = scheduler.select(&active, CLIENT_IP, &packet, start);
         for index in 1..12 {
             let now = start + Duration::from_micros(index * 520);
-            assert_eq!(scheduler.select(&active, CLIENT_IP, &packet, now), first_path);
+            assert_eq!(
+                scheduler.select(&active, CLIENT_IP, &packet, now),
+                first_path
+            );
         }
         let boundary = start + Duration::from_micros(12 * 520);
         let next_path = scheduler.select(&active, CLIENT_IP, &packet, boundary);
@@ -2573,7 +3182,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn downlink_scheduler_excludes_unavailable_and_backpressured_paths() {
         let mut scheduler = DownlinkScheduler::new();
@@ -2597,14 +3205,18 @@ mod tests {
         let active = [[3u8; 8], [4u8; 8]];
         let packet = scheduler_udp_flow(12001, 120);
         let now = Instant::now();
-        let first = scheduler.select_sendable(&active, &[true, true], CLIENT_IP, &packet, now).unwrap();
-        let next = scheduler.select_sendable(
-            &active,
-            &[first != active[0], first != active[1]],
-            IpAddr::V4(CLIENT_IP),
-            &packet,
-            now + Duration::from_millis(1),
-        ).unwrap();
+        let first = scheduler
+            .select_sendable(&active, &[true, true], CLIENT_IP, &packet, now)
+            .unwrap();
+        let next = scheduler
+            .select_sendable(
+                &active,
+                &[first != active[0], first != active[1]],
+                IpAddr::V4(CLIENT_IP),
+                &packet,
+                now + Duration::from_millis(1),
+            )
+            .unwrap();
         assert_ne!(first, next);
     }
 
@@ -2625,8 +3237,9 @@ mod tests {
 
     #[tokio::test]
     async fn forwards_authenticated_ipv6_uplink_and_downlink() {
-        let (gateway, mut tun_rx) =
-            TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+            .await
+            .unwrap();
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let gateway_addr = gateway.local_addr().unwrap();
@@ -2634,15 +3247,28 @@ mod tests {
         // from IPv4. The authenticated handshake carries this exact address.
         let client_ipv6: Ipv6Addr = "fd77:77::beef".parse().unwrap();
 
-        gateway.register_session_with_path_generation(SessionRegistration {
-            session_id: SESSION,
-            client_ipv4: CLIENT_IP,
-            client_ipv6,
-            relay_peer: relay_addr,
-            opener: FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
-            sealer: FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
-            path_lease: None,
-        }).await.unwrap();
+        gateway
+            .register_session_with_path_generation(SessionRegistration {
+                session_id: SESSION,
+                client_ipv4: CLIENT_IP,
+                client_ipv6,
+                relay_peer: relay_addr,
+                opener: FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
+                sealer: FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
+                path_lease: None,
+            })
+            .await
+            .unwrap();
 
         let gateway_task = {
             let gateway = Arc::clone(&gateway);
@@ -2656,13 +3282,22 @@ mod tests {
             bytes[7] = 64;
             bytes[8..24].copy_from_slice(&source.octets());
             bytes[24..40].copy_from_slice(&destination.octets());
-            DataDatagram { kind: IpPacketKind::Ipv6, packet: bytes }
+            DataDatagram {
+                kind: IpPacketKind::Ipv6,
+                packet: bytes,
+            }
         };
 
         let mut client_tx = FrameSealer::new(
-            CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
         );
-        let spoofed = ipv6_packet("fd77:77::99".parse().unwrap(), "2606:4700:4700::1111".parse().unwrap());
+        let spoofed = ipv6_packet(
+            "fd77:77::99".parse().unwrap(),
+            "2606:4700:4700::1111".parse().unwrap(),
+        );
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
         relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2673,7 +3308,10 @@ mod tests {
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
         assert_eq!(
-            timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap(),
+            timeout(Duration::from_secs(2), tun_rx.recv())
+                .await
+                .unwrap()
+                .unwrap(),
             uplink,
         );
 
@@ -2681,35 +3319,72 @@ mod tests {
         gateway.send_downlink(&downlink).await.unwrap();
         let mut buffer = [0u8; 1500];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(source, gateway_addr);
         let mut server_rx = FrameOpener::new(
-            SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient,
+            SERVER_KEY,
+            SERVER_PREFIX,
+            SESSION,
+            FrameDirection::ServerToClient,
         );
         let plaintext = server_rx.open(&buffer[..length]).unwrap();
-        let ordered = ghulakh_protocol::ordered_datagram::SequencedDataDatagram::decode(&plaintext).unwrap();
+        let ordered =
+            ghulakh_protocol::ordered_datagram::SequencedDataDatagram::decode(&plaintext).unwrap();
         assert_eq!(ordered.datagram, downlink);
         assert_eq!(ordered.sequence, Some(0));
 
         gateway_task.abort();
     }
-
 }
-
 
 #[cfg(test)]
 mod egress_policy_tests {
     use super::*;
     #[test]
     fn blocks_non_public_ipv4_and_allows_global_unicast() {
-        for a in ["10.0.0.1","127.0.0.1","169.254.1.1","100.64.0.1","192.0.2.1","198.18.0.1","198.51.100.1","203.0.113.1","224.0.0.1"] {
+        for a in [
+            "10.0.0.1",
+            "127.0.0.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "192.0.2.1",
+            "198.18.0.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+        ] {
             assert!(!destination_allowed(a.parse().unwrap()), "{a}");
         }
         assert!(destination_allowed("1.1.1.1".parse().unwrap()));
     }
     #[test]
     fn blocks_non_global_and_special_ipv6_and_allows_global_unicast() {
-        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2000:ffff::1","2001:1ff:ffff::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3f00::1","3f80::1","3fc0::1","3fe0::1","3ff0::1","3ff8::1","3ffc::1","3ffe::1","3fff::1","4000::1"] {
+        for a in [
+            "::",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "ff02::1",
+            "2000::1",
+            "2000:ffff::1",
+            "2001:1ff:ffff::1",
+            "2001:db8::1",
+            "2001:2::1",
+            "2001:10::1",
+            "2002::1",
+            "3f00::1",
+            "3f80::1",
+            "3fc0::1",
+            "3fe0::1",
+            "3ff0::1",
+            "3ff8::1",
+            "3ffc::1",
+            "3ffe::1",
+            "3fff::1",
+            "4000::1",
+        ] {
             assert!(!destination_allowed(a.parse().unwrap()), "{a}");
         }
         assert!(destination_allowed("2606:4700:4700::1111".parse().unwrap()));
@@ -2745,8 +3420,16 @@ mod egress_policy_tests {
 
     #[test]
     fn rejects_truncated_or_wrong_version_packets() {
-        assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv4, packet: vec![0;19] }).is_none());
-        assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv6, packet: vec![0;40] }).is_none());
+        assert!(packet_endpoints(&DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: vec![0; 19]
+        })
+        .is_none());
+        assert!(packet_endpoints(&DataDatagram {
+            kind: IpPacketKind::Ipv6,
+            packet: vec![0; 40]
+        })
+        .is_none());
     }
 }
 

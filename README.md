@@ -6,11 +6,11 @@ Ghulakh — исследовательская система защищённо
 
 Единственный пользовательский транспорт первой версии — собственный защищённый туннель через TURN-реле инфраструктуры звонков VK (VK Calls). Android-клиент создаёт независимые TURN allocations и передаёт защищённые IP-кадры серверному UDP gateway. Сервер проверяет сессию и маршрутизирует пакеты через TUN; обратный трафик возвращается через проверенный relay path. Другие пользовательские транспорты не реализованы; архитектура допускает их добавление позднее.
 
-## Состояние на 2026-11-13
+## Состояние на 2026-11-14
 
-Текущий main: `cf8218a11b56f5cba770f91281af231ef7a2bc7d`; PR №12 слит. В main включена проверка устойчивости egress-политики к IPv4/IPv6 fwmark policy routing. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
+Текущий main: `c337b98243f95b15256b4fb56995ff1597684bc2`; PR №12 и синхронизация документации PR №13 слиты. В main включена проверка устойчивости egress-политики к IPv4/IPv6 fwmark policy routing. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
 
-Для PR №12 все три CI jobs успешно завершились на head `2289e4c8718ad5a4372a53c878126e2c76f845db`; изменения слиты в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
+Для PR №12 все три CI jobs успешно завершились на head `2289e4c8718ad5a4372a53c878126e2c76f845db`; изменения слиты в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. В PR №14 завершён связанный аудит Rust STUN/TURN и Kotlin/JNI secret-buffer lifetime: очищаются контролируемые Rust staging/packet buffers и промежуточные Kotlin JSON containers, включая exceptional exit paths. Перед слиянием обязательны успешные CI jobs на окончательном HEAD. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
 
 **Проект пока не готов к production или повседневному использованию.** Не подтверждены live VK Calls API/TURN auth profile, реальная relay allocation и сквозной маршрут Android → VK TURN → VPS → интернет → Android. Не проверены публичный IPv6 egress на VPS, внешние квоты и длительная стабильность. VK access token вводится вручную; in-app OAuth отсутствует. Подробности — [текущий статус](docs/STATUS.md).
 

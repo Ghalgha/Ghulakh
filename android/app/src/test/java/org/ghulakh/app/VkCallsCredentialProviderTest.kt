@@ -7,6 +7,21 @@ import org.junit.Test
 
 class VkCallsCredentialProviderTest {
     @Test
+    fun parsedCredentialJsonContainersReleaseNestedStringReferences() {
+        val json = org.json.JSONObject(
+            """{"turn_server":{"username":"temporary-user","credential":"temporary-password","urls":["turn:relay.example?token=temporary-token"]},"metadata":["temporary-metadata"]}""",
+        )
+        val turnServer = json.getJSONObject("turn_server")
+        val urls = turnServer.getJSONArray("urls")
+
+        clearJsonStringReferences(json)
+
+        assertEquals(0, json.length())
+        assertEquals(0, turnServer.length())
+        assertEquals("", urls.getString(0))
+    }
+
+    @Test
     fun credentialBrokerObtainsFreshDistinctCredentialsForPathRecovery() {
         val initial = credentialsJson("initial-user", "initial-secret")
         var fetchCount = 0

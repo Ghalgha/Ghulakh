@@ -73,7 +73,8 @@ impl TurnPeerRegistry {
     ) -> Result<(), PeerStateError> {
         self.expire(now);
         self.validate_family(peer_ip)?;
-        let expires_at = now.checked_add(PERMISSION_LIFETIME)
+        let expires_at = now
+            .checked_add(PERMISSION_LIFETIME)
             .ok_or(PeerStateError::DeadlineOverflow)?;
         self.permissions.insert(peer_ip, expires_at);
         Ok(())
@@ -103,29 +104,42 @@ impl TurnPeerRegistry {
                 return Err(PeerStateError::PeerConflict);
             }
         }
-        if self.channel_cooldowns.get(&channel_number).is_some_and(|until| now < *until)
-            || self.peer_cooldowns.get(&peer).is_some_and(|until| now < *until)
+        if self
+            .channel_cooldowns
+            .get(&channel_number)
+            .is_some_and(|until| now < *until)
+            || self
+                .peer_cooldowns
+                .get(&peer)
+                .is_some_and(|until| now < *until)
         {
             return Err(PeerStateError::ReuseCooldown);
         }
 
-        let permission_expiry = now.checked_add(PERMISSION_LIFETIME)
+        let permission_expiry = now
+            .checked_add(PERMISSION_LIFETIME)
             .ok_or(PeerStateError::DeadlineOverflow)?;
-        let channel_expiry = now.checked_add(CHANNEL_BINDING_LIFETIME)
+        let channel_expiry = now
+            .checked_add(CHANNEL_BINDING_LIFETIME)
             .ok_or(PeerStateError::DeadlineOverflow)?;
 
         self.permissions.insert(peer.ip(), permission_expiry);
         self.peer_channels.insert(peer, channel_number);
-        self.channels.insert(channel_number, ChannelBinding {
+        self.channels.insert(
             channel_number,
-            peer,
-            expires_at: channel_expiry,
-        });
+            ChannelBinding {
+                channel_number,
+                peer,
+                expires_at: channel_expiry,
+            },
+        );
         Ok(())
     }
 
     pub fn permission_active(&self, peer_ip: IpAddr, now: Instant) -> bool {
-        self.permissions.get(&peer_ip).is_some_and(|expires_at| now < *expires_at)
+        self.permissions
+            .get(&peer_ip)
+            .is_some_and(|expires_at| now < *expires_at)
     }
 
     pub fn permission_expires_at(&self, peer_ip: IpAddr) -> Option<Instant> {
@@ -133,7 +147,9 @@ impl TurnPeerRegistry {
     }
 
     pub fn channel_expires_at(&self, channel_number: u16) -> Option<Instant> {
-        self.channels.get(&channel_number).map(|binding| binding.expires_at)
+        self.channels
+            .get(&channel_number)
+            .map(|binding| binding.expires_at)
     }
 
     pub fn channel_for_peer(&mut self, peer: SocketAddr, now: Instant) -> Option<u16> {
@@ -143,18 +159,24 @@ impl TurnPeerRegistry {
 
     pub fn peer_for_channel(&mut self, channel_number: u16, now: Instant) -> Option<SocketAddr> {
         self.expire(now);
-        self.channels.get(&channel_number).map(|binding| binding.peer)
+        self.channels
+            .get(&channel_number)
+            .map(|binding| binding.peer)
     }
 
     pub fn expire(&mut self, now: Instant) -> ExpiredPeerState {
-        let expired_permissions: Vec<IpAddr> = self.permissions.iter()
+        let expired_permissions: Vec<IpAddr> = self
+            .permissions
+            .iter()
             .filter_map(|(ip, expiry)| (now >= *expiry).then_some(*ip))
             .collect();
         for ip in &expired_permissions {
             self.permissions.remove(ip);
         }
 
-        let expired_channels: Vec<ChannelBinding> = self.channels.values()
+        let expired_channels: Vec<ChannelBinding> = self
+            .channels
+            .values()
             .filter(|binding| now >= binding.expires_at)
             .cloned()
             .collect();
@@ -162,10 +184,13 @@ impl TurnPeerRegistry {
             self.channels.remove(&binding.channel_number);
             self.peer_channels.remove(&binding.peer);
 
-            let cooldown_until = binding.expires_at.checked_add(CHANNEL_REUSE_DELAY)
+            let cooldown_until = binding
+                .expires_at
+                .checked_add(CHANNEL_REUSE_DELAY)
                 .unwrap_or(now);
             if cooldown_until > now {
-                self.channel_cooldowns.insert(binding.channel_number, cooldown_until);
+                self.channel_cooldowns
+                    .insert(binding.channel_number, cooldown_until);
                 self.peer_cooldowns.insert(binding.peer, cooldown_until);
             }
         }
@@ -225,7 +250,10 @@ mod tests {
         assert!(!registry.permission_active(peer().ip(), now + PERMISSION_LIFETIME));
         assert_eq!(
             registry.expire(now + PERMISSION_LIFETIME),
-            ExpiredPeerState { permissions: 1, channels: 0 }
+            ExpiredPeerState {
+                permissions: 1,
+                channels: 0
+            }
         );
     }
 
@@ -233,7 +261,9 @@ mod tests {
     fn exposes_permission_and_channel_refresh_deadlines() {
         let now = Instant::now();
         let mut registry = registry();
-        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        registry
+            .install_channel_binding(0x4001, peer(), now)
+            .unwrap();
         assert_eq!(
             registry.permission_expires_at(peer().ip()),
             Some(now + PERMISSION_LIFETIME)
@@ -249,7 +279,9 @@ mod tests {
     fn channel_bind_installs_permission_and_tracks_both_directions() {
         let now = Instant::now();
         let mut registry = registry();
-        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        registry
+            .install_channel_binding(0x4001, peer(), now)
+            .unwrap();
         assert_eq!(registry.channel_for_peer(peer(), now), Some(0x4001));
         assert_eq!(registry.peer_for_channel(0x4001, now), Some(peer()));
         assert!(registry.permission_active(peer().ip(), now + Duration::from_secs(299)));
@@ -260,7 +292,9 @@ mod tests {
     fn enforces_channel_and_peer_uniqueness() {
         let now = Instant::now();
         let mut registry = registry();
-        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        registry
+            .install_channel_binding(0x4001, peer(), now)
+            .unwrap();
         assert_eq!(
             registry.install_channel_binding(0x4001, "203.0.113.21:443".parse().unwrap(), now),
             Err(PeerStateError::ChannelConflict)
@@ -275,11 +309,16 @@ mod tests {
     fn channel_and_peer_reuse_wait_five_minutes_after_expiry() {
         let now = Instant::now();
         let mut registry = registry();
-        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        registry
+            .install_channel_binding(0x4001, peer(), now)
+            .unwrap();
         let binding_expiry = now + CHANNEL_BINDING_LIFETIME;
         assert_eq!(
             registry.expire(binding_expiry),
-            ExpiredPeerState { permissions: 1, channels: 1 }
+            ExpiredPeerState {
+                permissions: 1,
+                channels: 1
+            }
         );
         assert_eq!(
             registry.install_channel_binding(
@@ -289,11 +328,13 @@ mod tests {
             ),
             Err(PeerStateError::ReuseCooldown)
         );
-        registry.install_channel_binding(
-            0x4001,
-            "203.0.113.21:443".parse().unwrap(),
-            binding_expiry + CHANNEL_REUSE_DELAY,
-        ).unwrap();
+        registry
+            .install_channel_binding(
+                0x4001,
+                "203.0.113.21:443".parse().unwrap(),
+                binding_expiry + CHANNEL_REUSE_DELAY,
+            )
+            .unwrap();
     }
 
     #[test]
@@ -314,7 +355,9 @@ mod tests {
     fn clear_removes_allocation_scoped_state() {
         let now = Instant::now();
         let mut registry = registry();
-        registry.install_channel_binding(0x4001, peer(), now).unwrap();
+        registry
+            .install_channel_binding(0x4001, peer(), now)
+            .unwrap();
         registry.clear();
         assert_eq!(registry.permission_count(), 0);
         assert_eq!(registry.channel_count(), 0);

@@ -7,8 +7,8 @@
 use crate::{
     handshake_datagram::{HandshakeEnvelope, HandshakeEnvelopeError, HandshakePhase},
     session_handshake::{
-        NoiseClientFinish, NoiseClientHandshake, NoiseServerHandshake,
-        NoiseServerKeyPair, SessionFrameKeys, SessionHandshakeError,
+        NoiseClientFinish, NoiseClientHandshake, NoiseServerHandshake, NoiseServerKeyPair,
+        SessionFrameKeys, SessionHandshakeError,
     },
     turn_path_context::TurnPathContext,
 };
@@ -51,12 +51,16 @@ impl TurnHandshakeClient {
             phase: HandshakePhase::ClientInit,
             handshake_id,
             payload: message,
-        }.encode()?;
-        Ok((Self {
-            handshake_id,
-            noise: Some(noise),
-            pending_auth: None,
-        }, datagram))
+        }
+        .encode()?;
+        Ok((
+            Self {
+                handshake_id,
+                noise: Some(noise),
+                pending_auth: None,
+            },
+            datagram,
+        ))
     }
 
     pub fn new_with_path_context(
@@ -74,12 +78,16 @@ impl TurnHandshakeClient {
             phase: HandshakePhase::ClientInit,
             handshake_id,
             payload: message,
-        }.encode()?;
-        Ok((Self {
-            handshake_id,
-            noise: Some(noise),
-            pending_auth: None,
-        }, datagram))
+        }
+        .encode()?;
+        Ok((
+            Self {
+                handshake_id,
+                noise: Some(noise),
+                pending_auth: None,
+            },
+            datagram,
+        ))
     }
 
     /// Authenticates the server static key through Noise XX and returns the
@@ -99,7 +107,8 @@ impl TurnHandshakeClient {
             phase: HandshakePhase::ClientFinish,
             handshake_id: self.handshake_id,
             payload: finish.message.clone(),
-        }.encode()?;
+        }
+        .encode()?;
         self.pending_auth = Some(finish);
         Ok(response)
     }
@@ -112,7 +121,9 @@ impl TurnHandshakeClient {
     ) -> Result<SessionFrameKeys, TurnHandshakeError> {
         let (keys, payload) = self.receive_server_ack_with_payload(datagram)?;
         if !payload.is_empty() {
-            return Err(TurnHandshakeError::Noise(SessionHandshakeError::InvalidAcknowledgement));
+            return Err(TurnHandshakeError::Noise(
+                SessionHandshakeError::InvalidAcknowledgement,
+            ));
         }
         Ok(keys)
     }
@@ -123,7 +134,10 @@ impl TurnHandshakeClient {
     ) -> Result<(SessionFrameKeys, Vec<u8>), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         self.validate(&envelope, HandshakePhase::ServerAck)?;
-        let pending = self.pending_auth.take().ok_or(TurnHandshakeError::InvalidState)?;
+        let pending = self
+            .pending_auth
+            .take()
+            .ok_or(TurnHandshakeError::InvalidState)?;
         Ok(pending.accept_server_ack_with_payload(&envelope.payload)?)
     }
 
@@ -158,10 +172,7 @@ impl TurnHandshakeServer {
     }
 
     /// Processes ClientInit exactly once and returns ServerResponse.
-    pub fn receive_client_init(
-        &mut self,
-        datagram: &[u8],
-    ) -> Result<Vec<u8>, TurnHandshakeError> {
+    pub fn receive_client_init(&mut self, datagram: &[u8]) -> Result<Vec<u8>, TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         if envelope.phase != HandshakePhase::ClientInit {
             return Err(TurnHandshakeError::UnexpectedPhase);
@@ -169,13 +180,17 @@ impl TurnHandshakeServer {
         if self.handshake_id.is_some() {
             return Err(TurnHandshakeError::InvalidState);
         }
-        let noise = self.noise.as_mut().ok_or(TurnHandshakeError::InvalidState)?;
+        let noise = self
+            .noise
+            .as_mut()
+            .ok_or(TurnHandshakeError::InvalidState)?;
         let message = noise.receive_client_hello(&envelope.payload)?;
         let response = HandshakeEnvelope {
             phase: HandshakePhase::ServerResponse,
             handshake_id: envelope.handshake_id,
             payload: message,
-        }.encode()?;
+        }
+        .encode()?;
         self.handshake_id = Some(envelope.handshake_id);
         Ok(response)
     }
@@ -212,18 +227,18 @@ impl TurnHandshakeServer {
         verify_credential: impl FnOnce(&[u8]) -> bool,
         acknowledgement_payload: &[u8],
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), TurnHandshakeError> {
-        self.receive_client_finish_with_path_context_builder(
-            datagram,
-            verify_credential,
-            |_| Ok(acknowledgement_payload.to_vec()),
-        )
+        self.receive_client_finish_with_path_context_builder(datagram, verify_credential, |_| {
+            Ok(acknowledgement_payload.to_vec())
+        })
     }
 
     pub fn receive_client_finish_with_path_context_builder(
         &mut self,
         datagram: &[u8],
         verify_credential: impl FnOnce(&[u8]) -> bool,
-        build_acknowledgement: impl FnOnce(Option<TurnPathContext>) -> Result<Vec<u8>, SessionHandshakeError>,
+        build_acknowledgement: impl FnOnce(
+            Option<TurnPathContext>,
+        ) -> Result<Vec<u8>, SessionHandshakeError>,
     ) -> Result<(Vec<u8>, SessionFrameKeys, Option<TurnPathContext>), TurnHandshakeError> {
         let envelope = HandshakeEnvelope::decode(datagram)?;
         if envelope.phase != HandshakePhase::ClientFinish {
@@ -233,8 +248,8 @@ impl TurnHandshakeServer {
             return Err(TurnHandshakeError::HandshakeIdMismatch);
         }
         let noise = self.noise.take().ok_or(TurnHandshakeError::InvalidState)?;
-        let (acknowledgement, keys, path_context) =
-            noise.receive_client_finish_with_path_context_builder(
+        let (acknowledgement, keys, path_context) = noise
+            .receive_client_finish_with_path_context_builder(
                 &envelope.payload,
                 verify_credential,
                 build_acknowledgement,
@@ -243,7 +258,8 @@ impl TurnHandshakeServer {
             phase: HandshakePhase::ServerAck,
             handshake_id: envelope.handshake_id,
             payload: acknowledgement,
-        }.encode()?;
+        }
+        .encode()?;
         Ok((response, keys, path_context))
     }
 }
@@ -263,10 +279,9 @@ mod tests {
 
         let server_response = server.receive_client_init(&client_init).unwrap();
         let client_finish = client.receive_server_response(&server_response).unwrap();
-        let (server_ack, server_keys) = server.receive_client_finish(
-            &client_finish,
-            |candidate| candidate == credential,
-        ).unwrap();
+        let (server_ack, server_keys) = server
+            .receive_client_finish(&client_finish, |candidate| candidate == credential)
+            .unwrap();
         let client_keys = client.receive_server_ack(&server_ack).unwrap();
 
         assert_eq!(client_keys.session_id(), server_keys.session_id());
@@ -286,7 +301,8 @@ mod tests {
             credential,
             context,
             [0x5b; 16],
-        ).unwrap();
+        )
+        .unwrap();
         let mut server = TurnHandshakeServer::new(&keypair).unwrap();
         let response = server.receive_client_init(&client_init).unwrap();
         let finish = client.receive_server_response(&response).unwrap();
@@ -331,7 +347,9 @@ mod tests {
 
         assert!(matches!(
             server.receive_client_finish(&finish, |_| false),
-            Err(TurnHandshakeError::Noise(SessionHandshakeError::CredentialRejected))
+            Err(TurnHandshakeError::Noise(
+                SessionHandshakeError::CredentialRejected
+            ))
         ));
     }
 }

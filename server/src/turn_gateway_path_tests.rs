@@ -1,9 +1,9 @@
 use super::*;
-use ghulakh_protocol::{
-    ordered_datagram::SequencedDataDatagram,
-    secure_frame::FrameDirection,
+use ghulakh_protocol::{ordered_datagram::SequencedDataDatagram, secure_frame::FrameDirection};
+use tokio::{
+    net::UdpSocket,
+    time::{timeout, Duration},
 };
-use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
 const TEST_CLIENT_IP: Ipv4Addr = Ipv4Addr::new(10, 77, 0, 2);
 
@@ -51,15 +51,36 @@ fn scheduler_keeps_ipv4_and_ipv6_fragments_on_one_path() {
     let first_v4 = ipv4_fragment(0x2000, 0x1234, Some(12_345));
     let later_v4 = ipv4_fragment(0x0001, 0x1234, None);
     let first_path = scheduler.select(&active, TEST_CLIENT_IP, &first_v4, start);
-    let later_path = scheduler.select(&active, TEST_CLIENT_IP, &later_v4, start + Duration::from_millis(1));
-    assert_eq!(first_path, later_path, "IPv4 fragments must retain flow affinity");
+    let later_path = scheduler.select(
+        &active,
+        TEST_CLIENT_IP,
+        &later_v4,
+        start + Duration::from_millis(1),
+    );
+    assert_eq!(
+        first_path, later_path,
+        "IPv4 fragments must retain flow affinity"
+    );
 
     let client_v6: Ipv6Addr = "fd77:77::2".parse().unwrap();
     let first_v6 = ipv6_fragment(0x0001, 0x1020_3040);
     let later_v6 = ipv6_fragment(0x0008, 0x1020_3040);
-    let first_path = scheduler.select(&active, client_v6, &first_v6, start + Duration::from_millis(2));
-    let later_path = scheduler.select(&active, client_v6, &later_v6, start + Duration::from_millis(3));
-    assert_eq!(first_path, later_path, "IPv6 fragments must retain flow affinity");
+    let first_path = scheduler.select(
+        &active,
+        client_v6,
+        &first_v6,
+        start + Duration::from_millis(2),
+    );
+    let later_path = scheduler.select(
+        &active,
+        client_v6,
+        &later_v6,
+        start + Duration::from_millis(3),
+    );
+    assert_eq!(
+        first_path, later_path,
+        "IPv6 fragments must retain flow affinity"
+    );
 }
 
 #[test]
@@ -92,12 +113,18 @@ fn scheduler_distributes_independent_ipv6_flows_across_all_paths() {
         *per_path.entry(selected).or_default() += 1;
     }
 
-    assert_eq!(per_path.len(), active.len(), "IPv6 flows must reach every active path");
+    assert_eq!(
+        per_path.len(),
+        active.len(),
+        "IPv6 flows must reach every active path"
+    );
 }
 
 #[tokio::test]
 async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions() {
-    let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let (gateway, mut tun_rx) = TurnGateway::bind("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     let relay_a = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let relay_b = UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let session_a = [0xa1; 8];
@@ -108,18 +135,46 @@ async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions()
     let prefix_b = [0x42; 4];
     let group = [0x71; 16];
 
-    gateway.register_session_with_path(
-        session_a, TEST_CLIENT_IP, relay_a.local_addr().unwrap(),
-        FrameOpener::new(key_a, prefix_a, session_a, FrameDirection::ClientToServer),
-        FrameSealer::new([0x51; 32], [0x61; 4], session_a, FrameDirection::ServerToClient),
-        Some(TurnPathContext { group_id: group, path_id: 0, path_count: 2 }),
-    ).await.unwrap();
-    gateway.register_session_with_path(
-        session_b, TEST_CLIENT_IP, relay_b.local_addr().unwrap(),
-        FrameOpener::new(key_b, prefix_b, session_b, FrameDirection::ClientToServer),
-        FrameSealer::new([0x52; 32], [0x62; 4], session_b, FrameDirection::ServerToClient),
-        Some(TurnPathContext { group_id: group, path_id: 1, path_count: 2 }),
-    ).await.unwrap();
+    gateway
+        .register_session_with_path(
+            session_a,
+            TEST_CLIENT_IP,
+            relay_a.local_addr().unwrap(),
+            FrameOpener::new(key_a, prefix_a, session_a, FrameDirection::ClientToServer),
+            FrameSealer::new(
+                [0x51; 32],
+                [0x61; 4],
+                session_a,
+                FrameDirection::ServerToClient,
+            ),
+            Some(TurnPathContext {
+                group_id: group,
+                path_id: 0,
+                path_count: 2,
+            }),
+        )
+        .await
+        .unwrap();
+    gateway
+        .register_session_with_path(
+            session_b,
+            TEST_CLIENT_IP,
+            relay_b.local_addr().unwrap(),
+            FrameOpener::new(key_b, prefix_b, session_b, FrameDirection::ClientToServer),
+            FrameSealer::new(
+                [0x52; 32],
+                [0x62; 4],
+                session_b,
+                FrameDirection::ServerToClient,
+            ),
+            Some(TurnPathContext {
+                group_id: group,
+                path_id: 1,
+                path_count: 2,
+            }),
+        )
+        .await
+        .unwrap();
 
     let make_datagram = |marker: u8| {
         let mut packet = vec![0u8; 28];
@@ -133,22 +188,56 @@ async fn authenticated_uplink_reordering_is_restored_across_real_path_sessions()
         packet[20..22].copy_from_slice(&12_000u16.to_be_bytes());
         packet[22..24].copy_from_slice(&443u16.to_be_bytes());
         packet[24..26].copy_from_slice(&8u16.to_be_bytes());
-        DataDatagram { kind: IpPacketKind::Ipv4, packet }
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet,
+        }
     };
     let packet_zero = make_datagram(0);
     let packet_one = make_datagram(1);
 
     let mut path_a = FrameSealer::new(key_a, prefix_a, session_a, FrameDirection::ClientToServer);
     let mut path_b = FrameSealer::new(key_b, prefix_b, session_b, FrameDirection::ClientToServer);
-    let frame_one = path_b.seal(&SequencedDataDatagram::new(1, packet_one.clone()).encode().unwrap()).unwrap();
-    gateway.process_datagram(&frame_one, relay_b.local_addr().unwrap()).await;
-    assert!(tun_rx.try_recv().is_err(), "sequence 1 must wait for sequence 0");
+    let frame_one = path_b
+        .seal(
+            &SequencedDataDatagram::new(1, packet_one.clone())
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
+    gateway
+        .process_datagram(&frame_one, relay_b.local_addr().unwrap())
+        .await;
+    assert!(
+        tun_rx.try_recv().is_err(),
+        "sequence 1 must wait for sequence 0"
+    );
 
-    let frame_zero = path_a.seal(&SequencedDataDatagram::new(0, packet_zero.clone()).encode().unwrap()).unwrap();
-    gateway.process_datagram(&frame_zero, relay_a.local_addr().unwrap()).await;
+    let frame_zero = path_a
+        .seal(
+            &SequencedDataDatagram::new(0, packet_zero.clone())
+                .encode()
+                .unwrap(),
+        )
+        .unwrap();
+    gateway
+        .process_datagram(&frame_zero, relay_a.local_addr().unwrap())
+        .await;
 
-    assert_eq!(timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(), packet_zero);
-    assert_eq!(timeout(Duration::from_secs(1), tun_rx.recv()).await.unwrap().unwrap(), packet_one);
+    assert_eq!(
+        timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        packet_zero
+    );
+    assert_eq!(
+        timeout(Duration::from_secs(1), tun_rx.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        packet_one
+    );
     assert_eq!(gateway.stats().accepted, 2);
 
     assert!(gateway.unregister_session(session_a).await);
@@ -173,10 +262,9 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
     };
     {
         let mut buffer = reorder.lock().unwrap();
-        assert!(buffer.push(
-            SequencedDataDatagram::new(1, expired_packet.clone()),
-            now,
-        ).is_empty());
+        assert!(buffer
+            .push(SequencedDataDatagram::new(1, expired_packet.clone()), now,)
+            .is_empty());
     }
 
     let (delivered_tx, delivered_rx) = channel();
@@ -190,14 +278,16 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
             &expiry_reorder,
             |buffer| buffer.expire_gap(now + UPLINK_REORDER_GAP_TIMEOUT),
             |packet| {
-                assert!(matches!(
-                    expiry_reorder.try_lock(),
-                    Err(TryLockError::WouldBlock),
-                ), "reorder lock must remain held through TUN delivery");
+                assert!(
+                    matches!(expiry_reorder.try_lock(), Err(TryLockError::WouldBlock),),
+                    "reorder lock must remain held through TUN delivery"
+                );
                 // Let the competing packet handler attempt the same lock
                 // while the expired batch is ready but not yet delivered.
                 start_processing_tx.send(()).unwrap();
-                processing_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+                processing_started_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap();
                 expiry_sender.send(packet).unwrap();
             },
         ));
@@ -207,7 +297,9 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
     let packet_sender = delivered_tx;
     let packet = next_packet.clone();
     let processing = std::thread::spawn(move || {
-        start_processing_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        start_processing_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
         processing_started_tx.send(()).unwrap();
         assert!(update_and_deliver_uplink(
             &packet_reorder,
@@ -216,10 +308,10 @@ fn uplink_gap_expiry_delivery_is_serialized_with_concurrent_packet_processing() 
                 now + UPLINK_REORDER_GAP_TIMEOUT,
             ),
             |packet| {
-                assert!(matches!(
-                    packet_reorder.try_lock(),
-                    Err(TryLockError::WouldBlock),
-                ), "reorder lock must remain held through TUN delivery");
+                assert!(
+                    matches!(packet_reorder.try_lock(), Err(TryLockError::WouldBlock),),
+                    "reorder lock must remain held through TUN delivery"
+                );
                 packet_sender.send(packet).unwrap();
             },
         ));

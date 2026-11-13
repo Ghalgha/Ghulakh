@@ -9,19 +9,23 @@ use ghulakh_protocol::{
 use quinn::{crypto::rustls::QuicClientConfig, Connection, Endpoint};
 use rand::{rngs::OsRng, RngCore};
 use rustls::{pki_types::CertificateDer, RootCertStore};
-use std::{net::{Ipv4Addr, SocketAddr}, sync::Arc, time::Duration};
+use std::{
+    net::{Ipv4Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 pub mod jni_bridge;
-pub mod turn_udp;
-pub mod turn_socket_actor;
-pub mod turn_driver;
-pub mod turn_supervisor;
 pub mod turn_auth;
+pub mod turn_client;
+pub mod turn_credentials;
 pub mod turn_data;
 pub mod turn_dataplane;
-pub mod turn_credentials;
+pub mod turn_driver;
 pub mod turn_handshake_task;
-pub mod turn_client;
+pub mod turn_socket_actor;
+pub mod turn_supervisor;
+pub mod turn_udp;
 
 const ALPN: &[u8] = b"ghulakh/1";
 const DATAGRAM_BUFFER: usize = MAX_DATAGRAM_SIZE * 32;
@@ -49,7 +53,10 @@ pub struct QuicClient {
 
 impl QuicClient {
     pub async fn connect(options: ClientOptions) -> Result<Self> {
-        anyhow::ensure!(!options.server_name.trim().is_empty(), "server name is empty");
+        anyhow::ensure!(
+            !options.server_name.trim().is_empty(),
+            "server name is empty"
+        );
         anyhow::ensure!(
             !options.root_certificate_der.is_empty(),
             "trusted root certificate is empty"
@@ -86,8 +93,7 @@ impl QuicClient {
                 Arc::new(quinn::TokioRuntime),
             )
             .context("create QUIC endpoint from protected UDP socket")?,
-            None => Endpoint::client("[::]:0".parse()?)
-                .context("bind QUIC client endpoint")?,
+            None => Endpoint::client("[::]:0".parse()?).context("bind QUIC client endpoint")?,
         };
         let connection = tokio::time::timeout(
             Duration::from_secs(15),
@@ -116,12 +122,9 @@ impl QuicClient {
                 tunnel_enabled,
                 forwarding_enabled,
                 request_id: response_id,
-            } if response_id == request_id => (
-                session_id,
-                client_ipv4,
-                tunnel_enabled,
-                forwarding_enabled,
-            ),
+            } if response_id == request_id => {
+                (session_id, client_ipv4, tunnel_enabled, forwarding_enabled)
+            }
             _ => {
                 connection.close(0u32.into(), b"invalid server authentication response");
                 bail!("server returned an unexpected authentication response");
@@ -232,7 +235,10 @@ async fn exchange_control(
         version: PROTOCOL_VERSION,
         message,
     })?;
-    anyhow::ensure!(encoded.len() <= MAX_CONTROL_BODY, "control request is too large");
+    anyhow::ensure!(
+        encoded.len() <= MAX_CONTROL_BODY,
+        "control request is too large"
+    );
 
     let (mut send, mut recv) = connection
         .open_bi()
@@ -243,13 +249,11 @@ async fn exchange_control(
         .context("write QUIC control request")?;
     send.finish().context("finish QUIC control request")?;
 
-    let response_bytes = tokio::time::timeout(
-        Duration::from_secs(15),
-        recv.read_to_end(MAX_CONTROL_BODY),
-    )
-    .await
-    .context("control response timed out")?
-    .context("read QUIC control response")?;
+    let response_bytes =
+        tokio::time::timeout(Duration::from_secs(15), recv.read_to_end(MAX_CONTROL_BODY))
+            .await
+            .context("control response timed out")?
+            .context("read QUIC control response")?;
     let response: ControlEnvelope =
         serde_json::from_slice(&response_bytes).context("decode QUIC control response")?;
     validate_envelope(

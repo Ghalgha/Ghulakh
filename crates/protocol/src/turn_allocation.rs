@@ -52,7 +52,6 @@ pub struct AllocationManager {
     state: AllocationState,
 }
 
-
 impl AllocationManager {
     pub fn new() -> Self {
         Self::default()
@@ -73,7 +72,9 @@ impl AllocationManager {
     /// Abort an Allocate attempt after its transaction fails.
     pub fn abort_allocate(&mut self, transaction_id: [u8; 12]) -> Result<(), AllocationError> {
         match self.state {
-            AllocationState::AwaitingAllocate { transaction_id: expected } if expected == transaction_id => {
+            AllocationState::AwaitingAllocate {
+                transaction_id: expected,
+            } if expected == transaction_id => {
                 self.state = AllocationState::Idle;
                 Ok(())
             }
@@ -96,9 +97,10 @@ impl AllocationManager {
             return Err(AllocationError::TransactionMismatch);
         }
         let (relayed_address, lifetime_seconds) = match result {
-            TurnSuccess::Allocate { relayed_address, lifetime_seconds } => {
-                (relayed_address, lifetime_seconds)
-            }
+            TurnSuccess::Allocate {
+                relayed_address,
+                lifetime_seconds,
+            } => (relayed_address, lifetime_seconds),
             _ => return Err(AllocationError::UnexpectedResponse),
         };
         let lease = make_lease(relayed_address, lifetime_seconds, now)?;
@@ -122,7 +124,10 @@ impl AllocationManager {
             self.state = AllocationState::Idle;
             return Err(AllocationError::Expired);
         }
-        self.state = AllocationState::AwaitingRefresh { transaction_id, lease };
+        self.state = AllocationState::AwaitingRefresh {
+            transaction_id,
+            lease,
+        };
         Ok(())
     }
 
@@ -133,7 +138,10 @@ impl AllocationManager {
         now: Instant,
     ) -> Result<Option<&AllocationLease>, AllocationError> {
         let (expected, old_lease) = match &self.state {
-            AllocationState::AwaitingRefresh { transaction_id, lease } => (*transaction_id, lease.clone()),
+            AllocationState::AwaitingRefresh {
+                transaction_id,
+                lease,
+            } => (*transaction_id, lease.clone()),
             _ => return Err(AllocationError::InvalidState),
         };
         if expected != transaction_id {
@@ -159,7 +167,10 @@ impl AllocationManager {
     /// must still retry before expires_at or let expire() retire the lease.
     pub fn refresh_failed(&mut self, transaction_id: [u8; 12]) -> Result<(), AllocationError> {
         let (expected, lease) = match &self.state {
-            AllocationState::AwaitingRefresh { transaction_id, lease } => (*transaction_id, lease.clone()),
+            AllocationState::AwaitingRefresh {
+                transaction_id,
+                lease,
+            } => (*transaction_id, lease.clone()),
             _ => return Err(AllocationError::InvalidState),
         };
         if expected != transaction_id {
@@ -172,8 +183,9 @@ impl AllocationManager {
     /// Retire an allocation whose granted lifetime has elapsed.
     pub fn expire(&mut self, now: Instant) -> bool {
         let expired = match &self.state {
-            AllocationState::Active(lease)
-            | AllocationState::AwaitingRefresh { lease, .. } => now >= lease.expires_at,
+            AllocationState::Active(lease) | AllocationState::AwaitingRefresh { lease, .. } => {
+                now >= lease.expires_at
+            }
             _ => false,
         };
         if expired {
@@ -184,8 +196,9 @@ impl AllocationManager {
 
     pub fn lease(&self) -> Option<&AllocationLease> {
         match &self.state {
-            AllocationState::Active(lease)
-            | AllocationState::AwaitingRefresh { lease, .. } => Some(lease),
+            AllocationState::Active(lease) | AllocationState::AwaitingRefresh { lease, .. } => {
+                Some(lease)
+            }
             _ => None,
         }
     }
@@ -200,10 +213,14 @@ fn make_lease(
         return Err(AllocationError::ZeroLifetime);
     }
     let lifetime = Duration::from_secs(u64::from(lifetime_seconds));
-    let expires_at = now.checked_add(lifetime).ok_or(AllocationError::LifetimeOverflow)?;
+    let expires_at = now
+        .checked_add(lifetime)
+        .ok_or(AllocationError::LifetimeOverflow)?;
     // Refresh at 80% of the granted lifetime, leaving a recovery window.
     let refresh_after = lifetime.mul_f64(0.8);
-    let refresh_at = now.checked_add(refresh_after).ok_or(AllocationError::LifetimeOverflow)?;
+    let refresh_at = now
+        .checked_add(refresh_after)
+        .ok_or(AllocationError::LifetimeOverflow)?;
     Ok(AllocationLease {
         relayed_address,
         lifetime_seconds,
@@ -222,7 +239,10 @@ mod tests {
     }
 
     fn allocate_result(lifetime_seconds: u32) -> TurnSuccess {
-        TurnSuccess::Allocate { relayed_address: relayed(), lifetime_seconds }
+        TurnSuccess::Allocate {
+            relayed_address: relayed(),
+            lifetime_seconds,
+        }
     }
 
     #[test]
@@ -230,19 +250,37 @@ mod tests {
         let now = Instant::now();
         let mut manager = AllocationManager::new();
         manager.begin_allocate([1; 12]).unwrap();
-        let lease = manager.accept_allocate([1; 12], allocate_result(600), now).unwrap();
+        let lease = manager
+            .accept_allocate([1; 12], allocate_result(600), now)
+            .unwrap();
         assert_eq!(lease.relayed_address, relayed());
-        assert_eq!(lease.expires_at.duration_since(now), Duration::from_secs(600));
-        assert_eq!(lease.refresh_at.duration_since(now), Duration::from_secs(480));
+        assert_eq!(
+            lease.expires_at.duration_since(now),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            lease.refresh_at.duration_since(now),
+            Duration::from_secs(480)
+        );
 
-        manager.begin_refresh([2; 12], now + Duration::from_secs(480)).unwrap();
-        let refreshed = manager.accept_refresh(
-            [2; 12],
-            TurnSuccess::Refresh { lifetime_seconds: 300 },
-            now + Duration::from_secs(480),
-        ).unwrap().unwrap();
+        manager
+            .begin_refresh([2; 12], now + Duration::from_secs(480))
+            .unwrap();
+        let refreshed = manager
+            .accept_refresh(
+                [2; 12],
+                TurnSuccess::Refresh {
+                    lifetime_seconds: 300,
+                },
+                now + Duration::from_secs(480),
+            )
+            .unwrap()
+            .unwrap();
         assert_eq!(refreshed.lifetime_seconds, 300);
-        assert_eq!(refreshed.expires_at.duration_since(now), Duration::from_secs(780));
+        assert_eq!(
+            refreshed.expires_at.duration_since(now),
+            Duration::from_secs(780)
+        );
     }
 
     #[test]
@@ -252,11 +290,9 @@ mod tests {
         manager.abort_allocate([1; 12]).unwrap();
         assert_eq!(manager.state(), &AllocationState::Idle);
         manager.begin_allocate([2; 12]).unwrap();
-        let lease = manager.accept_allocate(
-            [2; 12],
-            allocate_result(120),
-            Instant::now(),
-        ).unwrap();
+        let lease = manager
+            .accept_allocate([2; 12], allocate_result(120), Instant::now())
+            .unwrap();
         assert_eq!(lease.lifetime_seconds, 120);
     }
 
@@ -270,10 +306,19 @@ mod tests {
             Err(AllocationError::TransactionMismatch)
         );
         assert_eq!(
-            manager.accept_allocate([1; 12], TurnSuccess::Refresh { lifetime_seconds: 600 }, now),
+            manager.accept_allocate(
+                [1; 12],
+                TurnSuccess::Refresh {
+                    lifetime_seconds: 600
+                },
+                now
+            ),
             Err(AllocationError::UnexpectedResponse)
         );
-        assert!(matches!(manager.state(), AllocationState::AwaitingAllocate { .. }));
+        assert!(matches!(
+            manager.state(),
+            AllocationState::AwaitingAllocate { .. }
+        ));
     }
 
     #[test]
@@ -281,10 +326,18 @@ mod tests {
         let now = Instant::now();
         let mut manager = AllocationManager::new();
         manager.begin_allocate([1; 12]).unwrap();
-        manager.accept_allocate([1; 12], allocate_result(600), now).unwrap();
+        manager
+            .accept_allocate([1; 12], allocate_result(600), now)
+            .unwrap();
         manager.begin_refresh([2; 12], now).unwrap();
         assert_eq!(
-            manager.accept_refresh([2; 12], TurnSuccess::Refresh { lifetime_seconds: 0 }, now),
+            manager.accept_refresh(
+                [2; 12],
+                TurnSuccess::Refresh {
+                    lifetime_seconds: 0
+                },
+                now
+            ),
             Ok(None)
         );
         assert_eq!(manager.state(), &AllocationState::Idle);
@@ -295,8 +348,12 @@ mod tests {
         let now = Instant::now();
         let mut manager = AllocationManager::new();
         manager.begin_allocate([1; 12]).unwrap();
-        manager.accept_allocate([1; 12], allocate_result(10), now).unwrap();
-        manager.begin_refresh([2; 12], now + Duration::from_secs(8)).unwrap();
+        manager
+            .accept_allocate([1; 12], allocate_result(10), now)
+            .unwrap();
+        manager
+            .begin_refresh([2; 12], now + Duration::from_secs(8))
+            .unwrap();
         manager.refresh_failed([2; 12]).unwrap();
         assert!(manager.lease().is_some());
         assert!(!manager.expire(now + Duration::from_secs(9)));
@@ -309,7 +366,9 @@ mod tests {
         let now = Instant::now();
         let mut manager = AllocationManager::new();
         manager.begin_allocate([1; 12]).unwrap();
-        manager.accept_allocate([1; 12], allocate_result(5), now).unwrap();
+        manager
+            .accept_allocate([1; 12], allocate_result(5), now)
+            .unwrap();
         assert_eq!(
             manager.begin_refresh([2; 12], now + Duration::from_secs(5)),
             Err(AllocationError::Expired)

@@ -131,7 +131,9 @@ pub fn protected_frame_session_id(frame: &[u8]) -> Result<[u8; 8], FrameError> {
     if &frame[..4] != FRAME_MAGIC {
         return Err(FrameError::InvalidHeader);
     }
-    frame[4..12].try_into().map_err(|_| FrameError::InvalidHeader)
+    frame[4..12]
+        .try_into()
+        .map_err(|_| FrameError::InvalidHeader)
 }
 
 /// Encrypts outbound frames. A sequence number is consumed for every seal call.
@@ -181,7 +183,8 @@ impl FrameSealer {
 
         let nonce = make_nonce(self.nonce_prefix, sequence);
         let mut ciphertext = plaintext.to_vec();
-        let tag = self.cipher
+        let tag = self
+            .cipher
             .encrypt_in_place_detached(Nonce::from_slice(&nonce), &header, &mut ciphertext)
             .map_err(|_| FrameError::AuthenticationFailed)?;
 
@@ -237,7 +240,9 @@ impl FrameOpener {
             return Err(FrameError::DirectionMismatch);
         }
         let sequence = u64::from_be_bytes(
-            frame[13..21].try_into().map_err(|_| FrameError::InvalidHeader)?
+            frame[13..21]
+                .try_into()
+                .map_err(|_| FrameError::InvalidHeader)?,
         );
         let payload_len = usize::from(u16::from_be_bytes([frame[21], frame[22]]));
         if payload_len > MAX_PROTECTED_PAYLOAD_SIZE {
@@ -305,12 +310,18 @@ mod tests {
         let mut bad_header = frame.clone();
         bad_header[13] ^= 1;
         let mut opener = pair().1;
-        assert_eq!(opener.open(&bad_header), Err(FrameError::AuthenticationFailed));
+        assert_eq!(
+            opener.open(&bad_header),
+            Err(FrameError::AuthenticationFailed)
+        );
 
         let mut bad_ciphertext = frame;
         bad_ciphertext[FRAME_HEADER_LEN] ^= 1;
         let mut opener = pair().1;
-        assert_eq!(opener.open(&bad_ciphertext), Err(FrameError::AuthenticationFailed));
+        assert_eq!(
+            opener.open(&bad_ciphertext),
+            Err(FrameError::AuthenticationFailed)
+        );
     }
 
     #[test]
@@ -318,11 +329,16 @@ mod tests {
         let (mut sealer, _) = pair();
         let frame = sealer.seal(b"payload").unwrap();
 
-        let mut wrong_session = FrameOpener::new(KEY, PREFIX, [0; 8], FrameDirection::ClientToServer);
+        let mut wrong_session =
+            FrameOpener::new(KEY, PREFIX, [0; 8], FrameDirection::ClientToServer);
         assert_eq!(wrong_session.open(&frame), Err(FrameError::SessionMismatch));
 
-        let mut wrong_direction = FrameOpener::new(KEY, PREFIX, SESSION, FrameDirection::ServerToClient);
-        assert_eq!(wrong_direction.open(&frame), Err(FrameError::DirectionMismatch));
+        let mut wrong_direction =
+            FrameOpener::new(KEY, PREFIX, SESSION, FrameDirection::ServerToClient);
+        assert_eq!(
+            wrong_direction.open(&frame),
+            Err(FrameError::DirectionMismatch)
+        );
     }
 
     #[test]
@@ -370,5 +386,4 @@ mod tests {
             }
         }
     }
-
 }

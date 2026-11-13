@@ -13,7 +13,10 @@ use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    env, fs, fs::{File, OpenOptions}, io::{BufReader, Read, Write}, net::{Ipv4Addr, SocketAddr},
+    env, fs,
+    fs::{File, OpenOptions},
+    io::{BufReader, Read, Write},
+    net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -108,7 +111,10 @@ fn start_tun(
     let tun_reader_task = tokio::spawn(async move {
         let mut buffer = vec![0u8; 65_535];
         loop {
-            let length = reader.recv(&mut buffer).await.context("read packet from TUN")?;
+            let length = reader
+                .recv(&mut buffer)
+                .await
+                .context("read packet from TUN")?;
             let packet = &buffer[..length];
             let kind = match packet.first().map(|byte| byte >> 4) {
                 Some(4) => IpPacketKind::Ipv4,
@@ -154,8 +160,7 @@ fn start_tun(
 #[allow(dead_code)]
 fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerConfig> {
     let mut cert_reader = BufReader::new(
-        File::open(cert_path)
-            .with_context(|| format!("open certificate file: {cert_path}"))?,
+        File::open(cert_path).with_context(|| format!("open certificate file: {cert_path}"))?,
     );
     let cert_chain: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -188,8 +193,8 @@ fn load_server_config(cert_path: &str, key_path: &str) -> Result<quinn::ServerCo
 }
 
 fn load_credential_hashes(path: &str) -> Result<Vec<[u8; 32]>> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("read credential digest file: {path}"))?;
+    let content =
+        fs::read_to_string(path).with_context(|| format!("read credential digest file: {path}"))?;
     let mut hashes = Vec::new();
 
     for (line_number, line) in content.lines().enumerate() {
@@ -198,16 +203,26 @@ fn load_credential_hashes(path: &str) -> Result<Vec<[u8; 32]>> {
             continue;
         }
 
-        let decoded = hex::decode(value)
-            .with_context(|| format!("invalid hex credential digest on line {}", line_number + 1))?;
+        let decoded = hex::decode(value).with_context(|| {
+            format!("invalid hex credential digest on line {}", line_number + 1)
+        })?;
         let digest: [u8; 32] = decoded.try_into().map_err(|_| {
-            anyhow::anyhow!("credential digest on line {} must be 32 bytes", line_number + 1)
+            anyhow::anyhow!(
+                "credential digest on line {} must be 32 bytes",
+                line_number + 1
+            )
         })?;
         hashes.push(digest);
     }
 
-    anyhow::ensure!(!hashes.is_empty(), "credential digest file contains no credentials");
-    anyhow::ensure!(hashes.len() <= 10_000, "credential digest file exceeds 10000 entries");
+    anyhow::ensure!(
+        !hashes.is_empty(),
+        "credential digest file contains no credentials"
+    );
+    anyhow::ensure!(
+        hashes.len() <= 10_000,
+        "credential digest file exceeds 10000 entries"
+    );
     Ok(hashes)
 }
 
@@ -255,18 +270,16 @@ async fn handle_control_stream(
     tunnel_enabled: bool,
     forwarding_enabled: bool,
 ) -> Result<()> {
-    let bytes = match tokio::time::timeout(
-        Duration::from_secs(15),
-        recv.read_to_end(MAX_CONTROL_BODY),
-    )
-    .await
-    {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(_)) | Err(_) => {
-            connection.close(0u32.into(), b"invalid control stream");
-            bail!("control stream read failed");
-        }
-    };
+    let bytes =
+        match tokio::time::timeout(Duration::from_secs(15), recv.read_to_end(MAX_CONTROL_BODY))
+            .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            Ok(Err(_)) | Err(_) => {
+                connection.close(0u32.into(), b"invalid control stream");
+                bail!("control stream read failed");
+            }
+        };
 
     if bytes.len() > MAX_CONTROL_BODY {
         connection.close(0u32.into(), b"control message too large");
@@ -280,12 +293,9 @@ async fn handle_control_stream(
             return Err(error).context("decode control envelope");
         }
     };
-    if let Err(error) = validate_envelope(
-        envelope.version,
-        bytes.len(),
-        request_id(&envelope.message),
-    )
-    .and_then(|()| validate_message(&envelope.message))
+    if let Err(error) =
+        validate_envelope(envelope.version, bytes.len(), request_id(&envelope.message))
+            .and_then(|()| validate_message(&envelope.message))
     {
         connection.close(0u32.into(), b"invalid control message");
         return Err(error.into());
@@ -375,9 +385,7 @@ fn destination_allowed(address: Ipv4Addr) -> bool {
             | u32::from(octets[1]) << 16
             | u32::from(octets[2]) << 8
             | u32::from(octets[3]);
-        let network = u32::from(a) << 24
-            | u32::from(b) << 16
-            | u32::from(c) << 8;
+        let network = u32::from(a) << 24 | u32::from(b) << 16 | u32::from(c) << 8;
         let prefix_mask = u32::MAX << (32 - mask);
         value & prefix_mask == network & prefix_mask
     };
@@ -547,11 +555,15 @@ fn ensure_keygen_args(args: &[String]) -> Result<()> {
 }
 
 fn read_noise_private_key(path: &str) -> Result<Zeroizing<Vec<u8>>> {
-    let mut file = File::open(path)
-        .with_context(|| format!("open Noise private key file {path}"))?;
-    let metadata = file.metadata()
+    let mut file =
+        File::open(path).with_context(|| format!("open Noise private key file {path}"))?;
+    let metadata = file
+        .metadata()
         .with_context(|| format!("inspect Noise private key file {path}"))?;
-    anyhow::ensure!(metadata.is_file(), "Noise private key path {path} is not a regular file");
+    anyhow::ensure!(
+        metadata.is_file(),
+        "Noise private key path {path} is not a regular file"
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -566,7 +578,10 @@ fn read_noise_private_key(path: &str) -> Result<Zeroizing<Vec<u8>>> {
     file.read_to_string(&mut encoded)
         .with_context(|| format!("read Noise private key file {path}"))?;
     let encoded = encoded.trim();
-    anyhow::ensure!(encoded.len() == 64, "persistent Noise private key must contain exactly 32 bytes");
+    anyhow::ensure!(
+        encoded.len() == 64,
+        "persistent Noise private key must contain exactly 32 bytes"
+    );
     let mut decoded = Zeroizing::new([0u8; 32]);
     hex::decode_to_slice(encoded, &mut decoded[..])
         .context("decode persistent Noise private key")?;
@@ -581,23 +596,32 @@ fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(if private { 0o600 } else { 0o644 });
     }
-    let mut file = options.open(path)
-        .with_context(|| format!("create Noise key file {path} without overwriting an existing file"))?;
-    file.write_all(bytes).with_context(|| format!("write Noise key file {path}"))?;
-    file.sync_all().with_context(|| format!("sync Noise key file {path}"))?;
+    let mut file = options.open(path).with_context(|| {
+        format!("create Noise key file {path} without overwriting an existing file")
+    })?;
+    file.write_all(bytes)
+        .with_context(|| format!("write Noise key file {path}"))?;
+    file.sync_all()
+        .with_context(|| format!("sync Noise key file {path}"))?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    if args.get(1).is_some_and(|arg| arg == "--generate-noise-keypair") {
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--generate-noise-keypair")
+    {
         ensure_keygen_args(&args)?;
         let keypair = ghulakh_protocol::session_handshake::NoiseServerKeyPair::generate()
             .context("generate persistent Noise server keypair")?;
         let private_path = &args[2];
         let public_path = &args[3];
-        anyhow::ensure!(private_path != public_path, "private and public key paths must differ");
+        anyhow::ensure!(
+            private_path != public_path,
+            "private and public key paths must differ"
+        );
         let mut private_hex = Zeroizing::new(hex::encode(keypair.private_key_bytes()));
         private_hex.push('\n');
         let public_hex = format!("{}\n", hex::encode(keypair.public_key()));
@@ -606,7 +630,10 @@ async fn main() -> Result<()> {
             let _ = fs::remove_file(private_path);
             return Err(error);
         }
-        println!("noise_server_public_key_hex={}", hex::encode(keypair.public_key()));
+        println!(
+            "noise_server_public_key_hex={}",
+            hex::encode(keypair.public_key())
+        );
         return Ok(());
     }
 
@@ -628,7 +655,9 @@ async fn main() -> Result<()> {
             tun_enabled && forwarding_enabled,
             "TURN gateway requires GHULAKH_TUN_ENABLED=true and GHULAKH_FORWARDING_ENABLED=true"
         );
-        let bind: SocketAddr = gateway_bind.parse().context("invalid GHULAKH_TURN_GATEWAY_BIND")?;
+        let bind: SocketAddr = gateway_bind
+            .parse()
+            .context("invalid GHULAKH_TURN_GATEWAY_BIND")?;
         let private_path = env::var("GHULAKH_NOISE_PRIVATE_KEY")
             .context("set GHULAKH_NOISE_PRIVATE_KEY to a hex-encoded private key file")?;
         let public_path = env::var("GHULAKH_NOISE_PUBLIC_KEY")
@@ -639,17 +668,20 @@ async fn main() -> Result<()> {
             ghulakh_protocol::session_handshake::NoiseServerKeyPair::from_bytes(
                 read_noise_private_key(&private_path)?,
                 public_key,
-            ).context("validate persistent Noise server keypair")?
+            )
+            .context("validate persistent Noise server keypair")?,
         );
         let hashes = Arc::clone(&credential_hashes);
-        let verifier: Arc<turn_handshake_service::CredentialVerifier> = Arc::new(move |candidate| {
-            std::str::from_utf8(candidate)
-                .ok()
-                .is_some_and(|credential| credential_matches(credential, &hashes))
-        });
+        let verifier: Arc<turn_handshake_service::CredentialVerifier> =
+            Arc::new(move |candidate| {
+                std::str::from_utf8(candidate)
+                    .ok()
+                    .is_some_and(|credential| credential_matches(credential, &hashes))
+            });
         let service = turn_handshake_service::TurnHandshakeService::new(keypair, verifier)
             .context("initialize server TURN handshake service")?;
-        let (gateway, receiver) = turn_gateway::TurnGateway::bind(bind).await
+        let (gateway, receiver) = turn_gateway::TurnGateway::bind(bind)
+            .await
             .context("bind server TURN gateway")?;
         gateway.install_handshake_service(service).await?;
         let gateway_task = Arc::clone(&gateway);
@@ -683,11 +715,15 @@ async fn main() -> Result<()> {
     let mut turn_ingress_task = None;
     let (tun_sender, tun_writer_task, tun_reader_task) = if tun_enabled {
         let name = env::var("GHULAKH_TUN_NAME").unwrap_or_else(|_| "ghulakh0".to_string());
-        let turn_gateway = turn_gateway_setup.as_ref().map(|(gateway, _, _)| Arc::clone(gateway));
+        let turn_gateway = turn_gateway_setup
+            .as_ref()
+            .map(|(gateway, _, _)| Arc::clone(gateway));
         let (sender, writer_task, reader_task) =
             start_tun(&name, Arc::clone(&sessions), turn_gateway)?;
         if let Some((_, ingress, _)) = turn_gateway_setup.as_mut() {
-            let mut ingress = ingress.take().expect("TURN ingress receiver is available during startup");
+            let mut ingress = ingress
+                .take()
+                .expect("TURN ingress receiver is available during startup");
             let tun_ingress_sender = sender.clone();
             turn_ingress_task = Some(tokio::spawn(async move {
                 while let Some(packet) = ingress.recv().await {
@@ -708,10 +744,10 @@ async fn main() -> Result<()> {
         bail!("TUN is required when the TURN gateway is enabled");
     };
 
-    let (_, _, turn_gateway_task) = turn_gateway_setup
-        .expect("TURN gateway is required by the startup guard");
-    let turn_ingress_task = turn_ingress_task
-        .expect("TURN ingress task is required when the gateway is enabled");
+    let (_, _, turn_gateway_task) =
+        turn_gateway_setup.expect("TURN gateway is required by the startup guard");
+    let turn_ingress_task =
+        turn_ingress_task.expect("TURN ingress task is required when the gateway is enabled");
     tokio::select! {
         result = turn_gateway_task => {
             result
@@ -831,15 +867,20 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("noise-private.key");
-        std::fs::write(&path, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").unwrap();
+        std::fs::write(
+            &path,
+            "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+        )
+        .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
-            read_noise_private_key(path.to_str().unwrap()).unwrap().as_slice(),
+            read_noise_private_key(path.to_str().unwrap())
+                .unwrap()
+                .as_slice(),
             &[
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
-                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
-                0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff,
+                0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+                0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb,
+                0xcc, 0xdd, 0xee, 0xff,
             ]
         );
     }
@@ -866,7 +907,9 @@ mod tests {
         std::fs::write(&path, "00112233").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let error = read_noise_private_key(path.to_str().unwrap()).unwrap_err();
-        assert!(error.to_string().contains("owner-readable and inaccessible to group/others"));
+        assert!(error
+            .to_string()
+            .contains("owner-readable and inaccessible to group/others"));
     }
 
     #[test]
@@ -919,14 +962,7 @@ mod tests {
                 let _server_connection_task = tokio::spawn(async move {
                     if let Ok(connection) = connecting.await {
                         let _ = handle_connection(
-                            connection,
-                            hashes,
-                            metrics,
-                            None,
-                            sessions,
-                            allocator,
-                            false,
-                            false,
+                            connection, hashes, metrics, None, sessions, allocator, false, false,
                         )
                         .await;
                     }
@@ -934,15 +970,17 @@ mod tests {
             }
         });
 
-        let client = Arc::new(QuicClient::connect(ClientOptions {
-            server_addr,
-            server_name: "localhost".into(),
-            root_certificate_der: certificate.cert.der().to_vec(),
-            credential,
-            udp_socket: None,
-        })
-        .await
-        .unwrap());
+        let client = Arc::new(
+            QuicClient::connect(ClientOptions {
+                server_addr,
+                server_name: "localhost".into(),
+                root_certificate_der: certificate.cert.der().to_vec(),
+                credential,
+                udp_socket: None,
+            })
+            .await
+            .unwrap(),
+        );
 
         assert_eq!(client.session_id().len(), 32);
         assert_eq!(client.client_ipv4(), "10.77.0.2");
@@ -984,7 +1022,10 @@ mod tests {
             .await
             .expect("closing the client did not unblock a pending receive")
             .expect("receive task panicked");
-        assert!(receive_result.is_err(), "closed connection returned a packet");
+        assert!(
+            receive_result.is_err(),
+            "closed connection returned a packet"
+        );
 
         endpoint.close(0u32.into(), b"test complete");
         server_task.abort();

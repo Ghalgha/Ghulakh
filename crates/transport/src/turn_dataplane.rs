@@ -8,7 +8,10 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use ghulakh_protocol::ordered_datagram::SequencedDataDatagram;
-use tokio::{sync::mpsc, time::{interval_at, Duration, Instant}};
+use tokio::{
+    sync::mpsc,
+    time::{interval_at, Duration, Instant},
+};
 
 const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(45);
@@ -54,7 +57,13 @@ impl TurnDataPlane {
         sender: TurnDataSender,
         receiver: TurnDataReceiver,
     ) -> Self {
-        Self { actor, inbound, relay_endpoint, sender, receiver }
+        Self {
+            actor,
+            inbound,
+            relay_endpoint,
+            sender,
+            receiver,
+        }
     }
 
     /// Pump packets until either application queue or the socket actor closes.
@@ -104,7 +113,8 @@ impl TurnDataPlane {
                             {
                                 last_acked_nonce = Some(nonce);
                                 last_keepalive_ack = Instant::now();
-                                stats.keepalive_acks_received = stats.keepalive_acks_received.saturating_add(1);
+                                stats.keepalive_acks_received =
+                                    stats.keepalive_acks_received.saturating_add(1);
                             }
                         }
                         Err(_) => {
@@ -116,19 +126,28 @@ impl TurnDataPlane {
                     let Some(packet) = packet else {
                         return Ok(stats);
                     };
-                    let datagram = self.sender.encode_sequenced_packet(&packet)
+                    let datagram = self
+                        .sender
+                        .encode_sequenced_packet(&packet)
                         .context("encode sequenced protected TURN uplink frame")?;
-                    self.actor.send_datagram(datagram).await
+                    self.actor
+                        .send_datagram(datagram)
+                        .await
                         .context("send protected TURN uplink frame")?;
                     stats.sent_frames = stats.sent_frames.saturating_add(1);
                 }
                 Event::Keepalive => {
                     let nonce = next_keepalive_nonce;
-                    next_keepalive_nonce = next_keepalive_nonce.checked_add(1)
+                    next_keepalive_nonce = next_keepalive_nonce
+                        .checked_add(1)
                         .context("TURN keepalive nonce space exhausted")?;
-                    let datagram = self.sender.encode_keepalive(nonce)
+                    let datagram = self
+                        .sender
+                        .encode_keepalive(nonce)
                         .context("encode authenticated TURN path-health probe")?;
-                    self.actor.send_datagram(datagram).await
+                    self.actor
+                        .send_datagram(datagram)
+                        .await
                         .context("send authenticated TURN path-health probe")?;
                     stats.keepalives_sent = stats.keepalives_sent.saturating_add(1);
                 }
@@ -145,13 +164,16 @@ impl TurnDataPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
     use ghulakh_protocol::{
         secure_frame::{FrameDirection, FrameOpener, FrameSealer},
         turn_channel_data::decode_channel_data,
-        IpPacketKind, DataDatagram,
+        DataDatagram, IpPacketKind,
     };
-    use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
-    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+    use tokio::{
+        net::UdpSocket,
+        time::{timeout, Duration},
+    };
 
     const CHANNEL: u16 = 0x4001;
     const SESSION: [u8; 8] = [0x31; 8];
@@ -163,7 +185,10 @@ mod tests {
     #[test]
     fn path_is_marked_failed_only_after_keepalive_ack_deadline() {
         let sent = Instant::now();
-        assert!(!keepalive_expired(sent, sent + KEEPALIVE_TIMEOUT - Duration::from_secs(1)));
+        assert!(!keepalive_expired(
+            sent,
+            sent + KEEPALIVE_TIMEOUT - Duration::from_secs(1)
+        ));
         assert!(keepalive_expired(sent, sent + KEEPALIVE_TIMEOUT));
     }
 
@@ -175,7 +200,10 @@ mod tests {
         bytes[9] = 17;
         bytes[12..16].copy_from_slice(&[10, 77, 0, 2]);
         bytes[16..20].copy_from_slice(&[10, 77, 0, 3]);
-        DataDatagram { kind: IpPacketKind::Ipv4, packet: bytes }
+        DataDatagram {
+            kind: IpPacketKind::Ipv4,
+            packet: bytes,
+        }
     }
 
     #[tokio::test]
@@ -183,7 +211,8 @@ mod tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let (actor, receivers) = TurnSocketActor::spawn(socket);
         let (uplink_tx, uplink_rx) = mpsc::channel::<SequencedDataDatagram>(4);
         let (downlink_tx, mut downlink_rx) = mpsc::channel(4);
@@ -194,23 +223,41 @@ mod tests {
             relay_addr,
             TurnDataSender::new(
                 CHANNEL,
-                FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+                FrameSealer::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
             ),
             TurnDataReceiver::new(
                 CHANNEL,
-                FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+                FrameOpener::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
             ),
         );
 
         let relay_task = tokio::spawn(async move {
             let mut buffer = [0u8; 2048];
-            let (length, client_addr) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+            let (length, client_addr) =
+                timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
             let channel = decode_channel_data(&buffer[..length]).unwrap();
             assert_eq!(channel.channel_number, CHANNEL);
             let mut gateway_rx = TurnDataReceiver::new(
                 CHANNEL,
-                FrameOpener::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+                FrameOpener::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
             );
             let uplink_payload = gateway_rx.decode_payload(&buffer[..length]).unwrap();
             let uplink_packet = match uplink_payload {
@@ -218,22 +265,34 @@ mod tests {
                     assert_eq!(packet.sequence, Some(0));
                     packet.datagram
                 }
-                crate::turn_data::TurnDataPayload::KeepaliveAck(_) => panic!("unexpected keepalive acknowledgement"),
+                crate::turn_data::TurnDataPayload::KeepaliveAck(_) => {
+                    panic!("unexpected keepalive acknowledgement")
+                }
             };
             assert_eq!(uplink_packet, packet());
 
             let mut gateway_tx = TurnDataSender::new(
                 CHANNEL,
-                FrameSealer::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+                FrameSealer::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
             );
             let response = gateway_tx.encode_packet(&uplink_packet).unwrap();
             relay.send_to(&response, client_addr).await.unwrap();
         });
 
         let plane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
-        uplink_tx.send(SequencedDataDatagram::new(0, packet())).await.unwrap();
+        uplink_tx
+            .send(SequencedDataDatagram::new(0, packet()))
+            .await
+            .unwrap();
         let returned = timeout(Duration::from_secs(2), downlink_rx.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(returned.datagram, packet());
         drop(uplink_tx);
         let stats = plane_task.await.unwrap().unwrap();
@@ -243,10 +302,7 @@ mod tests {
         relay_task.await.unwrap();
         drop(receivers.control);
     }
-
-
 }
-
 
 #[cfg(test)]
 mod keepalive_fault_injection_tests {
@@ -258,19 +314,24 @@ mod keepalive_fault_injection_tests {
     const SERVER_KEY: [u8; 32] = [0x22; 32];
     const CLIENT_PREFIX: [u8; 4] = [0x41; 4];
     const SERVER_PREFIX: [u8; 4] = [0x52; 4];
+    use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
     use ghulakh_protocol::{
         secure_frame::{keepalive_request, FrameDirection, FrameOpener, FrameSealer},
         turn_channel_data::decode_channel_data,
     };
-    use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
-    use tokio::{net::UdpSocket, sync::mpsc, time::{advance, Duration}};
+    use tokio::{
+        net::UdpSocket,
+        sync::mpsc,
+        time::{advance, Duration},
+    };
 
     #[tokio::test(start_paused = true)]
     async fn missing_authenticated_keepalive_ack_marks_path_failed_at_deadline() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let (actor, receivers) = TurnSocketActor::spawn(socket);
         let (uplink_tx, uplink_rx) = mpsc::channel::<SequencedDataDatagram>(1);
         let (downlink_tx, _downlink_rx) = mpsc::channel(1);
@@ -291,11 +352,21 @@ mod keepalive_fault_injection_tests {
             relay_addr,
             TurnDataSender::new(
                 CHANNEL,
-                FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+                FrameSealer::new(
+                    CLIENT_KEY,
+                    CLIENT_PREFIX,
+                    SESSION,
+                    FrameDirection::ClientToServer,
+                ),
             ),
             TurnDataReceiver::new(
                 CHANNEL,
-                FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+                FrameOpener::new(
+                    SERVER_KEY,
+                    SERVER_PREFIX,
+                    SESSION,
+                    FrameDirection::ServerToClient,
+                ),
             ),
         );
         let plane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
@@ -322,7 +393,10 @@ mod keepalive_fault_injection_tests {
 
         advance(KEEPALIVE_TIMEOUT - KEEPALIVE_INTERVAL * 2 - Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
-        assert!(!plane_task.is_finished(), "path failed before the acknowledgement deadline");
+        assert!(
+            !plane_task.is_finished(),
+            "path failed before the acknowledgement deadline"
+        );
 
         advance(Duration::from_secs(1)).await;
         let error = plane_task.await.unwrap().unwrap_err();

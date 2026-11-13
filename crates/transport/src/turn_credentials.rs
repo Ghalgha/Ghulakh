@@ -71,7 +71,29 @@ pub struct TurnEndpoint {
     pub port: u16,
     pub transport: TurnWireTransport,
     /// Query parameters are retained verbatim, including unknown parameters.
+    /// They are treated as sensitive because providers may place tokens here.
     pub query: Vec<(String, String)>,
+}
+
+fn zeroize_query_parameters(query: &mut [(String, String)]) {
+    for (key, value) in query {
+        key.zeroize();
+        value.zeroize();
+    }
+}
+
+struct SensitiveQueryParameters(Vec<(String, String)>);
+
+impl Drop for SensitiveQueryParameters {
+    fn drop(&mut self) {
+        zeroize_query_parameters(&mut self.0);
+    }
+}
+
+impl Drop for TurnEndpoint {
+    fn drop(&mut self) {
+        zeroize_query_parameters(&mut self.query);
+    }
 }
 
 impl fmt::Debug for TurnEndpoint {
@@ -101,9 +123,8 @@ impl TurnEndpoint {
     }
 
     pub fn tls_server_name(&self) -> Option<&str> {
-        (self.transport == TurnWireTransport::Tls
-            && IpAddr::from_str(&self.host).is_err())
-        .then_some(self.host.as_str())
+        (self.transport == TurnWireTransport::Tls && IpAddr::from_str(&self.host).is_err())
+            .then_some(self.host.as_str())
     }
 }
 
@@ -141,9 +162,10 @@ impl TurnCredentials {
         let root: serde_json::Value =
             serde_json::from_str(input).map_err(|_| TurnCredentialError::InvalidJson)?;
         let values = match root {
-            serde_json::Value::Array(values) => {
-                values.into_iter().map(SensitiveJsonValue).collect::<Vec<_>>()
-            }
+            serde_json::Value::Array(values) => values
+                .into_iter()
+                .map(SensitiveJsonValue)
+                .collect::<Vec<_>>(),
             mut other => {
                 zeroize_json_strings(&mut other);
                 return Err(TurnCredentialError::InvalidJson);
@@ -168,13 +190,18 @@ impl TurnCredentials {
         Self::from_vk_response_value(SensitiveJsonValue(root))
     }
 
-    fn from_vk_response_value(
-        mut root: SensitiveJsonValue,
-    ) -> Result<Self, TurnCredentialError> {
+    fn from_vk_response_value(mut root: SensitiveJsonValue) -> Result<Self, TurnCredentialError> {
         let turn = if root.0.get("turn_server").is_some() {
             root.0.get_mut("turn_server")
-        } else if root.0.get("response").and_then(|response| response.get("turn_server")).is_some() {
-            root.0.get_mut("response").and_then(|response| response.get_mut("turn_server"))
+        } else if root
+            .0
+            .get("response")
+            .and_then(|response| response.get("turn_server"))
+            .is_some()
+        {
+            root.0
+                .get_mut("response")
+                .and_then(|response| response.get_mut("turn_server"))
         } else if root.0.get("username").is_some()
             && root.0.get("credential").is_some()
             && root.0.get("urls").is_some()
@@ -293,7 +320,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
     }
 
     let (host, port) = parse_authority(authority, scheme)?;
-    let mut parameters = Vec::new();
+    let mut parameters = SensitiveQueryParameters(Vec::new());
     let mut requested_transport = None;
     for part in query.split('&').filter(|part| !part.is_empty()) {
         let (key, value) = part.split_once('=').unwrap_or((part, ""));
@@ -307,7 +334,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
                 _ => return Err(TurnCredentialError::InvalidTransport),
             });
         }
-        parameters.push((key.to_owned(), value.to_owned()));
+        parameters.0.push((key.to_owned(), value.to_owned()));
     }
 
     let transport = match (scheme, requested_transport) {
@@ -324,7 +351,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
         host,
         port,
         transport,
-        query: parameters,
+        query: std::mem::take(&mut parameters.0),
     })
 }
 
@@ -332,7 +359,11 @@ fn parse_authority(
     authority: &str,
     scheme: TurnScheme,
 ) -> Result<(String, u16), TurnCredentialError> {
-    let default_port = if scheme == TurnScheme::Turns { 5349 } else { 3478 };
+    let default_port = if scheme == TurnScheme::Turns {
+        5349
+    } else {
+        3478
+    };
     let (host, port) = if let Some(rest) = authority.strip_prefix('[') {
         let (host, suffix) = rest
             .split_once(']')
@@ -343,7 +374,9 @@ fn parse_authority(
         let port = if suffix.is_empty() {
             default_port
         } else {
-            let value = suffix.strip_prefix(':').ok_or(TurnCredentialError::InvalidAuthority)?;
+            let value = suffix
+                .strip_prefix(':')
+                .ok_or(TurnCredentialError::InvalidAuthority)?;
             parse_port(value)?
         };
         (host.to_owned(), port)
@@ -369,7 +402,9 @@ fn parse_authority(
 }
 
 fn parse_port(value: &str) -> Result<u16, TurnCredentialError> {
-    let port = value.parse::<u16>().map_err(|_| TurnCredentialError::InvalidAuthority)?;
+    let port = value
+        .parse::<u16>()
+        .map_err(|_| TurnCredentialError::InvalidAuthority)?;
     if port == 0 {
         return Err(TurnCredentialError::InvalidAuthority);
     }
@@ -388,7 +423,9 @@ fn valid_host(host: &str) -> bool {
             && label.len() <= 63
             && !label.starts_with('-')
             && !label.ends_with('-')
-            && label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     })
 }
 
@@ -407,7 +444,6 @@ mod tests {
             ]
         }
     }"#;
-
 
     #[test]
     fn zeroize_json_strings_clears_nested_string_values() {
@@ -429,12 +465,33 @@ mod tests {
     }
 
     #[test]
+    fn zeroize_query_parameters_clears_keys_and_values() {
+        let mut query = vec![
+            ("transport".to_owned(), "udp".to_owned()),
+            ("token".to_owned(), "temporary-token".to_owned()),
+        ];
+
+        zeroize_query_parameters(&mut query);
+
+        assert_eq!(
+            query,
+            vec![
+                (String::new(), String::new()),
+                (String::new(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
     fn parses_vk_calls_turn_server_and_redacts_secrets() {
         let credentials = TurnCredentials::from_vk_response_json(RESPONSE).unwrap();
         assert_eq!(credentials.username(), "temporary-user");
         assert_eq!(credentials.password(), "temporary-password");
         assert_eq!(credentials.endpoints().len(), 3);
-        assert_eq!(credentials.first_udp_endpoint().unwrap().host, "relay.example");
+        assert_eq!(
+            credentials.first_udp_endpoint().unwrap().host,
+            "relay.example"
+        );
         let debug = format!("{credentials:?}");
         assert!(!debug.contains("temporary-user"));
         assert!(!debug.contains("temporary-password"));
@@ -482,8 +539,8 @@ mod tests {
 
     #[test]
     fn endpoint_debug_redacts_query_parameters() {
-        let endpoint = parse_turn_uri("turn:relay.example:3478?transport=udp&secret=not-logged")
-            .unwrap();
+        let endpoint =
+            parse_turn_uri("turn:relay.example:3478?transport=udp&secret=not-logged").unwrap();
         let debug = format!("{endpoint:?}");
         assert!(!debug.contains("not-logged"));
         assert!(debug.contains("<redacted>"));

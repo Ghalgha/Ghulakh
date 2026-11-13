@@ -4,13 +4,15 @@
 //! not derive keys or decide which password algorithm a remote service uses.
 
 use crate::stun::{
-    StunAttribute, StunClass, StunMessage, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_PASSWORD_ALGORITHMS, ATTR_REALM,
+    StunAttribute, StunClass, StunMessage, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_PASSWORD_ALGORITHMS,
+    ATTR_REALM,
 };
 use crate::turn_password::parse_password_algorithms;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_CHALLENGE_TEXT: usize = 763;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TurnChallenge {
     pub code: u16,
     pub realm: String,
@@ -20,12 +22,39 @@ pub struct TurnChallenge {
     pub password_algorithms: Option<Vec<u8>>,
 }
 
+impl std::fmt::Debug for TurnChallenge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TurnChallenge")
+            .field("code", &self.code)
+            .field("realm", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field(
+                "password_algorithms_len",
+                &self.password_algorithms.as_ref().map(Vec::len),
+            )
+            .finish()
+    }
+}
+
+impl Drop for TurnChallenge {
+    fn drop(&mut self) {
+        self.realm.zeroize();
+        self.nonce.zeroize();
+        if let Some(algorithms) = &mut self.password_algorithms {
+            algorithms.zeroize();
+        }
+    }
+}
+
 impl TurnChallenge {
     pub fn password_algorithms_attribute(&self) -> Option<StunAttribute> {
-        self.password_algorithms.as_ref().map(|value| StunAttribute {
-            kind: ATTR_PASSWORD_ALGORITHMS,
-            value: value.clone(),
-        })
+        self.password_algorithms
+            .as_ref()
+            .map(|value| StunAttribute {
+                kind: ATTR_PASSWORD_ALGORITHMS,
+                value: value.clone(),
+            })
     }
 }
 
@@ -56,7 +85,7 @@ fn unique_attribute(message: &StunMessage, kind: u16) -> Result<&[u8], TurnAuthE
     Ok(&first.value)
 }
 
-fn challenge_text(bytes: &[u8]) -> Result<String, TurnAuthError> {
+fn challenge_text(bytes: &[u8]) -> Result<Zeroizing<String>, TurnAuthError> {
     if bytes.is_empty() || bytes.len() > MAX_CHALLENGE_TEXT {
         return Err(TurnAuthError::InvalidChallengeText);
     }
@@ -64,7 +93,7 @@ fn challenge_text(bytes: &[u8]) -> Result<String, TurnAuthError> {
     if text.chars().any(char::is_control) {
         return Err(TurnAuthError::InvalidChallengeText);
     }
-    Ok(text.to_owned())
+    Ok(Zeroizing::new(text.to_owned()))
 }
 
 /// Parse a TURN 401 (initial authentication) or 438 (stale nonce) response.
@@ -90,20 +119,27 @@ pub fn parse_turn_challenge(
     if code != 401 && code != 438 {
         return Err(TurnAuthError::UnsupportedChallengeCode);
     }
-    let realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
-    let nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
-    let mut offers = message.attributes.iter()
+    let mut realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
+    let mut nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
+    let mut offers = message
+        .attributes
+        .iter()
         .filter(|attribute| attribute.kind == ATTR_PASSWORD_ALGORITHMS);
     let password_algorithms = match (offers.next(), offers.next()) {
         (None, None) => None,
         (Some(attribute), None) => {
             parse_password_algorithms(&attribute.value)
                 .map_err(|_| TurnAuthError::InvalidPasswordAlgorithms)?;
-            Some(attribute.value.clone())
+            Some(Zeroizing::new(attribute.value.clone()))
         }
         _ => return Err(TurnAuthError::InvalidPasswordAlgorithms),
     };
-    Ok(TurnChallenge { code, realm, nonce, password_algorithms })
+    Ok(TurnChallenge {
+        code,
+        realm: std::mem::take(&mut *realm),
+        nonce: std::mem::take(&mut *nonce),
+        password_algorithms: password_algorithms.map(|mut value| std::mem::take(&mut *value)),
+    })
 }
 
 #[cfg(test)]
@@ -117,11 +153,34 @@ mod tests {
             class: StunClass::ErrorResponse,
             transaction_id: [0x31; 12],
             attributes: vec![
-                StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, (code / 100) as u8, (code % 100) as u8] },
-                StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
-                StunAttribute { kind: ATTR_NONCE, value: b"opaque-server-nonce".to_vec() },
+                StunAttribute {
+                    kind: ATTR_ERROR_CODE,
+                    value: vec![0, 0, (code / 100) as u8, (code % 100) as u8],
+                },
+                StunAttribute {
+                    kind: ATTR_REALM,
+                    value: b"turn.example.invalid".to_vec(),
+                },
+                StunAttribute {
+                    kind: ATTR_NONCE,
+                    value: b"opaque-server-nonce".to_vec(),
+                },
             ],
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_challenge_values() {
+        let challenge = TurnChallenge {
+            code: 401,
+            realm: "secret-realm-marker".to_owned(),
+            nonce: "secret-nonce-marker".to_owned(),
+            password_algorithms: Some(vec![1, 2, 3, 4]),
+        };
+        let rendered = format!("{challenge:?}");
+        assert!(!rendered.contains("secret-realm-marker"));
+        assert!(!rendered.contains("secret-nonce-marker"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
@@ -191,10 +250,15 @@ mod tests {
         assert_eq!(parsed.password_algorithms, Some(offer.clone()));
         assert_eq!(
             parsed.password_algorithms_attribute().unwrap(),
-            StunAttribute { kind: ATTR_PASSWORD_ALGORITHMS, value: offer }
+            StunAttribute {
+                kind: ATTR_PASSWORD_ALGORITHMS,
+                value: offer
+            }
         );
 
-        response.attributes.push(response.attributes.last().unwrap().clone());
+        response
+            .attributes
+            .push(response.attributes.last().unwrap().clone());
         assert_eq!(
             parse_turn_challenge(&response, METHOD_ALLOCATE),
             Err(TurnAuthError::InvalidPasswordAlgorithms)

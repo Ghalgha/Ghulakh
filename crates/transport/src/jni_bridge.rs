@@ -6,25 +6,31 @@ use crate::{
     turn_credentials::TurnCredentials,
 };
 use anyhow::{Context, Result};
-use ghulakh_protocol::{DataDatagram, IpPacketKind, turn_path_context::{TurnPathContext, MAX_TURN_PATHS}};
+use ghulakh_protocol::{
+    turn_path_context::{TurnPathContext, MAX_TURN_PATHS},
+    DataDatagram, IpPacketKind,
+};
+#[cfg(target_os = "android")]
+use jni::objects::JValue;
 use jni::{
     objects::{JByteArray, JObject, JString},
     sys::{jboolean, jbyteArray, jint, jlong, jstring},
     JNIEnv,
 };
 use rand::{rngs::OsRng, RngCore};
+#[cfg(target_os = "android")]
+use std::os::fd::AsRawFd;
 use std::{
     collections::HashMap,
     net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
-use tokio::{runtime::{Builder, Runtime}, task::JoinSet};
+use tokio::{
+    runtime::{Builder, Runtime},
+    task::JoinSet,
+};
 use zeroize::Zeroizing;
-#[cfg(target_os = "android")]
-use std::os::fd::AsRawFd;
-#[cfg(target_os = "android")]
-use jni::objects::JValue;
 
 struct NativeTurnSession {
     client: TurnClientPathGroup,
@@ -47,14 +53,15 @@ fn turn_session(handle: jlong) -> Result<Arc<NativeTurnSession>> {
         .context("unknown native TURN session handle")
 }
 
-
 #[cfg(target_os = "android")]
 fn make_protected_socket(env: &mut JNIEnv, service: &JObject) -> Result<Option<UdpSocket>> {
     if service.is_null() {
         return Ok(None);
     }
     let socket = UdpSocket::bind("0.0.0.0:0").context("bind protected UDP socket")?;
-    socket.set_nonblocking(true).context("set UDP socket nonblocking")?;
+    socket
+        .set_nonblocking(true)
+        .context("set UDP socket nonblocking")?;
     let protected = env
         .call_method(
             service,
@@ -63,7 +70,10 @@ fn make_protected_socket(env: &mut JNIEnv, service: &JObject) -> Result<Option<U
             &[JValue::Int(socket.as_raw_fd())],
         )?
         .z()?;
-    anyhow::ensure!(protected, "Android VpnService refused to protect TURN socket");
+    anyhow::ensure!(
+        protected,
+        "Android VpnService refused to protect TURN socket"
+    );
     Ok(Some(socket))
 }
 
@@ -86,10 +96,7 @@ struct TurnConnectArgs<'local> {
     path_count: jint,
 }
 
-fn connect_turn_impl(
-    env: &mut JNIEnv,
-    args: TurnConnectArgs<'_>,
-) -> Result<jlong> {
+fn connect_turn_impl(env: &mut JNIEnv, args: TurnConnectArgs<'_>) -> Result<jlong> {
     let TurnConnectArgs {
         vpn_service,
         gateway_host,
@@ -99,17 +106,21 @@ fn connect_turn_impl(
         credential,
         path_count,
     } = args;
-    let gateway_host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
+    let gateway_host = env
+        .get_string(&gateway_host)?
+        .to_string_lossy()
+        .into_owned();
     let turn_credentials_json = Zeroizing::new(
         env.get_string(&turn_credentials_json)?
             .to_string_lossy()
             .into_owned(),
     );
-    let credential = Zeroizing::new(
-        env.get_string(&credential)?.to_string_lossy().into_owned(),
-    );
+    let credential = Zeroizing::new(env.get_string(&credential)?.to_string_lossy().into_owned());
     let pinned_server_key = env.convert_byte_array(pinned_server_key)?;
-    anyhow::ensure!(pinned_server_key.len() == 32, "pinned Noise server key must be 32 bytes");
+    anyhow::ensure!(
+        pinned_server_key.len() == 32,
+        "pinned Noise server key must be 32 bytes"
+    );
     anyhow::ensure!(
         !credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
         "tunnel credential length is invalid"
@@ -121,7 +132,10 @@ fn connect_turn_impl(
     );
     let gateway_port = u16::try_from(gateway_port).context("TURN gateway port is invalid")?;
     anyhow::ensure!(gateway_port != 0, "TURN gateway port must not be zero");
-    anyhow::ensure!(!gateway_host.trim().is_empty(), "TURN gateway host is empty");
+    anyhow::ensure!(
+        !gateway_host.trim().is_empty(),
+        "TURN gateway host is empty"
+    );
 
     // Each path owns a separate Android-protected UDP socket and TURN allocation.
     let mut protected_sockets = Vec::with_capacity(usize::from(path_count));
@@ -146,7 +160,10 @@ fn connect_turn_impl(
 
     let mut group_id = [0u8; 16];
     OsRng.fill_bytes(&mut group_id);
-    anyhow::ensure!(group_id.iter().any(|byte| *byte != 0), "invalid random TURN group ID");
+    anyhow::ensure!(
+        group_id.iter().any(|byte| *byte != 0),
+        "invalid random TURN group ID"
+    );
 
     let clients = runtime.block_on(async {
         // Parse every credential set before starting any allocation. A local
@@ -154,13 +171,12 @@ fn connect_turn_impl(
         let credentials = TurnCredentials::from_vk_response_json_array(
             turn_credentials_json.as_str(),
             usize::from(path_count),
-        ).context("parse independent VK Calls TURN credential sets")?;
+        )
+        .context("parse independent VK Calls TURN credential sets")?;
 
         let mut tasks = JoinSet::new();
-        for (path_id, (protected_socket, credentials)) in protected_sockets
-            .into_iter()
-            .zip(credentials)
-            .enumerate()
+        for (path_id, (protected_socket, credentials)) in
+            protected_sockets.into_iter().zip(credentials).enumerate()
         {
             let pinned_key = pinned_server_key.clone();
             let tunnel_credential = Zeroizing::new(credential.as_bytes().to_vec());
@@ -177,7 +193,8 @@ fn connect_turn_impl(
                     &pinned_key,
                     tunnel_credential.as_slice(),
                     context,
-                ).await
+                )
+                .await
             });
 
             // Stagger independent allocations; established paths remain concurrent.
@@ -213,11 +230,13 @@ fn connect_turn_impl(
             }
             return Err(error);
         }
-        TurnClientPathGroup::new(clients)
-            .context("assemble authenticated TURN path group")
+        TurnClientPathGroup::new(clients).context("assemble authenticated TURN path group")
     })?;
 
-    let native_session = Arc::new(NativeTurnSession { client: clients, runtime });
+    let native_session = Arc::new(NativeTurnSession {
+        client: clients,
+        runtime,
+    });
     let mut registry = turn_sessions()
         .lock()
         .map_err(|_| anyhow::anyhow!("native TURN session registry is unavailable"))?;
@@ -233,11 +252,14 @@ fn connect_turn_impl(
     Ok(handle)
 }
 
-
 fn failed_turn_paths_impl(handle: jlong) -> Result<Vec<jint>> {
-    Ok(turn_session(handle)?.client.failed_path_ids().into_iter().map(jint::from).collect())
+    Ok(turn_session(handle)?
+        .client
+        .failed_path_ids()
+        .into_iter()
+        .map(jint::from)
+        .collect())
 }
-
 
 struct TurnRecoverArgs<'local> {
     vpn_service: JObject<'local>,
@@ -252,48 +274,82 @@ struct TurnRecoverArgs<'local> {
 
 fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result<()> {
     let TurnRecoverArgs {
-        vpn_service, handle, gateway_host, gateway_port, turn_credentials_json,
-        pinned_server_key, credential, path_id,
+        vpn_service,
+        handle,
+        gateway_host,
+        gateway_port,
+        turn_credentials_json,
+        pinned_server_key,
+        credential,
+        path_id,
     } = args;
-    let host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
+    let host = env
+        .get_string(&gateway_host)?
+        .to_string_lossy()
+        .into_owned();
     let credentials_json = Zeroizing::new(
-        env.get_string(&turn_credentials_json)?.to_string_lossy().into_owned(),
+        env.get_string(&turn_credentials_json)?
+            .to_string_lossy()
+            .into_owned(),
     );
-    let credential = Zeroizing::new(
-        env.get_string(&credential)?.to_string_lossy().into_owned(),
-    );
+    let credential = Zeroizing::new(env.get_string(&credential)?.to_string_lossy().into_owned());
     let pinned_key = env.convert_byte_array(pinned_server_key)?;
-    anyhow::ensure!(pinned_key.len() == 32, "pinned Noise server key must be 32 bytes");
-    anyhow::ensure!(!credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
-        "tunnel credential length is invalid");
+    anyhow::ensure!(
+        pinned_key.len() == 32,
+        "pinned Noise server key must be 32 bytes"
+    );
+    anyhow::ensure!(
+        !credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
+        "tunnel credential length is invalid"
+    );
     let port = u16::try_from(gateway_port).context("TURN gateway port is invalid")?;
-    anyhow::ensure!(port != 0 && !host.trim().is_empty(), "TURN gateway endpoint is invalid");
+    anyhow::ensure!(
+        port != 0 && !host.trim().is_empty(),
+        "TURN gateway endpoint is invalid"
+    );
     let path_id = u16::try_from(path_id).context("TURN path identifier is invalid")?;
     let session = turn_session(handle)?;
-    let context = session.client.path_context(path_id).context("unknown TURN path slot")?;
-    anyhow::ensure!(session.client.failed_path_ids().contains(&path_id), "TURN path is still healthy");
+    let context = session
+        .client
+        .path_context(path_id)
+        .context("unknown TURN path slot")?;
+    anyhow::ensure!(
+        session.client.failed_path_ids().contains(&path_id),
+        "TURN path is still healthy"
+    );
     let socket = make_protected_socket(env, &vpn_service)?
         .context("Android protected TURN UDP socket is required")?;
     let credentials = TurnCredentials::from_vk_response_json(credentials_json.as_str())
         .context("parse refreshed VK Calls TURN credentials")?;
     let gateway: SocketAddr = session.runtime.block_on(async {
         let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;
-        addresses.find(SocketAddr::is_ipv4).context("TURN gateway host did not resolve to IPv4")
+        addresses
+            .find(SocketAddr::is_ipv4)
+            .context("TURN gateway host did not resolve to IPv4")
     })?;
     // Do not cancel path setup when the group closes: cancellation after a
     // successful Allocate could skip authenticated Refresh(0). Setup has
     // bounded protocol retries; close the completed replacement if shutdown
     // won the race before installation.
-    let replacement = session.runtime.block_on(
-        TurnClientRuntime::connect_with_path_context(
-            socket, credentials, gateway, &pinned_key, credential.as_bytes(), context,
-        )
-    ).context("establish replacement TURN allocation")?;
+    let replacement = session
+        .runtime
+        .block_on(TurnClientRuntime::connect_with_path_context(
+            socket,
+            credentials,
+            gateway,
+            &pinned_key,
+            credential.as_bytes(),
+            context,
+        ))
+        .context("establish replacement TURN allocation")?;
     if session.client.is_closed() {
         replacement.close();
         anyhow::bail!("native TURN session closed during path recovery");
     }
-    session.client.replace_path(replacement).context("install replacement TURN path")
+    session
+        .client
+        .replace_path(replacement)
+        .context("install replacement TURN path")
 }
 
 fn send_turn_packet_impl(env: &mut JNIEnv, handle: jlong, packet: JByteArray) -> Result<()> {
@@ -301,7 +357,9 @@ fn send_turn_packet_impl(env: &mut JNIEnv, handle: jlong, packet: JByteArray) ->
     let first_byte = *packet.first().context("IP packet is empty")?;
     let kind = IpPacketKind::try_from(first_byte >> 4)?;
     let session = turn_session(handle)?;
-    session.runtime.block_on(session.client.send_packet(DataDatagram { kind, packet }))
+    session
+        .runtime
+        .block_on(session.client.send_packet(DataDatagram { kind, packet }))
 }
 
 fn receive_turn_packet_impl(handle: jlong) -> Result<Vec<u8>> {
@@ -347,7 +405,6 @@ fn throw_error(env: &mut JNIEnv, class: &str, error: impl std::fmt::Display) {
     let _ = env.throw_new(class, error.to_string());
 }
 
-
 #[allow(clippy::too_many_arguments)]
 #[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
@@ -386,10 +443,11 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnConnect(
     }
 }
 
-
 #[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnFailedPaths(
-    mut env: JNIEnv, _this: JObject, handle: jlong,
+    mut env: JNIEnv,
+    _this: JObject,
+    handle: jlong,
 ) -> jni::sys::jintArray {
     match failed_turn_paths_impl(handle) {
         Ok(paths) => match env.new_int_array(paths.len() as jint) {
@@ -400,23 +458,44 @@ pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnFailedPath
                 }
                 array.into_raw()
             }
-            Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); std::ptr::null_mut() }
+            Err(error) => {
+                throw_error(&mut env, "java/lang/IllegalStateException", error);
+                std::ptr::null_mut()
+            }
         },
-        Err(error) => { throw_error(&mut env, "java/lang/IllegalStateException", error); std::ptr::null_mut() }
+        Err(error) => {
+            throw_error(&mut env, "java/lang/IllegalStateException", error);
+            std::ptr::null_mut()
+        }
     }
 }
 
 #[no_mangle]
 pub extern "system" fn Java_org_ghulakh_app_NativeTransport_nativeTurnRecoverPath(
-    mut env: JNIEnv, _this: JObject, service: JObject, handle: jlong,
-    host: JString, port: jint, credentials: JString, pinned_key: JByteArray,
-    credential: JString, path_id: jint,
+    mut env: JNIEnv,
+    _this: JObject,
+    service: JObject,
+    handle: jlong,
+    host: JString,
+    port: jint,
+    credentials: JString,
+    pinned_key: JByteArray,
+    credential: JString,
+    path_id: jint,
 ) -> jboolean {
-    match recover_turn_path_impl(&mut env, TurnRecoverArgs {
-        vpn_service: service, handle, gateway_host: host, gateway_port: port,
-        turn_credentials_json: credentials, pinned_server_key: pinned_key,
-        credential, path_id,
-    }) {
+    match recover_turn_path_impl(
+        &mut env,
+        TurnRecoverArgs {
+            vpn_service: service,
+            handle,
+            gateway_host: host,
+            gateway_port: port,
+            turn_credentials_json: credentials,
+            pinned_server_key: pinned_key,
+            credential,
+            path_id,
+        },
+    ) {
         Ok(()) => 1,
         Err(error) => {
             let message = if is_turn_allocation_quota_error(&error) {
@@ -551,7 +630,10 @@ mod turn_quota_error_tests {
     fn does_not_classify_other_turn_server_errors_as_quota() {
         for code in [400, 401, 403, 438, 508] {
             let error = anyhow::Error::new(TurnDriverError::ServerError { code });
-            assert!(!is_turn_allocation_quota_error(&error), "unexpected quota classification for {code}");
+            assert!(
+                !is_turn_allocation_quota_error(&error),
+                "unexpected quota classification for {code}"
+            );
         }
     }
 
