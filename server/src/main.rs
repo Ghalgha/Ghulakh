@@ -13,7 +13,7 @@ use rustls::pki_types::CertificateDer;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    env, fs, fs::{File, OpenOptions}, io::{BufReader, Write}, net::{Ipv4Addr, SocketAddr},
+    env, fs, fs::{File, OpenOptions}, io::{BufReader, Read, Write}, net::{Ipv4Addr, SocketAddr},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -545,6 +545,28 @@ fn ensure_keygen_args(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn read_noise_private_key(path: &str) -> Result<Vec<u8>> {
+    let mut file = File::open(path)
+        .with_context(|| format!("open Noise private key file {path}"))?;
+    let metadata = file.metadata()
+        .with_context(|| format!("inspect Noise private key file {path}"))?;
+    anyhow::ensure!(metadata.is_file(), "Noise private key path {path} is not a regular file");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        anyhow::ensure!(
+            mode & 0o077 == 0 && mode & 0o400 != 0,
+            "Noise private key file {path} must be owner-readable and inaccessible to group/others (mode {:04o})",
+            mode & 0o777
+        );
+    }
+    let mut encoded = String::new();
+    file.read_to_string(&mut encoded)
+        .with_context(|| format!("read Noise private key file {path}"))?;
+    hex::decode(encoded.trim()).context("decode persistent Noise private key")
+}
+
 fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -604,8 +626,7 @@ async fn main() -> Result<()> {
             .context("set GHULAKH_NOISE_PRIVATE_KEY to a hex-encoded private key file")?;
         let public_path = env::var("GHULAKH_NOISE_PUBLIC_KEY")
             .context("set GHULAKH_NOISE_PUBLIC_KEY to a hex-encoded public key file")?;
-        let private_key = hex::decode(fs::read_to_string(&private_path)?.trim())
-            .context("decode persistent Noise private key")?;
+        let private_key = read_noise_private_key(&private_path)?;
         let public_key = hex::decode(fs::read_to_string(&public_path)?.trim())
             .context("decode persistent Noise public key")?;
         let keypair = Arc::new(
@@ -796,6 +817,29 @@ mod tests {
             inspect_datagram(b"not-a-packet", true, Some(Ipv4Addr::new(10, 77, 0, 2))),
             DatagramDisposition::Invalid
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noise_private_key_loader_accepts_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("noise-private.key");
+        std::fs::write(&path, "00112233").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(read_noise_private_key(path.to_str().unwrap()).unwrap(), [0, 0x11, 0x22, 0x33]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn noise_private_key_loader_rejects_group_or_other_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("noise-private.key");
+        std::fs::write(&path, "00112233").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let error = read_noise_private_key(path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("owner-readable and inaccessible to group/others"));
     }
 
     #[test]
