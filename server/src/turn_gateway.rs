@@ -1478,7 +1478,7 @@ mod tests {
         *stale.last_activity.lock().unwrap() =
             Instant::now() - PATH_HEALTH_TIMEOUT - Duration::from_secs(1);
 
-        let outbound = packet(Ipv4Addr::new(203, 0, 113, 10), CLIENT_IP);
+        let outbound = packet(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP);
         gateway.send_downlink(&outbound).await.unwrap();
 
         let mut buffer = [0u8; 1500];
@@ -1578,7 +1578,7 @@ mod tests {
             bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
             bytes[8] = 64;
             bytes[9] = 17;
-            bytes[12..16].copy_from_slice(&[203, 0, 113, 9]);
+            bytes[12..16].copy_from_slice(&[1, 1, 1, 1]);
             bytes[16..20].copy_from_slice(&CLIENT_IP.octets());
             bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
             bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
@@ -2164,7 +2164,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
 
-        let uplink = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 9));
+        let uplink = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
         let mut client_tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
@@ -2172,7 +2172,7 @@ mod tests {
         let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
         assert_eq!(received, uplink);
 
-        let downlink = packet(Ipv4Addr::new(203, 0, 113, 9), CLIENT_IP);
+        let downlink = packet(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP);
         gateway.send_downlink(&downlink).await.unwrap();
         let mut buffer = [0u8; 2048];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
@@ -2206,14 +2206,14 @@ mod tests {
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
         );
-        let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(203, 0, 113, 2));
+        let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(1, 1, 1, 1));
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
         relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(tun_rx.try_recv().is_err());
         assert_eq!(gateway.stats().rejected_packet, 1);
 
-        let valid = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 2));
+        let valid = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
         let valid_frame = client_tx.seal(&valid.encode().unwrap()).unwrap();
         let valid_datagram = valid_frame;
         relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
@@ -2269,7 +2269,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
         let mut tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
-        let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 1)).encode().unwrap()).unwrap();
+        let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1)).encode().unwrap()).unwrap();
         let datagram = protected;
         wrong_relay.send_to(&datagram, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2296,7 +2296,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
 
-        let destination = Ipv4Addr::new(203, 0, 113, 17);
+        let destination = Ipv4Addr::new(1, 1, 1, 17);
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY,
             CLIENT_PREFIX,
@@ -2335,7 +2335,7 @@ mod tests {
         bytes[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
         bytes[9] = 17;
         bytes[12..16].copy_from_slice(&[10, 77, 0, 2]);
-        bytes[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        bytes[16..20].copy_from_slice(&[1, 1, 1, 1]);
         bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
         bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
         bytes
