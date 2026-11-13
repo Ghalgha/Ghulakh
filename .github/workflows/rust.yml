@@ -19,31 +19,14 @@ jobs:
     name: Rust checks
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Resolve dependencies
-        run: cargo generate-lockfile
-      - name: Commit generated lockfile to same-repository pull request
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        env:
-          BRANCH_NAME: ${{ github.head_ref }}
-        run: |
-          if [ -n "$(git status --porcelain -- Cargo.lock)" ]; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add Cargo.lock
-            git commit -m "Add generated Rust dependency lockfile"
-            git push origin "HEAD:${BRANCH_NAME}"
-          fi
+      - name: Verify locked dependency resolution
+        run: cargo check --workspace --locked
       - uses: taiki-e/install-action@cargo-audit
       - name: Audit dependencies
         run: cargo audit
