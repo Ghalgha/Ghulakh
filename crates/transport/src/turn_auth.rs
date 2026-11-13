@@ -64,6 +64,7 @@ impl TurnAuthContext {
         password: &str,
         mut challenge: TurnChallenge,
     ) -> Result<Self, TurnAuthError> {
+        let mut username = Zeroizing::new(username);
         if challenge.password_algorithms.is_some() {
             return Err(TurnAuthError::InvalidPasswordProfile);
         }
@@ -75,11 +76,12 @@ impl TurnAuthContext {
         digest.update(realm.as_bytes());
         digest.update(b":");
         digest.update(password.as_bytes());
+        let mut integrity_key = Zeroizing::new(digest.finalize().to_vec());
         Self::new(
-            username,
+            std::mem::take(&mut *username),
             realm,
             nonce,
-            digest.finalize().to_vec(),
+            std::mem::take(&mut *integrity_key),
             TurnIntegrityAlgorithm::Sha1,
         )
     }
@@ -93,22 +95,21 @@ impl TurnAuthContext {
         integrity_key: Vec<u8>,
         algorithm: TurnIntegrityAlgorithm,
     ) -> Result<Self, TurnAuthError> {
+        let mut username = Zeroizing::new(username);
+        let mut realm = Zeroizing::new(realm);
+        let mut nonce = Zeroizing::new(nonce);
+        let mut integrity_key = Zeroizing::new(integrity_key);
         if algorithm != TurnIntegrityAlgorithm::Sha1 {
             return Err(TurnAuthError::InvalidPasswordProfile);
         }
-        for value in [&username, &realm, &nonce] {
-            if value.is_empty()
-                || value.len() > 763
-                || value.chars().any(char::is_control)
-            {
-                return Err(TurnAuthError::InvalidField);
-            }
-        }
-        if integrity_key.is_empty() || integrity_key.len() > 1024 {
-            return Err(TurnAuthError::InvalidField);
-        }
         Self::new_with_password_profile(
-            username, realm, nonce, integrity_key, algorithm, None, None,
+            std::mem::take(&mut *username),
+            std::mem::take(&mut *realm),
+            std::mem::take(&mut *nonce),
+            std::mem::take(&mut *integrity_key),
+            algorithm,
+            None,
+            None,
         )
     }
 
@@ -126,6 +127,11 @@ impl TurnAuthContext {
         password_algorithm: Option<PasswordAlgorithmId>,
         password_algorithms: Option<Vec<u8>>,
     ) -> Result<Self, TurnAuthError> {
+        let username = Zeroizing::new(username);
+        let realm = Zeroizing::new(realm);
+        let nonce = Zeroizing::new(nonce);
+        let integrity_key = Zeroizing::new(integrity_key);
+        let password_algorithms = password_algorithms.map(Zeroizing::new);
         for value in [&username, &realm, &nonce] {
             if value.is_empty()
                 || value.len() > 763
@@ -155,13 +161,13 @@ impl TurnAuthContext {
             (None, None) => return Err(TurnAuthError::InvalidPasswordProfile),
         }
         Ok(Self {
-            username: Zeroizing::new(username),
-            realm: Zeroizing::new(realm),
-            nonce: Zeroizing::new(nonce),
-            integrity_key: Zeroizing::new(integrity_key),
+            username,
+            realm,
+            nonce,
+            integrity_key,
             algorithm,
             password_algorithm,
-            password_algorithms: password_algorithms.map(Zeroizing::new),
+            password_algorithms,
         })
     }
 
