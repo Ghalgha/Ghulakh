@@ -1,7 +1,6 @@
 package org.ghulakh.app
 
 import android.content.Context
-import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -9,6 +8,7 @@ import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.RuntimeEnvironment
 import javax.crypto.SecretKey
 import javax.crypto.spec.SecretKeySpec
 
@@ -16,7 +16,7 @@ import javax.crypto.spec.SecretKeySpec
 class ConnectionProfileTest {
     @Test
     fun completeProfileRoundTripsWithoutLosingAnyField() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
+        val context = RuntimeEnvironment.getApplication()
         val store = CredentialStore(context, TestProfileKeyProvider())
         val profile = sampleProfile()
         store.save(profile)
