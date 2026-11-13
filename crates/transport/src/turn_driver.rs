@@ -40,6 +40,8 @@ pub enum TurnDriverError {
     Challenge(ghulakh_protocol::turn_auth::TurnChallenge),
     #[error("TURN server returned an error response (code {code})")]
     ServerError { code: u16 },
+    #[error("TURN rejected the active credentials (STUN error 401)")]
+    CredentialsRejected,
     #[error("TURN response was not authenticated")]
     MissingAuthentication,
     #[error("TURN response source or transaction did not match")]
@@ -341,7 +343,7 @@ impl TurnClientDriver {
                             }
                             if challenge.code == 401 && auth.is_some() {
                                 self.transactions.complete(&id);
-                                return Err(TurnDriverError::ServerError { code: 401 }.into());
+                                return Err(TurnDriverError::CredentialsRejected.into());
                             }
                             self.transactions.complete(&id);
                             return Err(TurnDriverError::Challenge(challenge).into());
