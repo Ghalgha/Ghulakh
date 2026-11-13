@@ -121,7 +121,7 @@ class GhulakhVpnService : VpnService() {
                     }
                     if (connectedHandle == null) {
                         runCatching { candidate.finish() }
-                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group: ${safeErrorSummary(finishError)}") }
                         return
                     }
                     handle = connectedHandle
