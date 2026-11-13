@@ -1775,6 +1775,10 @@ mod turn_credential_recovery_tests {
         ));
         assert!(!is_turn_credentials_rejected(&stale_nonce_438));
 
+        let exhausted_438 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected)
+            .context("authenticated TURN Refresh exhausted the 438 stale-nonce retry budget");
+        assert!(is_turn_credentials_rejected(&exhausted_438));
+
         let transient = anyhow::Error::new(crate::turn_driver::TurnDriverError::Timeout);
         assert!(!is_turn_credentials_rejected(&transient));
     }
