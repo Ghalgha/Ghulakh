@@ -65,7 +65,7 @@ assert_managed_layout() {
     [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c "%U:%G" "$RELEASES") == root:root ]] || die "Managed releases path is not a root-owned directory."
   fi
   for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
-    if [[ -e "$unit" ]]; then
+    if [[ -e "$unit" || -L "$unit" ]]; then
       safe_file "$unit" || die "Refusing non-regular unit path: $unit"
       grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to replace unmanaged systemd unit: $unit"
     fi
