@@ -834,3 +834,19 @@ mod tests {
         assert_eq!(driver.pending_len(), 2);
     }
 }
+
+
+#[cfg(test)]
+mod arbitrary_input_property_tests {
+    use super::*;
+
+    proptest::proptest! {
+        #[test]
+        fn arbitrary_input_never_panics(raw in proptest::collection::vec(
+            proptest::prelude::any::<u8>(),
+            0..=2048
+        )) {
+            let _ = HandshakeEnvelope::decode(&raw);
+        }
+    }
+}
