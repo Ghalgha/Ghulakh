@@ -24,6 +24,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -34,7 +35,6 @@ jobs:
       - name: Commit generated lockfile to same-repository pull request
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         env:
-          GH_TOKEN: ${{ github.token }}
           BRANCH_NAME: ${{ github.head_ref }}
         run: |
           if [ -n "$(git status --porcelain -- Cargo.lock)" ]; then
