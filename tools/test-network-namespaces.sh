@@ -193,11 +193,14 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
   | grep -F 'ip6 saddr 2606:4700:4700::fffe' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Verify routed IPv6 without NAT66: the upstream has an explicit route to
-# the client prefix, so the original fd77:: source must remain routable.
+# the client prefix, so the original fd77:: source must remain routable. Use a
+# fresh source address: deleting a NAT chain does not remove existing conntrack
+# NAT mappings, so reusing the NAT66 probe's tuple could test stale NAT state.
 ip netns exec "$R" nft delete table ip6 nat6
-ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff
+ip -n "$C" -6 addr add fd77:77::3/128 dev c0 nodad
+ip netns exec "$C" ping -6 -I fd77:77::3 -c 2 -W 2 2606:4700:4700::ffff
 ip netns exec "$U" nft list chain inet upstream_probe input \
-  | grep -F 'ip6 saddr fd77:77::2' | grep -Eq 'counter packets [1-9][0-9]*'
+  | grep -F 'ip6 saddr fd77:77::3' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
 ip netns exec "$R" nft list chain inet filter forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
