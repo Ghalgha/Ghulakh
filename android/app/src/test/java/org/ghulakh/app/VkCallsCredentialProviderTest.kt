@@ -66,8 +66,9 @@ class VkCallsCredentialProviderTest {
             initialCredentialsJson = credentialJson,
             sessionFetcher = { error("not used") },
         )
+        val groupCredentialsJson = "[$credentialJson,${credentialsJson("turn-user-2", "turn-password-secret-2")}]"
         val group = VkCallsCredentialGroup(
-            turnCredentialsJson = credentialJson,
+            turnCredentialsJson = groupCredentialsJson,
             ownerSession = session,
             credentialBroker = broker,
         )
