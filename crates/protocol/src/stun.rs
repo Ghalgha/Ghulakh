@@ -280,7 +280,7 @@ pub fn verify_message_integrity_sha256(input: &[u8], key: &[u8]) -> Result<(), S
     if input.len() != expected_len {
         return Err(StunError::InvalidSha256IntegrityLayout);
     }
-    let mut signed_prefix = input[..offset].to_vec();
+    let mut signed_prefix = Zeroizing::new(input[..offset].to_vec());
     let adjusted_len = u16::try_from(offset + 36 - HEADER_LEN)
         .map_err(|_| StunError::InvalidLength)?;
     signed_prefix[2..4].copy_from_slice(&adjusted_len.to_be_bytes());
