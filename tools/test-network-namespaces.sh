@@ -117,6 +117,7 @@ table inet upstream_probe {
     ip saddr 1.1.1.254 icmp type echo-request counter
     ip6 saddr 2606:4700:4700::fffe icmpv6 type echo-request counter
     ip6 saddr fd77:77::2 icmpv6 type echo-request counter
+    ip6 saddr fd77:77::3 icmpv6 type echo-request counter
   }
 }
 NFT
