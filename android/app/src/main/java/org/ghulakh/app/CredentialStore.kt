@@ -303,9 +303,14 @@ class CredentialStore internal constructor(
                     vkAccessToken = data.readString(),
                     pinnedServerPublicKeyHex = data.readString(),
                 )
-                if (data.available() != 0) throw CredentialStoreException.Corrupted()
-                validate(profile)
-                return profile
+                try {
+                    if (data.available() != 0) throw CredentialStoreException.Corrupted()
+                    validate(profile)
+                    return profile
+                } catch (error: Exception) {
+                    profile.rootCertificateDer.fill(0)
+                    throw error
+                }
             }
         } catch (error: CredentialStoreException) {
             throw error
@@ -331,7 +336,7 @@ class CredentialStore internal constructor(
     private fun decode(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
 
     private fun DataOutputStream.writeString(value: String) {
-        value.toByteArray(StandardCharsets.UTF_8).useWiped(::writeBytes)
+        value.toByteArray(StandardCharsets.UTF_8).useWiped { bytes -> writeBytes(bytes) }
     }
 
     private fun DataOutputStream.writeBytes(value: ByteArray) {
