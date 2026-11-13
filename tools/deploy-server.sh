@@ -344,21 +344,32 @@ deploy() {
   local rollback_failed=0
   transaction_dir="$(mktemp -d "$BASE/.deploy-transaction.XXXXXX")" || die "Could not create deployment transaction snapshot."
   if [[ -e "$EGRESS_UNIT" || -L "$EGRESS_UNIT" ]]; then
-    cp -a -- "$EGRESS_UNIT" "$transaction_dir/old-egress" || die "Could not snapshot egress unit."
+    cp -a -- "$EGRESS_UNIT" "$transaction_dir/old-egress" || { rm -rf -- "$transaction_dir"; die "Could not snapshot egress unit; partial snapshot removed."; }
     had_old_egress=1
   fi
   if [[ -e "$SERVER_UNIT" || -L "$SERVER_UNIT" ]]; then
-    cp -a -- "$SERVER_UNIT" "$transaction_dir/old-server" || die "Could not snapshot server unit."
+    cp -a -- "$SERVER_UNIT" "$transaction_dir/old-server" || { rm -rf -- "$transaction_dir"; die "Could not snapshot server unit; partial snapshot removed."; }
     had_old_server=1
   fi
   if [[ -e "$MARKER" || -L "$MARKER" ]]; then
-    cp -a -- "$MARKER" "$transaction_dir/old-marker" || die "Could not snapshot ownership marker."
+    cp -a -- "$MARKER" "$transaction_dir/old-marker" || { rm -rf -- "$transaction_dir"; die "Could not snapshot ownership marker; partial snapshot removed."; }
     had_old_marker=1
   fi
   old_egress_enabled="$(systemctl is-enabled ghulakh-egress.service 2>/dev/null || true)"
   old_server_enabled="$(systemctl is-enabled ghulakh-server.service 2>/dev/null || true)"
   old_egress_active="$(systemctl is-active ghulakh-egress.service 2>/dev/null || true)"
   old_server_active="$(systemctl is-active ghulakh-server.service 2>/dev/null || true)"
+
+  # Do not shadow a vendor, generated or transient unit outside our managed /etc paths.
+  local unit_load_state
+  if (( ! had_old_egress )); then
+    unit_load_state="$(systemctl show --property=LoadState --value ghulakh-egress.service 2>/dev/null || true)"
+    [[ "$unit_load_state" == not-found ]] || die "Refusing unmanaged egress unit outside $EGRESS_UNIT (LoadState=${unit_load_state:-unknown})."
+  fi
+  if (( ! had_old_server )); then
+    unit_load_state="$(systemctl show --property=LoadState --value ghulakh-server.service 2>/dev/null || true)"
+    [[ "$unit_load_state" == not-found ]] || die "Refusing unmanaged server unit outside $SERVER_UNIT (LoadState=${unit_load_state:-unknown})."
+  fi
 
   validate_previous_unit_state() {
     local unit="$1" enabled_state="$2" active_state="$3"
@@ -420,7 +431,7 @@ deploy() {
         systemctl stop ghulakh-egress.service || failed=1
       fi
     else
-      systemctl disable --now ghulakh-egress.service >/dev/null 2>&1 || true
+      systemctl disable --now ghulakh-egress.service >/dev/null 2>&1 || failed=1
     fi
     if (( had_old_server )); then
       case "$old_server_enabled" in
@@ -435,7 +446,7 @@ deploy() {
         systemctl stop ghulakh-server.service || failed=1
       fi
     else
-      systemctl disable --now ghulakh-server.service >/dev/null 2>&1 || true
+      systemctl disable --now ghulakh-server.service >/dev/null 2>&1 || failed=1
     fi
 
     if (( failed )); then
