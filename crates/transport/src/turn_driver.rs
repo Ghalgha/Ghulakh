@@ -359,6 +359,9 @@ impl TurnClientDriver {
                             .and_then(|attribute| (attribute.value.len() >= 4)
                                 .then(|| u16::from(attribute.value[2] & 0x07) * 100 + u16::from(attribute.value[3])));
                         self.transactions.complete(&id);
+                        if code == Some(441) && auth.is_some() {
+                            return Err(TurnDriverError::CredentialsRejected.into());
+                        }
                         return Err(TurnDriverError::ServerError { code: code.unwrap_or(0) }.into());
                     }
                     if let Some(context) = auth {
