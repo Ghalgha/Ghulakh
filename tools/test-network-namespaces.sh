@@ -133,6 +133,20 @@ for attempt in 1 2 3; do
   fi
 done
 if [[ "$nat66_warmup_ok" != "1" ]]; then
+  echo "IPv6 NAT66 diagnostic: client routes and neighbors" >&2
+  ip -n "$C" -6 route show >&2
+  ip -n "$C" -6 neigh show >&2
+  echo "IPv6 NAT66 diagnostic: router routes, neighbors and forwarding" >&2
+  ip -n "$R" -6 route show >&2
+  ip -n "$R" -6 neigh show >&2
+  ip netns exec "$R" sysctl net.ipv6.conf.all.forwarding net.ipv6.conf.rc0.forwarding net.ipv6.conf.ru0.forwarding >&2
+  echo "IPv6 NAT66 diagnostic: Ghulakh filter and NAT counters" >&2
+  ip netns exec "$R" nft list table inet ghulakh_egress >&2
+  ip netns exec "$R" nft list table ip6 ghulakh_nat6 >&2
+  echo "IPv6 NAT66 diagnostic: upstream address, routes and observed probes" >&2
+  ip -n "$U" -6 addr show dev u0 >&2
+  ip -n "$U" -6 route show >&2
+  ip netns exec "$U" nft list table inet upstream_probe >&2
   echo "FAIL: IPv6 NAT66 warm-up did not receive an echo reply after 3 attempts" >&2
   exit 1
 fi
