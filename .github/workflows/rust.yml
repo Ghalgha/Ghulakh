@@ -74,8 +74,6 @@ jobs:
     name: Android debug build
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
@@ -97,38 +95,12 @@ jobs:
           export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o android/app/src/main/jniLibs build --release -p ghulakh-transport
       - uses: gradle/actions/setup-gradle@48b5f213c81028ace310571dc5ec0fbbca0b2947 # v4.4.3
-      - name: Generate Gradle dependency locks and verification metadata
-        run: ./android/gradlew -p android --refresh-dependencies --write-locks --write-verification-metadata sha256 :app:compileDebugNavigationResources testDebugUnitTest assembleDebug
-      - name: Run Android JVM unit tests
-        run: ./android/gradlew -p android testDebugUnitTest
-      - name: Upload generated Gradle dependency controls
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: gradle-dependency-controls
-          path: |
-            android/**/gradle.lockfile
-            android/gradle/verification-metadata.xml
-          if-no-files-found: error
-          retention-days: 3
-      - name: Commit generated Gradle dependency controls to the PR branch
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
-        run: |
-          git fetch origin "$PR_BRANCH"
-          git checkout -B "$PR_BRANCH" FETCH_HEAD
-          git add android/app/gradle.lockfile android/gradle/verification-metadata.xml
-          if git diff --cached --quiet; then
-            echo "Generated dependency controls are unchanged"
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "build: pin Android dependency resolution"
-          git push origin "HEAD:$PR_BRANCH"
-      - name: Assemble debug APK
-        run: ./android/gradlew -p android assembleDebug
+      - name: Run Android JVM unit tests with strict dependency verification
+        run: ./android/gradlew -p android --dependency-verification=strict testDebugUnitTest
+      - name: Assemble debug APK with strict dependency verification and locking
+        run: ./android/gradlew -p android --dependency-verification=strict assembleDebug
+      - name: Verify dependency controls were not modified
+        run: git diff --exit-code -- android/app/gradle.lockfile android/gradle/verification-metadata.xml
       - name: Verify APK output
         run: test -s android/app/build/outputs/apk/debug/app-debug.apk
       - name: Upload Android debug APK
