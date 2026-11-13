@@ -40,15 +40,24 @@ internal object TurnQuotaRetryPolicy {
             require(fingerprints.distinct().size == fingerprints.size) {
                 "TURN credential group contains repeated credential sets"
             }
-            val canonical = ByteArrayOutputStream()
-            DataOutputStream(canonical).use { output ->
-                fingerprints.sorted().forEach { value ->
-                    val bytes = value.toByteArray(Charsets.US_ASCII)
-                    output.writeInt(bytes.size)
-                    output.write(bytes)
+            val canonical = FingerprintWipingByteArrayOutputStream()
+            try {
+                DataOutputStream(canonical).use { output ->
+                    fingerprints.sorted().forEach { value ->
+                        val bytes = value.toByteArray(Charsets.US_ASCII)
+                        try {
+                            output.writeInt(bytes.size)
+                            output.write(bytes)
+                        } finally {
+                            bytes.fill(0)
+                        }
+                    }
                 }
+                val encoded = canonical.toByteArray()
+                return try { digest(encoded) } finally { encoded.fill(0) }
+            } finally {
+                canonical.wipe()
             }
-            return digest(canonical.toByteArray())
         }
         return fingerprintSingle(JSONObject(trimmed))
     }
@@ -110,20 +119,34 @@ internal object TurnQuotaRetryPolicy {
         val endpoints = (0 until urls.length()).map { index ->
             urls.getString(index).also { require(it.isNotBlank()) { "TURN endpoint is empty" } }
         }.distinct().sorted()
-        val canonical = ByteArrayOutputStream()
-        DataOutputStream(canonical).use { output ->
-            (listOf(username, credential) + endpoints).forEach { value ->
-                val bytes = value.toByteArray(Charsets.UTF_8)
-                output.writeInt(bytes.size)
-                output.write(bytes)
+        val canonical = FingerprintWipingByteArrayOutputStream()
+        try {
+            DataOutputStream(canonical).use { output ->
+                (listOf(username, credential) + endpoints).forEach { value ->
+                    val bytes = value.toByteArray(Charsets.UTF_8)
+                    try {
+                        output.writeInt(bytes.size)
+                        output.write(bytes)
+                    } finally {
+                        bytes.fill(0)
+                    }
+                }
             }
+            val encoded = canonical.toByteArray()
+            return try { digest(encoded) } finally { encoded.fill(0) }
+        } finally {
+            canonical.wipe()
         }
-        return digest(canonical.toByteArray())
     }
 
-    private fun digest(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes)
-            .joinToString("") { byte -> "%02x".format(byte) }
+    private fun digest(bytes: ByteArray): String {
+        val hash = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return try {
+            hash.joinToString("") { byte -> "%02x".format(byte) }
+        } finally {
+            hash.fill(0)
+        }
+    }
 
     /**
      * [attemptIndex] is zero-based. A credential fingerprint is rejected at most once.
@@ -139,4 +162,12 @@ internal object TurnQuotaRetryPolicy {
 
     fun retryDelayMillis(attemptIndex: Int): Long =
         250L shl attemptIndex.coerceIn(0, 2)
+}
+
+
+private class FingerprintWipingByteArrayOutputStream : ByteArrayOutputStream() {
+    fun wipe() {
+        buf.fill(0)
+        reset()
+    }
 }

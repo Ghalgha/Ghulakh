@@ -12,12 +12,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class VkCallsSession(
     turnCredentialsJson: String,
-    internal val apiUrl: String,
-    internal val sessionKey: String,
+    apiUrl: String,
+    sessionKey: String,
     internal val conversationId: String,
-    private val finishAction: (() -> Unit)? = null,
+    finishAction: (() -> Unit)? = null,
 ) {
     private var pendingTurnCredentialsJson: String? = turnCredentialsJson
+    private var apiUrl: String? = apiUrl
+    private var sessionKey: String? = sessionKey
+    private var finishAction: (() -> Unit)? = finishAction
     private val finished = AtomicBoolean(false)
 
     internal fun takeTurnCredentialsJson(): String = synchronized(this) {
@@ -26,18 +29,25 @@ class VkCallsSession(
     }
 
     fun finish() {
-        synchronized(this) { pendingTurnCredentialsJson = null }
-        finishOnce {
-            finishAction?.invoke() ?: VkCallsCredentialProvider.finishConversation(
-                apiUrl,
-                sessionKey,
+        val cleanup = synchronized(this) {
+            if (!finished.compareAndSet(false, true)) return
+            pendingTurnCredentialsJson = null
+            val values = Triple(apiUrl, sessionKey, finishAction)
+            apiUrl = null
+            sessionKey = null
+            finishAction = null
+            values
+        }
+        val action = cleanup.third
+        if (action != null) {
+            action.invoke()
+        } else if (cleanup.first != null && cleanup.second != null) {
+            VkCallsCredentialProvider.finishConversation(
+                cleanup.first!!,
+                cleanup.second!!,
                 conversationId,
             )
         }
-    }
-
-    internal fun finishOnce(action: () -> Unit) {
-        if (finished.compareAndSet(false, true)) action()
     }
 
     override fun toString(): String =
@@ -190,12 +200,13 @@ object VkCallsCredentialProvider {
 
 
     internal class CredentialBroker(
-        private val accessToken: String,
+        accessToken: String,
         private val conversationId: String,
         initialCredentialsJson: String,
         private val sessionFetcher: (() -> VkCallsSession)? = null,
     ) {
         private val lock = Any()
+        private var accessToken: String? = accessToken
         private val issuedFingerprints = linkedSetOf(
             TurnQuotaRetryPolicy.fingerprint(initialCredentialsJson),
         )
@@ -203,8 +214,12 @@ object VkCallsCredentialProvider {
         private var finished = false
 
         fun obtainCredentials(): String {
+            val token = synchronized(lock) {
+                check(!finished) { "VK Calls credential broker is already finished" }
+                accessToken ?: error("VK Calls credential broker has released its access token")
+            }
             val session = sessionFetcher?.invoke()
-                ?: VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
+                ?: VkCallsCredentialProvider.obtainConversationSession(token, conversationId)
             try {
                 val credentialsJson = session.takeTurnCredentialsJson()
                 val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
@@ -229,6 +244,7 @@ object VkCallsCredentialProvider {
             val pending = synchronized(lock) {
                 if (finished) return
                 finished = true
+                accessToken = null
                 issuedFingerprints.clear()
                 sessions.toList().also { sessions.clear() }
             }
@@ -399,29 +415,43 @@ object VkCallsCredentialProvider {
             val body = fields.entries.joinToString("&") { (key, value) ->
                 "${encode(key)}=${encode(value)}"
             }
-            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val requestBytes = body.toByteArray(Charsets.UTF_8)
+            try {
+                connection.outputStream.use { it.write(requestBytes) }
+            } finally {
+                requestBytes.fill(0)
+            }
 
             val status = connection.responseCode
             val stream = if (status >= 400) connection.errorStream else connection.inputStream
             val bytes = stream?.use { input ->
-                val output = ByteArrayOutputStream()
+                val output = VkCallsWipingByteArrayOutputStream()
                 val buffer = ByteArray(8 * 1024)
-                var total = 0
-                while (true) {
-                    val count = input.read(buffer)
-                    if (count < 0) break
-                    total += count
-                    require(total <= MAX_RESPONSE_BYTES) { "VK Calls response is too large" }
-                    output.write(buffer, 0, count)
+                try {
+                    var total = 0
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        total += count
+                        require(total <= MAX_RESPONSE_BYTES) { "VK Calls response is too large" }
+                        output.write(buffer, 0, count)
+                    }
+                    output.toByteArray()
+                } finally {
+                    buffer.fill(0)
+                    output.wipe()
                 }
-                output.toByteArray()
             } ?: ByteArray(0)
-            if (status !in 200..299) {
-                throw VkCallsHttpException(status)
+            try {
+                if (status !in 200..299) {
+                    throw VkCallsHttpException(status)
+                }
+                val json = JSONObject(String(bytes, Charsets.UTF_8))
+                checkApiError(json)
+                return json
+            } finally {
+                bytes.fill(0)
             }
-            val json = JSONObject(String(bytes, Charsets.UTF_8))
-            checkApiError(json)
-            return json
         } finally {
             connection.disconnect()
         }
@@ -458,4 +488,13 @@ internal object VkCallsRetryPolicy {
 
     fun delayMillis(attemptIndex: Int): Long =
         250L * (attemptIndex.coerceIn(0, 1) + 1)
+}
+
+
+/** ByteArrayOutputStream whose mutable backing storage can be explicitly cleared. */
+private class VkCallsWipingByteArrayOutputStream : ByteArrayOutputStream() {
+    fun wipe() {
+        buf.fill(0)
+        reset()
+    }
 }
