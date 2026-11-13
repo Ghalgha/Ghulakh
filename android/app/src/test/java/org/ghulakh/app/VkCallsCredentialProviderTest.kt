@@ -166,6 +166,45 @@ class VkCallsCredentialProviderTest {
         assertEquals(128, finished)
     }
 
+ 
+    @Test
+    fun credentialBrokerClosesSessionReturnedAfterConcurrentFinish() {
+        val initial = credentialsJson("initial-user", "initial-secret")
+        val fetchStarted = java.util.concurrent.CountDownLatch(1)
+        val allowFetchToReturn = java.util.concurrent.CountDownLatch(1)
+        val finishedSessions = java.util.concurrent.atomic.AtomicInteger()
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "access-token-that-must-be-released",
+            conversationId = "conversation",
+            initialCredentialsJson = initial,
+            sessionFetcher = {
+                fetchStarted.countDown()
+                check(allowFetchToReturn.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                VkCallsSession(
+                    turnCredentialsJson = credentialsJson("late-user", "late-secret"),
+                    apiUrl = "https://calls.example.invalid/",
+                    sessionKey = "late-session-key",
+                    conversationId = "conversation",
+                    finishAction = { finishedSessions.incrementAndGet() },
+                )
+            },
+        )
+        val result = java.util.concurrent.atomic.AtomicReference<Throwable?>()
+        val worker = Thread {
+            runCatching { broker.obtainCredentials() }.onFailure { result.set(it) }
+        }
+        worker.start()
+        assertEquals(true, fetchStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        broker.finish()
+        allowFetchToReturn.countDown()
+        worker.join(5_000)
+
+        assertFalse(worker.isAlive)
+        assertFalse(result.get() == null)
+        assertEquals(1, finishedSessions.get())
+        assertFalse(runCatching { broker.obtainCredentials() }.isSuccess)
+    }
+
     private fun credentialsJson(username: String, password: String): String =
         """{"turn_server":{"username":"$username","credential":"$password","urls":["turn:relay.example.invalid:3478?transport=udp"]}}"""
 }

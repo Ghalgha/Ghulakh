@@ -3,7 +3,6 @@ package org.ghulakh.app
 import org.json.JSONObject
 import org.json.JSONArray
 import java.io.ByteArrayOutputStream
-import java.util.Arrays
 import javax.net.ssl.HttpsURLConnection
 import java.net.URL
 import java.io.IOException
@@ -13,12 +12,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class VkCallsSession(
     turnCredentialsJson: String,
-    internal val apiUrl: String,
-    internal val sessionKey: String,
+    apiUrl: String,
+    sessionKey: String,
     internal val conversationId: String,
-    private val finishAction: (() -> Unit)? = null,
+    finishAction: (() -> Unit)? = null,
 ) {
     private var pendingTurnCredentialsJson: String? = turnCredentialsJson
+    private var apiUrl: String? = apiUrl
+    private var sessionKey: String? = sessionKey
+    private var finishAction: (() -> Unit)? = finishAction
     private val finished = AtomicBoolean(false)
 
     internal fun takeTurnCredentialsJson(): String = synchronized(this) {
@@ -27,13 +29,25 @@ class VkCallsSession(
     }
 
     fun finish() {
-        synchronized(this) { pendingTurnCredentialsJson = null }
+        val cleanup = synchronized(this) {
+            pendingTurnCredentialsJson = null
+            val values = Triple(apiUrl, sessionKey, finishAction)
+            apiUrl = null
+            sessionKey = null
+            finishAction = null
+            values
+        }
         finishOnce {
-            finishAction?.invoke() ?: VkCallsCredentialProvider.finishConversation(
-                apiUrl,
-                sessionKey,
-                conversationId,
-            )
+            val action = cleanup.third
+            if (action != null) {
+                action.invoke()
+            } else if (cleanup.first != null && cleanup.second != null) {
+                VkCallsCredentialProvider.finishConversation(
+                    cleanup.first!!,
+                    cleanup.second!!,
+                    conversationId,
+                )
+            }
         }
     }
 
