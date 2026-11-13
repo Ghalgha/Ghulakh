@@ -47,8 +47,9 @@ TUN-подсистема пока экспериментальная. Испол
 Включать TUN следует только после настройки IP forwarding и firewall. Пример ниже предназначен для отдельного хоста, где этот процесс может управлять всей цепочкой FORWARD. Не вставляйте политику DROP в существующий firewall без проверки его текущих правил.
 
 ```sh
-# Включить IPv4 forwarding до запуска сервера.
+# Включить IPv4 и IPv6 forwarding до запуска сервера.
 sudo sysctl -w net.ipv4.ip_forward=1
+sudo sysctl -w net.ipv6.conf.all.forwarding=1
 
 # Замените eth0 на внешний интерфейс сервера.
 WAN_IF=eth0
@@ -57,10 +58,17 @@ sudo nft add table inet ghulakh
 sudo nft 'add chain inet ghulakh forward { type filter hook forward priority filter; policy drop; }'
 sudo nft add rule inet ghulakh forward iifname "ghulakh0" oifname "$WAN_IF" ip saddr 10.77.0.0/16 accept
 sudo nft add rule inet ghulakh forward iifname "$WAN_IF" oifname "ghulakh0" ip daddr 10.77.0.0/16 ct state established,related accept
+sudo nft add rule inet ghulakh forward iifname "ghulakh0" oifname "$WAN_IF" ip6 saddr fd77:77::/64 accept
+sudo nft add rule inet ghulakh forward iifname "$WAN_IF" oifname "ghulakh0" ip6 daddr fd77:77::/64 ct state established,related accept
 
 sudo nft add table ip ghulakh_nat
 sudo nft 'add chain ip ghulakh_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
 sudo nft add rule ip ghulakh_nat postrouting ip saddr 10.77.0.0/16 oifname "$WAN_IF" masquerade
+
+# Необязательно: NAT66, если upstream не маршрутизирует fd77:77::/64.
+sudo nft add table ip6 ghulakh_nat
+sudo nft 'add chain ip6 ghulakh_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
+sudo nft add rule ip6 ghulakh_nat postrouting ip6 saddr fd77:77::/64 oifname "$WAN_IF" masquerade
 
 export GHULAKH_TUN_ENABLED=true
 export GHULAKH_TUN_NAME=ghulakh0
@@ -75,4 +83,4 @@ cargo run --release -p ghulakh-server
 
 Сервер назначает парные IPv4/IPv6 адреса после успешной аутентификации. Клиентские пакеты обоих семейств проверяются по назначенным source IP и проходят базовую egress ACL. Пакеты с некорректным IP, подменённым source IP или запрещённым destination IP отбрасываются. Переполнение ограниченной очереди TUN также приводит к потере пакета.
 
-Эта версия обеспечивает IPv4/IPv6 packet forwarding внутри туннеля и автоматическое восстановление отказавших TURN paths. Публичный IPv6 egress, DNS-конфигурация, доступ к частным сетям, управление устройствами через API и production-grade firewall orchestration не входят в подтверждённую эксплуатационную готовность. Не включайте маршрутизацию на рабочем сервере до завершения CI, изолированных интеграционных и нагрузочных проверок.
+Эта версия обеспечивает IPv4/IPv6 packet forwarding внутри туннеля и автоматическое восстановление отказавших TURN paths. Публичный IPv6 egress требует либо upstream-маршрута к fd77:77::/64, либо NAT66, если upstream не маршрутизирует этот префикс. NAT66 не требуется при наличии корректного маршрута. DNS-конфигурация, доступ к частным сетям, управление устройствами через API и production-grade firewall orchestration не входят в подтверждённую эксплуатационную готовность. Не включайте маршрутизацию на рабочем сервере до завершения CI, изолированных интеграционных и нагрузочных проверок.
