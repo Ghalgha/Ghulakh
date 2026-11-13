@@ -66,6 +66,8 @@ def main() -> int:
                 digest_file.write(digest)
                 digest_file.flush()
                 os.fsync(digest_file.fileno())
+                sys.stdout.write(credential + "\\n")
+                sys.stdout.flush()
             except BaseException:
                 os.ftruncate(digest_file.fileno(), original_size)
                 os.fsync(digest_file.fileno())
