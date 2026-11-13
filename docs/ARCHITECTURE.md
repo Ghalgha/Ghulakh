@@ -49,7 +49,7 @@ Ghulakh — Android VPN-клиент и серверный шлюз для за�
 
 Контрольный путь использует явную очистку временных копий:
 - STUN attribute values очищаются при уничтожении `StunMessage`; частичный результат decode очищается при любой ошибке.
-- TURN challenge realm/nonce и password-algorithm offer очищаются при завершении challenge lifetime.
+- TURN challenge realm/nonce и password-algorithm offer очищаются при завершении challenge lifetime; Debug-представления challenge и STUN auth attributes скрывают значения.
 - STUN SHA-1/SHA-256 signing/verification/fingerprint staging buffers очищаются через `Zeroizing`.
 - Сохранённый transaction request, retransmission copy, socket actor outbound command, inbound control wire и UDP receive buffer очищаются после завершения своего использования.
 - TURN URI query parameters очищаются при уничтожении `TurnEndpoint`, в том числе при ошибке разбора неполного списка параметров.

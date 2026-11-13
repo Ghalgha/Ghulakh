@@ -38,7 +38,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 4. IPv6 egress: dual-stack packet path реализован, но публичный IPv6 зависит от upstream route либо NAT66 и не проверен на VPS.
 5. Android OAuth: встроенного OAuth/login UI и автоматического обновления VK access token нет; токен вводится вручную.
 6. Server deployment: нет безопасного полного install/update/uninstall lifecycle. Администратор вручную создаёт ключи/credentials, включает sysctl, проверяет маршруты и устанавливает ограниченную nftables policy. Автоматическое изменение глобальных настроек сервера не выполняется.
-7. Supply chain: нужно отдельно подтвердить Gradle dependency locking/verification, pinning GitHub Actions по SHA и воспроизводимость сборок; наличие lockfiles/Wrapper само по себе аудит не завершает.
+7. Supply chain: Rust toolchain закреплён на 1.99.1; cargo-audit, cargo-fuzz и cargo-ndk устанавливаются по точным версиям; Cargo check/test/clippy используют `--locked`; GitHub Actions в обоих workflow закреплены полными commit SHA. Gradle dependency locking включён через `lockAllConfigurations()`, но сгенерированные Gradle lockfiles и `gradle/verification-metadata.xml` ещё не созданы и не закоммичены. Поэтому Android dependency graph пока не имеет полной Gradle locking/verification защиты.
 8. Secrets: аудит контролируемого Rust TURN/STUN и Kotlin/JNI control-plane lifetime выполнен в PR №14. Проверены one-shot handoff, broker/session finish, late credential fetch, JNI conversion, teardown и очистка JSON containers на штатных и exceptional exit paths. Добавлено освобождение SHA-256 verification staging buffer и сокращено время удержания service-local VK access token. Неустранимое ограничение — immutable JVM strings и копии в сторонних runtime/API; crash dump/backup paths и независимая проверка остаются отдельными задачами.
 9. Security assurance: не завершены независимый review Noise/session framing, длительные fuzz/property/fault runs, нагрузочные и resource-exhaustion проверки.
 10. Производительность: нет сопоставимых реальных измерений goodput, p50/p95/p99 latency, loss, CPU, wakeups, RSS и энергопотребления.
@@ -52,7 +52,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 
 1. Аудит основных IPv4/IPv6 egress edge cases и изолированный тест обходного fwmark policy routing для обоих семейств включены в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Это закрывает тестирование описанной топологии, но не произвольных правил реального хоста.
 2. Аудит контролируемого Kotlin/JNI/Rust TURN/STUN secret lifetime завершён в PR №14; перед слиянием обязательна проверка всех CI jobs на окончательном HEAD. Остаточные JVM immutable-string/runtime-copy и внешние runtime limitations документированы.
-3. Закрыть dependency locking/verification и SHA pinning CI actions.
+3. Завершить Gradle supply-chain этап: получить lockfiles для всех реально разрешаемых конфигураций и `gradle/verification-metadata.xml` с SHA-256, затем проверить clean CI без обновления зависимостей. Rust toolchain/tool versions и GitHub Actions SHA pinning выполнены в PR №14.
 4. Завершить crypto composition review и длительные fuzz/property/fault/resource tests.
 5. Завершить операционную модель deployment, не затрагивающую чужие настройки сервера.
 6. Только затем провести контролируемые live VK Calls тесты и физические Android/VPS испытания.
