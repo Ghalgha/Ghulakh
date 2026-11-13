@@ -59,6 +59,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - name: Check network test script syntax
+        run: bash -n tools/test-network-namespaces.sh
       - name: Install network test tools
         run: |
           sudo apt-get update

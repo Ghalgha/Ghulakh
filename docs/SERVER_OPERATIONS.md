@@ -88,7 +88,7 @@ cargo run --release -p ghulakh-server
 
 ## Изолированная проверка сетевой конфигурации
 
-На отдельной Linux VM или CI runner с root/CAP_NET_ADMIN, `iproute2`, `nftables` и `ping` выполните:
+На отдельной Linux VM или CI runner с правами root и CAP_NET_ADMIN, `iproute2`, `nftables` и `ping` выполните:
 
 ```sh
 sudo bash tools/test-network-namespaces.sh

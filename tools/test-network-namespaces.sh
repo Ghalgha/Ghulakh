@@ -9,15 +9,21 @@ for cmd in ip nft ping; do
   command -v "$cmd" >/dev/null || { echo "Missing dependency: $cmd" >&2; exit 2; }
 done
 
-C=gh-client
-R=gh-router
-U=gh-upstream
+test_id="$"
+C="ghulakh-${test_id}-client"
+R="ghulakh-${test_id}-router"
+U="ghulakh-${test_id}-upstream"
 cleanup() {
   ip netns del "$C" 2>/dev/null || true
   ip netns del "$R" 2>/dev/null || true
   ip netns del "$U" 2>/dev/null || true
 }
-cleanup
+for ns in "$C" "$R" "$U"; do
+  if ip netns list | awk '{print $1}' | grep -Fxq "$ns"; then
+    echo "Refusing to reuse existing network namespace: $ns" >&2
+    exit 2
+  fi
+done
 trap cleanup EXIT
 
 ip netns add "$C"
@@ -31,8 +37,8 @@ ip link set ru0 netns "$R"
 ip link set u0 netns "$U"
 
 for ns in "$C" "$R" "$U"; do ip -n "$ns" link set lo up; done
-ip -n "$C" addr add 10.77.0.2/24 dev c0
-ip -n "$R" addr add 10.77.0.1/24 dev rc0
+ip -n "$C" addr add 10.77.0.2/16 dev c0
+ip -n "$R" addr add 10.77.0.1/16 dev rc0
 ip -n "$R" addr add 1.1.1.254/30 dev ru0
 ip -n "$U" addr add 1.1.1.253/30 dev u0
 ip -n "$C" -6 addr add fd77:77::2/64 dev c0
@@ -44,7 +50,7 @@ for pair in "$C c0" "$R rc0" "$R ru0" "$U u0"; do
   ip -n "$ns" link set "$dev" up
 done
 ip -n "$C" route add default via 10.77.0.1
-ip -n "$U" route add 10.77.0.0/24 via 1.1.1.254
+ip -n "$U" route add 10.77.0.0/16 via 1.1.1.254
 ip -n "$C" -6 route add default via fd77:77::1
 ip -n "$U" -6 route add fd77:77::/64 via 2606:4700:4700::fffe
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.default.forwarding=1
@@ -62,9 +68,9 @@ ip netns exec "$R" nft -f - <<'NFT'
 table inet filter {
   chain forward {
     type filter hook forward priority filter; policy drop;
-    iifname "rc0" oifname "ru0" ip saddr 10.77.0.0/24 accept
-    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/24 ct state established,related accept
-    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/24 counter drop
+    iifname "rc0" oifname "ru0" ip saddr 10.77.0.0/16 accept
+    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/16 ct state established,related accept
+    iifname "ru0" oifname "rc0" ip daddr 10.77.0.0/16 counter drop
     iifname "rc0" oifname "ru0" ip6 saddr fd77:77::/64 accept
     iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 ct state established,related accept
     iifname "ru0" oifname "rc0" ip6 daddr fd77:77::/64 counter drop
@@ -73,7 +79,7 @@ table inet filter {
 table ip nat4 {
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
-    ip saddr 10.77.0.0/24 oifname "ru0" counter masquerade
+    ip saddr 10.77.0.0/16 oifname "ru0" counter masquerade
   }
 }
 table ip6 nat6 {
@@ -123,7 +129,7 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 
 # Both reverse-direction probes must hit explicit drop rules, not merely time out.
 ip netns exec "$R" nft list chain inet filter forward \
-  | grep -F 'ip daddr 10.77.0.0/24 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+  | grep -F 'ip daddr 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet filter forward \
   | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
