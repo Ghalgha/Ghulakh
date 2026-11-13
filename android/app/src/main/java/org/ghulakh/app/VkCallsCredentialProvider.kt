@@ -293,8 +293,13 @@ object VkCallsCredentialProvider {
         val broker = CredentialBroker(accessToken, owner.conversationId, initialCredentialsJson)
         try {
             val array = JSONArray().put(JSONObject(initialCredentialsJson))
-            repeat(pathCount - 1) { array.put(JSONObject(broker.obtainCredentials())) }
-            return VkCallsCredentialGroup(array.toString(), owner, broker)
+            val groupJson = try {
+                repeat(pathCount - 1) { array.put(JSONObject(broker.obtainCredentials())) }
+                array.toString()
+            } finally {
+                clearJsonStringReferences(array)
+            }
+            return VkCallsCredentialGroup(groupJson, owner, broker)
         } catch (error: Throwable) {
             broker.finish()
             runCatching { owner.finish() }
