@@ -161,9 +161,10 @@ if ip netns exec "$U" ping -6 -c 1 -W 1 fd77:77::2; then
 fi
 # Add deliberately invalid source addresses only when their negative probes run.
 # Keeping them off the interface during NAT66 warm-up prevents IPv6 source-address
-# selection from choosing the spoof-test ULA instead of the tunnel ULA.
+# selection from choosing the spoof-test ULA instead of the tunnel ULA. The synthetic
+# IPv6 source skips DAD so it is usable immediately for the explicit spoof probe.
 ip -n "$C" addr add 10.88.0.99/32 dev c0
-ip -n "$C" -6 addr add fd88::99/128 dev c0
+ip -n "$C" -6 addr add fd88::99/128 dev c0 nodad
 
 # Reject spoofed source prefixes on the tunnel interface and unrelated ingress.
 if ip netns exec "$C" ping -I 10.88.0.99 -c 1 -W 1 1.1.1.253; then
