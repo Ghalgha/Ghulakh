@@ -97,6 +97,16 @@ class VkCallsCredentialProviderTest {
 
         assertEquals(json, session.takeTurnCredentialsJson())
         assertFalse(runCatching { session.takeTurnCredentialsJson() }.isSuccess)
+
+        val abandoned = VkCallsSession(
+            turnCredentialsJson = json,
+            apiUrl = "https://calls.example.invalid/",
+            sessionKey = "abandoned-session",
+            conversationId = "conversation",
+            finishAction = {},
+        )
+        abandoned.finish()
+        assertFalse(runCatching { abandoned.takeTurnCredentialsJson() }.isSuccess)
     }
 
     @Test
@@ -121,6 +131,10 @@ class VkCallsCredentialProviderTest {
 
         assertEquals(groupJson, group.takeTurnCredentialsJson())
         assertFalse(runCatching { group.takeTurnCredentialsJson() }.isSuccess)
+
+        val abandoned = VkCallsCredentialGroup(groupJson, owner, broker)
+        abandoned.finish()
+        assertFalse(runCatching { abandoned.takeTurnCredentialsJson() }.isSuccess)
     }
 
     @Test
