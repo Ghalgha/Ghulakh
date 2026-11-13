@@ -50,7 +50,7 @@ TURN relay считается недоверенным посредником д
 
 - VK Calls credential flow и текущий TURN long-term auth profile не подтверждены на реальном relay; возможны изменения API, challenge attributes, quotas и credential lifetime.
 - TURN relay видит сетевые метаданные и может блокировать трафик; туннель не обещает анонимность или устойчивость к любому DPI.
-- Noise library и собственная композиция handshake/session framing не прошли независимый формальный аудит.
+- Noise library и собственная композиция handshake/session framing не прошли независимый формальный аудит. В используемом `snow 0.10.0` default X25519 resolver копирует статический private key во внутренний `Dh25519.privkey: [u8; 32]`; эта структура не реализует `Drop`/zeroize для массива. Поэтому очистка внешнего `NoiseServerKeyPair` и временных файловых буферов не доказывает очистку внутренних копий в Noise handshake state. Это остаточный риск до перехода на проверенный resolver/library path с гарантированной очисткой.
 - Компрометация Android OS, сервера или device credential может раскрыть пользовательский трафик/доступ.
 - TURN quota и ограничения allocation контролируются внешним сервисом и не гарантируются клиентом.
 - In-app OAuth UI/автоматическое получение VK access token, DNS service, LAN access и автоматическое управление существующим firewall хоста не реализовано; правила устанавливаются отдельным административным скриптом и требуют согласования с политикой хоста. TURN credential refresh/recovery реализован: authenticated 401/441 и исчерпанный bounded 438 retry приводят к классификации пути для замены credentials; реальное поведение VK quota/rotation требует live-проверки.
