@@ -7,6 +7,9 @@ license.workspace = true
 [lib]
 crate-type = ["rlib", "cdylib"]
 
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
+
 [dependencies]
 anyhow = "1"
 bytes = "1"
