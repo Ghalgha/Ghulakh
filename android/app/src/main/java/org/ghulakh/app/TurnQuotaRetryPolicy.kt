@@ -81,10 +81,19 @@ internal object TurnQuotaRetryPolicy {
         attemptIndex: Int,
         credentialsJson: String,
         rejectedFingerprints: MutableSet<String>,
+    ): Boolean = shouldRetryGroupFingerprints(
+        attemptIndex,
+        credentialFingerprints(credentialsJson),
+        rejectedFingerprints,
+    )
+
+    fun shouldRetryGroupFingerprints(
+        attemptIndex: Int,
+        fingerprints: List<String>,
+        rejectedFingerprints: MutableSet<String>,
     ): Boolean {
         if (attemptIndex + 1 >= MAX_CONNECT_ATTEMPTS) return false
-        val fingerprints = credentialFingerprints(credentialsJson)
-        if (fingerprints.any { it in rejectedFingerprints }) return false
+        if (fingerprints.isEmpty() || fingerprints.any { it in rejectedFingerprints }) return false
         rejectedFingerprints.addAll(fingerprints)
         return true
     }

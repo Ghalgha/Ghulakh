@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 use tokio::{runtime::{Builder, Runtime}, task::JoinSet};
+use zeroize::Zeroizing;
 #[cfg(target_os = "android")]
 use std::os::fd::AsRawFd;
 #[cfg(target_os = "android")]
@@ -182,11 +183,14 @@ fn connect_turn_impl(
         path_count,
     } = args;
     let gateway_host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
-    let turn_credentials_json = env
-        .get_string(&turn_credentials_json)?
-        .to_string_lossy()
-        .into_owned();
-    let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
+    let turn_credentials_json = Zeroizing::new(
+        env.get_string(&turn_credentials_json)?
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let credential = Zeroizing::new(
+        env.get_string(&credential)?.to_string_lossy().into_owned(),
+    );
     let pinned_server_key = env.convert_byte_array(pinned_server_key)?;
     anyhow::ensure!(pinned_server_key.len() == 32, "pinned Noise server key must be 32 bytes");
     anyhow::ensure!(
@@ -231,7 +235,7 @@ fn connect_turn_impl(
         // Parse every credential set before starting any allocation. A local
         // parse failure must not drop a JoinSet containing live startup tasks.
         let credentials = TurnCredentials::from_vk_response_json_array(
-            &turn_credentials_json,
+            turn_credentials_json.as_str(),
             usize::from(path_count),
         ).context("parse independent VK Calls TURN credential sets")?;
 
@@ -242,7 +246,7 @@ fn connect_turn_impl(
             .enumerate()
         {
             let pinned_key = pinned_server_key.clone();
-            let tunnel_credential = credential.as_bytes().to_vec();
+            let tunnel_credential = Zeroizing::new(credential.as_bytes().to_vec());
             let context = TurnPathContext {
                 group_id,
                 path_id: path_id as u16,
@@ -254,7 +258,7 @@ fn connect_turn_impl(
                     credentials,
                     gateway_addr,
                     &pinned_key,
-                    &tunnel_credential,
+                    tunnel_credential.as_slice(),
                     context,
                 ).await
             });
@@ -335,8 +339,12 @@ fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result
         pinned_server_key, credential, path_id,
     } = args;
     let host = env.get_string(&gateway_host)?.to_string_lossy().into_owned();
-    let credentials_json = env.get_string(&turn_credentials_json)?.to_string_lossy().into_owned();
-    let credential = env.get_string(&credential)?.to_string_lossy().into_owned();
+    let credentials_json = Zeroizing::new(
+        env.get_string(&turn_credentials_json)?.to_string_lossy().into_owned(),
+    );
+    let credential = Zeroizing::new(
+        env.get_string(&credential)?.to_string_lossy().into_owned(),
+    );
     let pinned_key = env.convert_byte_array(pinned_server_key)?;
     anyhow::ensure!(pinned_key.len() == 32, "pinned Noise server key must be 32 bytes");
     anyhow::ensure!(!credential.is_empty() && credential.len() <= ghulakh_protocol::MAX_CREDENTIAL_LEN,
@@ -349,7 +357,7 @@ fn recover_turn_path_impl(env: &mut JNIEnv, args: TurnRecoverArgs<'_>) -> Result
     anyhow::ensure!(session.client.failed_path_ids().contains(&path_id), "TURN path is still healthy");
     let socket = make_protected_socket(env, &vpn_service)?
         .context("Android protected TURN UDP socket is required")?;
-    let credentials = TurnCredentials::from_vk_response_json(&credentials_json)
+    let credentials = TurnCredentials::from_vk_response_json(credentials_json.as_str())
         .context("parse refreshed VK Calls TURN credentials")?;
     let gateway: SocketAddr = session.runtime.block_on(async {
         let mut addresses = tokio::net::lookup_host((host.as_str(), port)).await?;

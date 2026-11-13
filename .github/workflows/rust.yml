@@ -25,8 +25,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Resolve dependencies
-        run: cargo generate-lockfile
+      - name: Verify locked dependency resolution
+        run: cargo check --workspace --locked
       - uses: taiki-e/install-action@cargo-audit
       - name: Audit dependencies
         run: cargo audit
@@ -46,6 +46,27 @@ jobs:
         run: cargo +nightly fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
         run: cargo +nightly fuzz run --fuzz-dir fuzz handshake_envelope -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz TURN ChannelData decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz channel_data_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz sequenced datagram decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz sequenced_datagram_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz protected frame decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz secure_frame_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+
+  network-namespace:
+    name: Linux network namespace integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check network test script syntax
+        run: bash -n tools/test-network-namespaces.sh
+      - name: Install network test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables iputils-ping
+      - name: Verify isolated forwarding, NAT and firewall
+        run: sudo bash tools/test-network-namespaces.sh
 
   android:
     name: Android debug build
@@ -59,7 +80,7 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0 ndk;27.3.13750724'
+          packages: 'platforms;android-35 build-tools;36.0.0 ndk;27.3.13750724'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -71,12 +92,10 @@ jobs:
           export ANDROID_NDK_ROOT="$ANDROID_NDK_HOME"
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o android/app/src/main/jniLibs build --release -p ghulakh-transport
       - uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.11.1'
       - name: Run Android JVM unit tests
-        run: gradle -p android testDebugUnitTest
+        run: ./android/gradlew -p android testDebugUnitTest
       - name: Assemble debug APK
-        run: gradle -p android assembleDebug
+        run: ./android/gradlew -p android assembleDebug
       - name: Verify APK output
         run: test -s android/app/build/outputs/apk/debug/app-debug.apk
       - name: Upload Android debug APK

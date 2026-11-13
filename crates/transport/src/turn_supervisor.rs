@@ -90,6 +90,59 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
         anyhow::bail!("TURN Allocate retry loop exhausted")
     }
 
+    /// Run initial allocation in an independently owned task.
+    ///
+    /// If the caller is cancelled, the task continues to own the TURN control
+    /// plane. A late successful Allocate is retired with authenticated
+    /// Refresh(0), rather than leaving a relay-side allocation behind.
+    pub async fn allocate_owned(
+        self,
+    ) -> Result<(Self, ghulakh_protocol::turn_allocation::AllocationLease)>
+    where
+        P: 'static,
+    {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (handoff_tx, handoff_rx) = tokio::sync::oneshot::channel();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let worker_shared = std::sync::Arc::clone(&shared);
+
+        tokio::spawn(async move {
+            let mut supervisor = self;
+            match supervisor.allocate().await {
+                Ok(lease) => {
+                    *worker_shared.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(supervisor);
+
+                    if result_tx.send(Ok(lease)).is_err() || handoff_rx.await.is_err() {
+                        let pending = worker_shared
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take();
+                        if let Some(mut supervisor) = pending {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                supervisor.deallocate(),
+                            ).await;
+                            supervisor.close();
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                }
+            }
+        });
+
+        let lease = result_rx.await.context("TURN Allocate worker stopped")??;
+        let supervisor = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .context("TURN Allocate worker lost supervisor ownership")?;
+        let _ = handoff_tx.send(());
+        Ok((supervisor, lease))
+    }
+
     /// Refresh the active allocation and recover from a verified 438 response.
     pub async fn refresh(&mut self, lifetime_seconds: u32) -> Result<Option<ghulakh_protocol::turn_allocation::AllocationLease>> {
         for attempt in 0..=self.max_challenge_retries {
@@ -104,6 +157,10 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                         return Err(error).context("unexpected TURN Refresh challenge");
                     }
                     if attempt == self.max_challenge_retries {
+                        if challenge.code == 438 {
+                            return Err(anyhow::Error::new(TurnDriverError::CredentialsRejected)
+                                .context("TURN Refresh stale-nonce retry limit reached; credentials require replacement"));
+                        }
                         return Err(error).context("TURN Refresh stale-nonce retry limit reached");
                     }
                     let next = self.provider.context_for_challenge(challenge).await
@@ -591,6 +648,90 @@ mod server_error_state_tests {
         assert_eq!(after.relayed_address, before.relayed_address);
         assert_eq!(after.lifetime_seconds, before.lifetime_seconds);
         assert_eq!(supervisor.provider.calls, 1);
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
+    async fn authenticated_refresh_401_is_reported_as_credential_rejection() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            let (refresh, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(refresh.method, METHOD_REFRESH);
+            let denied = challenge(&refresh, 401);
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let provider = Provider { calls: 0 };
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            provider,
+        );
+        let before = supervisor.allocate().await.unwrap();
+        let error = supervisor.refresh(600).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::CredentialsRejected)
+        ));
+        let after = supervisor.allocation().expect("failed refresh retains the last confirmed lease");
+        assert_eq!(after.relayed_address, before.relayed_address);
+        assert_eq!(after.lifetime_seconds, before.lifetime_seconds);
+        assert_eq!(supervisor.provider.calls, 1, "Refresh 401 must not trigger an Allocate credential challenge");
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
+    async fn authenticated_refresh_441_is_reported_as_credential_rejection() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            let (refresh, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(refresh.method, METHOD_REFRESH);
+            let denied = challenge(&refresh, 441);
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let provider = Provider { calls: 0 };
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            provider,
+        );
+        let before = supervisor.allocate().await.unwrap();
+        let error = supervisor.refresh(600).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::CredentialsRejected)
+        ));
+        let after = supervisor.allocation().expect("failed refresh retains the last confirmed lease");
+        assert_eq!(after.relayed_address, before.relayed_address);
+        assert_eq!(after.lifetime_seconds, before.lifetime_seconds);
+        assert_eq!(supervisor.provider.calls, 1, "Refresh 401 must not trigger an Allocate credential challenge");
         relay_task.await.unwrap();
         supervisor.close();
     }
@@ -1336,6 +1477,10 @@ mod stale_nonce_retry_limit_tests {
         let before = supervisor.allocate().await.unwrap();
         let error = supervisor.refresh(600).await.unwrap_err();
         assert!(error.to_string().contains("stale-nonce retry limit reached"));
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::CredentialsRejected)
+        )), "exhausted authenticated 438 must trigger credential replacement: {error:#}");
         assert_eq!(supervisor.provider.calls, MAX_CHALLENGE_RETRIES + 1);
         let after = supervisor.allocation().expect("stale-nonce exhaustion must retain confirmed lease");
         assert_eq!(after.relayed_address, before.relayed_address);
@@ -1453,6 +1598,134 @@ mod graceful_deallocation_tests {
         supervisor.allocate().await.unwrap();
         supervisor.deallocate().await.unwrap();
         assert!(supervisor.driver.allocation().is_none());
+        relay_task.await.unwrap();
+    }
+}
+
+
+#[cfg(test)]
+mod cancelled_allocate_cleanup_tests {
+    use super::*;
+    use crate::turn_auth::TurnIntegrityAlgorithm;
+    use ghulakh_protocol::stun::{
+        append_message_integrity, encode_xor_address, StunAttribute, StunClass, StunMessage,
+        ATTR_ERROR_CODE, ATTR_LIFETIME, ATTR_NONCE, ATTR_REALM, ATTR_XOR_RELAYED_ADDRESS,
+        METHOD_ALLOCATE, METHOD_REFRESH,
+    };
+    use tokio::{net::UdpSocket, sync::oneshot, time::{timeout, Duration}};
+
+    struct Provider;
+
+    impl TurnAuthProvider for Provider {
+        fn context_for_challenge<'a>(
+            &'a mut self,
+            challenge: TurnChallenge,
+        ) -> Pin<Box<dyn Future<Output = Result<TurnAuthContext>> + Send + 'a>> {
+            Box::pin(async move {
+                TurnAuthContext::new(
+                    "cancel-test-user".into(),
+                    challenge.realm,
+                    challenge.nonce,
+                    vec![0x5a; 32],
+                    TurnIntegrityAlgorithm::Sha1,
+                ).map_err(anyhow::Error::new)
+            })
+        }
+    }
+
+    async fn receive(relay: &UdpSocket, buffer: &mut [u8]) -> (StunMessage, SocketAddr) {
+        let (length, source) = timeout(Duration::from_secs(3), relay.recv_from(buffer))
+            .await.unwrap().unwrap();
+        (StunMessage::decode(&buffer[..length]).unwrap(), source)
+    }
+
+    #[tokio::test]
+    async fn cancelled_allocate_retires_late_success_with_authenticated_refresh_zero() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+        let (authenticated_tx, authenticated_rx) = oneshot::channel();
+        let (continue_tx, continue_rx) = oneshot::channel();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(initial.method, METHOD_ALLOCATE);
+            let challenge = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::ErrorResponse,
+                transaction_id: initial.transaction_id,
+                attributes: vec![
+                    StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
+                    StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
+                    StunAttribute { kind: ATTR_NONCE, value: b"cancel-nonce".to_vec() },
+                ],
+            };
+            relay.send_to(&challenge.encode().unwrap(), client).await.unwrap();
+
+            let (authenticated, authenticated_client) = receive(&relay, &mut buffer).await;
+            assert_eq!(authenticated_client, client);
+            assert_eq!(authenticated.method, METHOD_ALLOCATE);
+            assert!(authenticated.attributes.iter().any(|a|
+                a.kind == ATTR_NONCE && a.value == b"cancel-nonce"
+            ));
+            authenticated_tx.send(()).unwrap();
+            continue_rx.await.unwrap();
+
+            let relayed: SocketAddr = "198.51.100.44:50000".parse().unwrap();
+            let success = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::SuccessResponse,
+                transaction_id: authenticated.transaction_id,
+                attributes: vec![
+                    StunAttribute {
+                        kind: ATTR_XOR_RELAYED_ADDRESS,
+                        value: encode_xor_address(relayed, &authenticated.transaction_id),
+                    },
+                    StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+                ],
+            };
+            relay.send_to(&append_message_integrity(&success, &[0x5a; 32]).unwrap(), client)
+                .await.unwrap();
+
+            let (deallocate, deallocate_client) = receive(&relay, &mut buffer).await;
+            assert_eq!(deallocate_client, client);
+            assert_eq!(deallocate.method, METHOD_REFRESH);
+            assert_eq!(
+                deallocate.attributes.iter().find(|a| a.kind == ATTR_LIFETIME).unwrap().value,
+                0u32.to_be_bytes(),
+            );
+            assert!(deallocate.attributes.iter().any(|a|
+                a.kind == ATTR_NONCE && a.value == b"cancel-nonce"
+            ));
+            let response = StunMessage {
+                method: METHOD_REFRESH,
+                class: StunClass::SuccessResponse,
+                transaction_id: deallocate.transaction_id,
+                attributes: vec![StunAttribute {
+                    kind: ATTR_LIFETIME,
+                    value: 0u32.to_be_bytes().to_vec(),
+                }],
+            };
+            relay.send_to(&append_message_integrity(&response, &[0x5a; 32]).unwrap(), client)
+                .await.unwrap();
+        });
+
+        let supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            Provider,
+        );
+        let allocation_task = tokio::spawn(async move {
+            supervisor.allocate_owned().await
+        });
+
+        // Wait until the authenticated Allocate is on the wire, then cancel
+        // only the caller. The independently owned worker must finish cleanup.
+        timeout(Duration::from_secs(3), authenticated_rx).await.unwrap().unwrap();
+        allocation_task.abort();
+        let _ = continue_tx.send(());
         relay_task.await.unwrap();
     }
 }

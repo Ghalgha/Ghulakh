@@ -40,6 +40,8 @@ pub enum TurnDriverError {
     Challenge(ghulakh_protocol::turn_auth::TurnChallenge),
     #[error("TURN server returned an error response (code {code})")]
     ServerError { code: u16 },
+    #[error("TURN rejected the active credentials (STUN error 401, 438, or 441)")]
+    CredentialsRejected,
     #[error("TURN response was not authenticated")]
     MissingAuthentication,
     #[error("TURN response source or transaction did not match")]
@@ -330,9 +332,11 @@ impl TurnClientDriver {
                             let should_verify = challenge.code == 438 || auth.is_some();
                             if should_verify {
                                 if let Some(context) = auth {
-                                    if let Err(error) = context.verify_response(&wire) {
-                                        self.transactions.complete(&id);
-                                        return Err(error).context("verify authenticated TURN challenge");
+                                    if context.verify_response(&wire).is_err() {
+                                        // An unauthenticated datagram must not consume a
+                                        // live transaction; keep waiting for a valid response
+                                        // or let the normal retransmission deadline expire.
+                                        continue;
                                     }
                                 } else {
                                     self.transactions.complete(&id);
@@ -341,15 +345,14 @@ impl TurnClientDriver {
                             }
                             if challenge.code == 401 && auth.is_some() {
                                 self.transactions.complete(&id);
-                                return Err(TurnDriverError::ServerError { code: 401 }.into());
+                                return Err(TurnDriverError::CredentialsRejected.into());
                             }
                             self.transactions.complete(&id);
                             return Err(TurnDriverError::Challenge(challenge).into());
                         }
                         if let Some(context) = auth {
-                            if let Err(error) = context.verify_response(&wire) {
-                                self.transactions.complete(&id);
-                                return Err(error).context("verify authenticated TURN error response");
+                            if context.verify_response(&wire).is_err() {
+                                continue;
                             }
                         }
                         let code = response.attributes.iter()
@@ -357,12 +360,14 @@ impl TurnClientDriver {
                             .and_then(|attribute| (attribute.value.len() >= 4)
                                 .then(|| u16::from(attribute.value[2] & 0x07) * 100 + u16::from(attribute.value[3])));
                         self.transactions.complete(&id);
+                        if code == Some(441) && auth.is_some() {
+                            return Err(TurnDriverError::CredentialsRejected.into());
+                        }
                         return Err(TurnDriverError::ServerError { code: code.unwrap_or(0) }.into());
                     }
                     if let Some(context) = auth {
-                        if let Err(error) = context.verify_response(&wire) {
-                            self.transactions.complete(&id);
-                            return Err(error).context("verify TURN success response");
+                        if context.verify_response(&wire).is_err() {
+                            continue;
                         }
                     } else {
                         self.transactions.complete(&id);
@@ -401,7 +406,7 @@ impl TurnClientDriver {
 mod socket_actor_integration_tests {
     use super::*;
     use ghulakh_protocol::stun::{
-        StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM,
+        StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, METHOD_ALLOCATE,
     };
     use tokio::{net::UdpSocket, time::{timeout, Duration}};
 
@@ -437,6 +442,78 @@ mod socket_actor_integration_tests {
         assert!(matches!(challenge, TurnDriverError::Challenge(value)
             if value.code == 401 && value.realm == "turn.example.invalid"));
         relay_task.await.unwrap();
+        driver.close();
+    }
+
+    #[tokio::test]
+    async fn invalid_authenticated_success_is_ignored_and_request_is_retransmitted() {
+        use crate::turn_auth::TurnIntegrityAlgorithm;
+        use ghulakh_protocol::stun::{
+            append_message_integrity, encode_xor_address, StunAttribute,
+            ATTR_LIFETIME, ATTR_XOR_RELAYED_ADDRESS,
+        };
+
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
+            .await.unwrap();
+        let policy = TransactionPolicy {
+            initial_rto: Duration::from_millis(20),
+            max_requests: 2,
+            final_timeout_multiplier: 2,
+        };
+        let mut driver = TurnClientDriver::new(socket).with_transaction_policy(policy);
+        let auth = TurnAuthContext::new(
+            "test-user".into(),
+            "turn.example.invalid".into(),
+            "test-nonce".into(),
+            vec![0x44; 32],
+            TurnIntegrityAlgorithm::Sha1,
+        ).unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (first_len, client) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            let first_wire = buffer[..first_len].to_vec();
+            let request = StunMessage::decode(&first_wire).unwrap();
+            assert_eq!(request.method, METHOD_ALLOCATE);
+
+            let relayed: SocketAddr = "198.51.100.30:50000".parse().unwrap();
+            let response = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::SuccessResponse,
+                transaction_id: request.transaction_id,
+                attributes: vec![
+                    StunAttribute {
+                        kind: ATTR_XOR_RELAYED_ADDRESS,
+                        value: encode_xor_address(relayed, &request.transaction_id),
+                    },
+                    StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+                ],
+            };
+
+            // Correct transaction ID and source, but no MESSAGE-INTEGRITY.
+            relay.send_to(&response.encode().unwrap(), client).await.unwrap();
+
+            let (retry_len, retry_client) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                .await.unwrap().unwrap();
+            assert_eq!(retry_client, client);
+            assert_eq!(
+                &buffer[..retry_len],
+                first_wire.as_slice(),
+                "invalid integrity must not consume the transaction or alter retry bytes",
+            );
+
+            let authenticated = append_message_integrity(&response, &[0x44; 32]).unwrap();
+            relay.send_to(&authenticated, client).await.unwrap();
+            relayed
+        });
+
+        let lease = timeout(Duration::from_secs(2), driver.allocate(Some(&auth)))
+            .await.unwrap().unwrap();
+        assert_eq!(lease.relayed_address, relay_task.await.unwrap());
+        assert!(driver.allocation().is_some());
         driver.close();
     }
 

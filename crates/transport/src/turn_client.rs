@@ -197,9 +197,12 @@ impl TurnClientRuntime {
             .with_requested_relay_family(gateway_peer.is_ipv4());
         let provider = VkCallsTurnAuthProvider::from_credentials(credentials)
             .context("initialize VK Calls TURN authentication provider")?;
-        let mut supervisor = TurnSessionSupervisor::new(driver, provider);
+        let supervisor = TurnSessionSupervisor::new(driver, provider);
 
-        supervisor.allocate().await.context("create VK Calls TURN allocation")?;
+        let (mut supervisor, _lease) = supervisor
+            .allocate_owned()
+            .await
+            .context("create VK Calls TURN allocation")?;
         if let Err(error) = supervisor.create_permission(&[gateway_peer]).await {
             return Err(release_failed_turn_setup(
                 &mut supervisor, error, "create TURN permission for VPN gateway",
@@ -282,19 +285,28 @@ impl TurnClientRuntime {
                             Ok(())
                         }
                         Err(error) => {
-                            let cleanup = tokio::time::timeout(
-                                std::time::Duration::from_secs(3),
-                                supervisor.deallocate(),
-                            ).await;
-                            supervisor.close();
-                            match cleanup {
-                                Ok(Ok(())) => Err(error.context("TURN maintenance stopped; allocation deallocated")),
-                                Ok(Err(cleanup_error)) => Err(error.context(format!(
-                                    "TURN maintenance stopped; allocation cleanup failed: {cleanup_error:#}"
-                                ))),
-                                Err(_) => Err(error.context(
-                                    "TURN maintenance stopped; allocation cleanup timed out after 3 seconds"
-                                )),
+                            if is_turn_credentials_rejected(&error) {
+                                // A verified 401 means the active credential set is no
+                                // longer accepted. Do not send Refresh(0) with the same
+                                // rejected credentials; closing this path lets the Android
+                                // path supervisor obtain a fresh VK Calls credential set.
+                                supervisor.close();
+                                Err(error.context("TURN credentials rejected; path requires fresh credentials"))
+                            } else {
+                                let cleanup = tokio::time::timeout(
+                                    std::time::Duration::from_secs(3),
+                                    supervisor.deallocate(),
+                                ).await;
+                                supervisor.close();
+                                match cleanup {
+                                    Ok(Ok(())) => Err(error.context("TURN maintenance stopped; allocation deallocated")),
+                                    Ok(Err(cleanup_error)) => Err(error.context(format!(
+                                        "TURN maintenance stopped; allocation cleanup failed: {cleanup_error:#}"
+                                    ))),
+                                    Err(_) => Err(error.context(
+                                        "TURN maintenance stopped; allocation cleanup timed out after 3 seconds"
+                                    )),
+                                }
                             }
                         }
                     }
@@ -378,6 +390,15 @@ impl Drop for TurnClientRuntime {
     }
 }
 
+
+fn is_turn_credentials_rejected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::turn_driver::TurnDriverError>(),
+            Some(crate::turn_driver::TurnDriverError::CredentialsRejected)
+        )
+    })
+}
 
 /// Release an allocation when path setup fails after Allocate succeeded.
 async fn release_failed_turn_setup(
@@ -1732,4 +1753,110 @@ mod path_group_tests {
         group.close();
     }
 
+}
+
+#[cfg(test)]
+mod turn_credential_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn only_explicit_credential_rejection_triggers_path_recovery() {
+        let rejected_401 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected);
+        assert!(is_turn_credentials_rejected(&rejected_401));
+
+        let rejected_441 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected)
+            .context("authenticated TURN Refresh returned STUN 441");
+        assert!(is_turn_credentials_rejected(&rejected_441));
+
+        let stale_nonce_438 = anyhow::Error::new(crate::turn_driver::TurnDriverError::Challenge(
+            ghulakh_protocol::turn_auth::TurnChallenge {
+                code: 438,
+                realm: "turn.example.invalid".into(),
+                nonce: "next-nonce".into(),
+                password_algorithms: None,
+            },
+        ));
+        assert!(!is_turn_credentials_rejected(&stale_nonce_438));
+
+        let exhausted_438 = anyhow::Error::new(crate::turn_driver::TurnDriverError::CredentialsRejected)
+            .context("authenticated TURN Refresh exhausted the 438 stale-nonce retry budget");
+        assert!(is_turn_credentials_rejected(&exhausted_438));
+
+        let transient = anyhow::Error::new(crate::turn_driver::TurnDriverError::Timeout);
+        assert!(!is_turn_credentials_rejected(&transient));
+    }
+}
+
+#[cfg(test)]
+mod turn_downlink_fault_tests {
+    use super::*;
+
+    fn packet(source_port: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 24];
+        packet[0] = 0x45;
+        let length = packet.len() as u16;
+        packet[2..4].copy_from_slice(&length.to_be_bytes());
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 77, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&443u16.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_ignores_duplicate_sequences() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let first = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12000),
+        };
+        let duplicate_pending = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12999),
+        };
+        let second = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12001),
+        };
+
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
+        buffer.push(SequencedDataDatagram::new(1, duplicate_pending), now);
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
+
+        assert_eq!(buffer.pop_ready(), Some(first));
+        assert_eq!(buffer.pop_ready(), Some(second));
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_accepts_delayed_missing_packet_before_gap_deadline() {
+        let start = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let first = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12000),
+        };
+        let second = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12001),
+        };
+
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), start);
+        assert_eq!(
+            buffer.gap_deadline(),
+            Some(start + DOWNLINK_REORDER_GAP_TIMEOUT),
+        );
+        assert!(buffer.pop_ready().is_none());
+
+        let delayed_arrival = start + DOWNLINK_REORDER_GAP_TIMEOUT / 2;
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), delayed_arrival);
+        assert_eq!(buffer.pop_ready(), Some(first));
+        assert_eq!(buffer.pop_ready(), Some(second));
+        assert!(buffer.pop_ready().is_none());
+        assert_eq!(buffer.gap_deadline(), None);
+    }
 }

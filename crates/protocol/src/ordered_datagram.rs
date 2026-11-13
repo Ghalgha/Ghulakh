@@ -112,4 +112,28 @@ mod tests {
     fn rejects_sequence_envelope_that_exceeds_datagram_limit() {
         assert_eq!(SequencedDataDatagram::new(1, packet(1190)).encode(), Err(DatagramError::TooLarge));
     }
+
+    proptest::proptest! {
+        #[test]
+        fn sequenced_datagrams_round_trip_arbitrary_valid_ipv4_packets(
+            sequence in proptest::prelude::any::<u64>(),
+            mut packet_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 20..=1179),
+        ) {
+            packet_bytes[0] = 0x45;
+            let packet_len = packet_bytes.len() as u16;
+            packet_bytes[2..4].copy_from_slice(&packet_len.to_be_bytes());
+            let datagram = DataDatagram {
+                kind: IpPacketKind::Ipv4,
+                packet: packet_bytes,
+            };
+            let original = SequencedDataDatagram::new(sequence, datagram);
+            let encoded = original.encode().unwrap();
+            proptest::prop_assert_eq!(SequencedDataDatagram::decode(&encoded).unwrap(), original.clone());
+
+            let legacy = SequencedDataDatagram::unsequenced(original.datagram.clone());
+            let legacy_wire = legacy.encode().unwrap();
+            proptest::prop_assert_eq!(SequencedDataDatagram::decode(&legacy_wire).unwrap(), legacy);
+        }
+    }
+
 }

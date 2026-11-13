@@ -366,4 +366,38 @@ mod tests {
         relay_task.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn saturated_data_queue_drops_newest_without_blocking_control_delivery() {
+        let (handle, mut receivers, relay, relay_addr) = pair().await;
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 256];
+            let (_, source) = relay.recv_from(&mut buffer).await.unwrap();
+            let data = encode_channel_data(0x4001, b"payload").unwrap();
+            for _ in 0..=DATA_CAPACITY {
+                relay.send_to(&data, source).await.unwrap();
+            }
+            let control = StunMessage {
+                method: METHOD_ALLOCATE,
+                class: StunClass::SuccessResponse,
+                transaction_id: [0x55; 12],
+                attributes: vec![],
+            }.encode().unwrap();
+            relay.send_to(&control, source).await.unwrap();
+        });
+
+        handle.send_datagram(vec![1]).await.unwrap();
+        let control = timeout(Duration::from_secs(2), receivers.control.recv())
+            .await.unwrap().unwrap();
+        assert!(matches!(control, TurnInbound::Control { message, source, .. }
+            if message.transaction_id == [0x55; 12] && source == relay_addr));
+        assert_eq!(handle.stats().dropped_data_datagrams, 1);
+
+        let mut queued = 0;
+        while receivers.data.try_recv().is_ok() {
+            queued += 1;
+        }
+        assert_eq!(queued, DATA_CAPACITY);
+        relay_task.await.unwrap();
+    }
+
 }

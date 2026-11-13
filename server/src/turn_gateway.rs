@@ -59,6 +59,54 @@ const PIN_WINDOW: Duration = Duration::from_millis(250);
 const PIN_WINDOW_MAX_BYTES: usize = (DOWNLINK_RATE_BYTES_PER_SEC as usize) * 3 / 4 / 4;
 const BULK_HOLD: Duration = Duration::from_secs(2);
 
+fn destination_allowed(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            let subnet = |x: u8, y: u8, z: u8, bits: u8| {
+                let v = u32::from(o[0]) << 24 | u32::from(o[1]) << 16 | u32::from(o[2]) << 8 | u32::from(o[3]);
+                let n = u32::from(x) << 24 | u32::from(y) << 16 | u32::from(z) << 8;
+                let mask = u32::MAX << (32 - bits);
+                v & mask == n & mask
+            };
+            !a.is_private() && !a.is_loopback() && !a.is_link_local()
+                && !a.is_multicast() && !a.is_unspecified() && !a.is_broadcast()
+                && o[0] != 0 && o[0] < 224
+                && !(o[0] == 100 && (64..=127).contains(&o[1]))
+                && !subnet(192,0,0,24) && !subnet(192,0,2,24)
+                && !subnet(192,88,99,24) && !subnet(198,18,0,15)
+                && !subnet(198,51,100,24) && !subnet(203,0,113,24)
+        }
+        IpAddr::V6(a) => {
+            let s = a.segments();
+            let prefix = |p: [u16; 4], bits: u8| {
+                let whole = (bits / 16) as usize;
+                let rem = bits % 16;
+                s[..whole] == p[..whole]
+                    && (rem == 0 || (s[whole] >> (16-rem)) == (p[whole] >> (16-rem)))
+            };
+            prefix([0x2000,0,0,0],3)
+                && !prefix([0x2000,0,0,0],16) // IETF protocol assignments
+                && !prefix([0x2001,0,0,0],23) // IETF protocol assignments
+                && !prefix([0x2001,0x0db8,0,0],32) // documentation
+                && !prefix([0x2002,0,0,0],16) // 6to4
+                && !prefix([0x3f00,0,0,0],8) // IANA-reserved 3f00::/8, including documentation space
+        }
+    }
+}
+
+fn packet_endpoints(d: &DataDatagram) -> Option<(IpAddr, IpAddr)> {
+    match d.kind {
+        IpPacketKind::Ipv4 if d.packet.len() >= 20 && d.packet[0] >> 4 == 4 =>
+            Some((IpAddr::V4(Ipv4Addr::new(d.packet[12],d.packet[13],d.packet[14],d.packet[15])),
+                  IpAddr::V4(Ipv4Addr::new(d.packet[16],d.packet[17],d.packet[18],d.packet[19])))),
+        IpPacketKind::Ipv6 if d.packet.len() >= 40 && d.packet[0] >> 4 == 6 =>
+            Some((IpAddr::V6(Ipv6Addr::from(<[u8;16]>::try_from(&d.packet[8..24]).ok()?)),
+                  IpAddr::V6(Ipv6Addr::from(<[u8;16]>::try_from(&d.packet[24..40]).ok()?)))),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy)]
 struct DownlinkFlowState {
     session_id: [u8; 8],
@@ -991,12 +1039,15 @@ impl TurnGateway {
             *last_activity = Instant::now();
         }
         session.downlink_failed.store(false, Ordering::Release);
-        let source_ip = match datagram.kind {
-            IpPacketKind::Ipv4 if datagram.packet.len() >= 20 => IpAddr::V4(Ipv4Addr::new(datagram.packet[12], datagram.packet[13], datagram.packet[14], datagram.packet[15])),
-            IpPacketKind::Ipv6 if datagram.packet.len() >= 40 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(&datagram.packet[8..24]).expect("validated IPv6 source length"))),
-            _ => { self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed); return; }
+        let Some((source_ip, destination_ip)) = packet_endpoints(datagram) else {
+            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            return;
         };
         if source_ip != IpAddr::V4(session.client_ipv4) && source_ip != IpAddr::V6(session.client_ipv6) {
+            self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if !destination_allowed(destination_ip) {
             self.counters.rejected_packet.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -1427,7 +1478,7 @@ mod tests {
         *stale.last_activity.lock().unwrap() =
             Instant::now() - PATH_HEALTH_TIMEOUT - Duration::from_secs(1);
 
-        let outbound = packet(Ipv4Addr::new(203, 0, 113, 10), CLIENT_IP);
+        let outbound = packet(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP);
         gateway.send_downlink(&outbound).await.unwrap();
 
         let mut buffer = [0u8; 1500];
@@ -1527,7 +1578,7 @@ mod tests {
             bytes[2..4].copy_from_slice(&28u16.to_be_bytes());
             bytes[8] = 64;
             bytes[9] = 17;
-            bytes[12..16].copy_from_slice(&[203, 0, 113, 9]);
+            bytes[12..16].copy_from_slice(&[1, 1, 1, 1]);
             bytes[16..20].copy_from_slice(&CLIENT_IP.octets());
             bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
             bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
@@ -2113,7 +2164,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
 
-        let uplink = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 9));
+        let uplink = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
         let mut client_tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
@@ -2121,7 +2172,7 @@ mod tests {
         let received = timeout(Duration::from_secs(2), tun_rx.recv()).await.unwrap().unwrap();
         assert_eq!(received, uplink);
 
-        let downlink = packet(Ipv4Addr::new(203, 0, 113, 9), CLIENT_IP);
+        let downlink = packet(Ipv4Addr::new(1, 1, 1, 1), CLIENT_IP);
         gateway.send_downlink(&downlink).await.unwrap();
         let mut buffer = [0u8; 2048];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer)).await.unwrap().unwrap();
@@ -2155,14 +2206,14 @@ mod tests {
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
         );
-        let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(203, 0, 113, 2));
+        let spoofed = packet(Ipv4Addr::new(10, 77, 0, 99), Ipv4Addr::new(1, 1, 1, 1));
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
         relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(tun_rx.try_recv().is_err());
         assert_eq!(gateway.stats().rejected_packet, 1);
 
-        let valid = packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 2));
+        let valid = packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1));
         let valid_frame = client_tx.seal(&valid.encode().unwrap()).unwrap();
         let valid_datagram = valid_frame;
         relay.send_to(&valid_datagram, gateway_addr).await.unwrap();
@@ -2218,7 +2269,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
         let mut tx = FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer);
-        let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(203, 0, 113, 1)).encode().unwrap()).unwrap();
+        let protected = tx.seal(&packet(CLIENT_IP, Ipv4Addr::new(1, 1, 1, 1)).encode().unwrap()).unwrap();
         let datagram = protected;
         wrong_relay.send_to(&datagram, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -2245,7 +2296,7 @@ mod tests {
             tokio::spawn(async move { gateway.run().await })
         };
 
-        let destination = Ipv4Addr::new(203, 0, 113, 17);
+        let destination = Ipv4Addr::new(1, 1, 1, 17);
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY,
             CLIENT_PREFIX,
@@ -2284,7 +2335,7 @@ mod tests {
         bytes[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
         bytes[9] = 17;
         bytes[12..16].copy_from_slice(&[10, 77, 0, 2]);
-        bytes[16..20].copy_from_slice(&[203, 0, 113, 8]);
+        bytes[16..20].copy_from_slice(&[1, 1, 1, 1]);
         bytes[20..22].copy_from_slice(&source_port.to_be_bytes());
         bytes[22..24].copy_from_slice(&443u16.to_be_bytes());
         bytes
@@ -2611,14 +2662,14 @@ mod tests {
         let mut client_tx = FrameSealer::new(
             CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer,
         );
-        let spoofed = ipv6_packet("fd77:77::99".parse().unwrap(), "2001:db8::99".parse().unwrap());
+        let spoofed = ipv6_packet("fd77:77::99".parse().unwrap(), "2606:4700:4700::1111".parse().unwrap());
         let spoofed_frame = client_tx.seal(&spoofed.encode().unwrap()).unwrap();
         relay.send_to(&spoofed_frame, gateway_addr).await.unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(tun_rx.try_recv().is_err());
         assert_eq!(gateway.stats().rejected_packet, 1);
 
-        let uplink = ipv6_packet(client_ipv6, "2001:db8::99".parse().unwrap());
+        let uplink = ipv6_packet(client_ipv6, "2606:4700:4700::1111".parse().unwrap());
         let protected = client_tx.seal(&uplink.encode().unwrap()).unwrap();
         relay.send_to(&protected, gateway_addr).await.unwrap();
         assert_eq!(
@@ -2626,7 +2677,7 @@ mod tests {
             uplink,
         );
 
-        let downlink = ipv6_packet("2001:db8::99".parse().unwrap(), client_ipv6);
+        let downlink = ipv6_packet("2606:4700:4700::1111".parse().unwrap(), client_ipv6);
         gateway.send_downlink(&downlink).await.unwrap();
         let mut buffer = [0u8; 1500];
         let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
@@ -2643,6 +2694,60 @@ mod tests {
         gateway_task.abort();
     }
 
+}
+
+
+#[cfg(test)]
+mod egress_policy_tests {
+    use super::*;
+    #[test]
+    fn blocks_non_public_ipv4_and_allows_global_unicast() {
+        for a in ["10.0.0.1","127.0.0.1","169.254.1.1","100.64.0.1","192.0.2.1","198.18.0.1","198.51.100.1","203.0.113.1","224.0.0.1"] {
+            assert!(!destination_allowed(a.parse().unwrap()), "{a}");
+        }
+        assert!(destination_allowed("1.1.1.1".parse().unwrap()));
+    }
+    #[test]
+    fn blocks_non_global_and_special_ipv6_and_allows_global_unicast() {
+        for a in ["::","::1","fc00::1","fe80::1","ff02::1","2000::1","2000:ffff::1","2001:1ff:ffff::1","2001:db8::1","2001:2::1","2001:10::1","2002::1","3f00::1","3f80::1","3fc0::1","3fe0::1","3ff0::1","3ff8::1","3ffc::1","3ffe::1","3fff::1","4000::1"] {
+            assert!(!destination_allowed(a.parse().unwrap()), "{a}");
+        }
+        assert!(destination_allowed("2606:4700:4700::1111".parse().unwrap()));
+        assert!(destination_allowed("2001:4860:4860::8888".parse().unwrap()));
+        assert!(destination_allowed("2001:200::1".parse().unwrap()));
+        assert!(destination_allowed("3eff::1".parse().unwrap()));
+    }
+    #[test]
+    fn ipv4_egress_policy_checks_reserved_prefix_boundaries() {
+        for address in [
+            "0.0.0.1",
+            "100.64.0.0",
+            "100.127.255.255",
+            "192.0.0.0",
+            "192.0.0.255",
+            "192.0.2.0",
+            "192.0.2.255",
+            "198.18.0.0",
+            "198.19.255.255",
+            "198.51.100.0",
+            "198.51.100.255",
+            "203.0.113.0",
+            "203.0.113.255",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(!destination_allowed(address.parse().unwrap()), "{address}");
+        }
+
+        assert!(destination_allowed("1.1.1.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn rejects_truncated_or_wrong_version_packets() {
+        assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv4, packet: vec![0;19] }).is_none());
+        assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv6, packet: vec![0;40] }).is_none());
+    }
 }
 
 #[cfg(test)]

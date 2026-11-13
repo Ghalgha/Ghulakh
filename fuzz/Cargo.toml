@@ -25,4 +25,25 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "channel_data_decode"
+path = "fuzz_targets/channel_data_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sequenced_datagram_decode"
+path = "fuzz_targets/sequenced_datagram_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "secure_frame_decode"
+path = "fuzz_targets/secure_frame_decode.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

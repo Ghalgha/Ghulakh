@@ -85,12 +85,14 @@ class GhulakhVpnService : VpnService() {
                 // Credential acquisition performs blocking HTTPS requests. The VPN may be
                 // stopped while they are in flight, so serialize the generation check,
                 // native connect and handle publication with native shutdown.
+                var candidateCredentialsJson: String? = null
                 try {
                     if (!isCurrent(generation)) {
                         runCatching { candidate.finish() }
                             .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
                         return
                     }
+                    candidateCredentialsJson = candidate.takeTurnCredentialsJson()
                     // Native connect performs network I/O. Do not hold the
                     // shutdown lock while allocations and Noise handshakes run:
                     // a stop can invalidate this generation immediately, and
@@ -100,7 +102,7 @@ class GhulakhVpnService : VpnService() {
                         this,
                         profile.host,
                         profile.port,
-                        candidate.turnCredentialsJson,
+                        checkNotNull(candidateCredentialsJson),
                         decodeHexKey(profile.pinnedServerPublicKeyHex),
                         profile.credential,
                         DEFAULT_TURN_PATHS,
@@ -128,9 +130,9 @@ class GhulakhVpnService : VpnService() {
                 } catch (error: Throwable) {
                     candidate.finish()
                     if (error.message != "TURN_ALLOCATION_QUOTA_486" ||
-                        !TurnQuotaRetryPolicy.shouldRetryGroup(
+                        !TurnQuotaRetryPolicy.shouldRetryGroupFingerprints(
                             connectAttempt,
-                            candidate.turnCredentialsJson,
+                            candidate.credentialFingerprints,
                             rejectedCredentialFingerprints,
                         )
                     ) {
@@ -139,6 +141,8 @@ class GhulakhVpnService : VpnService() {
                     connectAttempt++
                     if (!isCurrent(generation)) return
                     Thread.sleep(TurnQuotaRetryPolicy.retryDelayMillis(connectAttempt - 1))
+                } finally {
+                    candidateCredentialsJson = null
                 }
             }
             val establishedGroup = checkNotNull(callsSession)
@@ -374,10 +378,11 @@ class GhulakhVpnService : VpnService() {
         generation: Long,
     ) {
         var credentialFingerprint: String? = null
+        var credentialsJson: String? = null
         try {
             if (!isCurrent(generation) || !recoveryToken.get()) return
-            val credentialsJson = credentialBroker.obtainCredentials()
-            credentialFingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
+            credentialsJson = credentialBroker.obtainCredentials()
+            credentialFingerprint = TurnQuotaRetryPolicy.fingerprint(checkNotNull(credentialsJson))
             val alreadyRejected = synchronized(recoveryLock) {
                 TurnQuotaRetryPolicy.wasRejected(rejectedCredentials, credentialFingerprint)
             }
@@ -389,7 +394,7 @@ class GhulakhVpnService : VpnService() {
             // group rejects installation after close(), so do not hold the
             // shutdown lock across the replacement handshake.
             val recovered = transport.nativeTurnRecoverPath(
-                this, handle, profile.host, profile.port, credentialsJson,
+                this, handle, profile.host, profile.port, checkNotNull(credentialsJson),
                 decodeHexKey(profile.pinnedServerPublicKeyHex), profile.credential, pathId,
             )
             if (!isCurrent(generation) || !recoveryToken.get()) return
@@ -413,6 +418,7 @@ class GhulakhVpnService : VpnService() {
                 updateNotification("VPN активен · восстановление TURN-пути $pathId")
             }
         } finally {
+            credentialsJson = null
             synchronized(recoveryLock) {
                 val recoveryKey = recoveryToken to pathId
                 if (pathRecoveryThreads[recoveryKey] === Thread.currentThread()) {

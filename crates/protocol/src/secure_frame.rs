@@ -352,4 +352,23 @@ mod tests {
         let payload = vec![0; MAX_PROTECTED_PAYLOAD_SIZE + 1];
         assert_eq!(sealer.seal(&payload), Err(FrameError::PayloadTooLarge));
     }
+
+    proptest::proptest! {
+        #[test]
+        fn protected_frames_round_trip_arbitrary_payloads(
+            payload in proptest::collection::vec(
+                proptest::prelude::any::<u8>(),
+                0..=MAX_PROTECTED_PAYLOAD_SIZE,
+            ),
+            sequence_count in 1usize..=4,
+        ) {
+            let mut sealer = FrameSealer::new(KEY, PREFIX, SESSION, FrameDirection::ClientToServer);
+            let mut opener = FrameOpener::new(KEY, PREFIX, SESSION, FrameDirection::ClientToServer);
+            for _ in 0..sequence_count {
+                let frame = sealer.seal(&payload).unwrap();
+                proptest::prop_assert_eq!(opener.open(&frame).unwrap(), payload.clone());
+            }
+        }
+    }
+
 }

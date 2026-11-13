@@ -29,7 +29,7 @@ cargo run --release -p ghulakh-server
 
 Разрешите входящий UDP-трафик на выбранный QUIC-порт. При выключенном TUN сервер проверяет и принимает аутентифицированные IP-датаграммы, но не маршрутизирует их.
 
-## Включение серверного IPv4 TUN
+## Включение серверного dual-stack TUN
 
 TUN-подсистема пока экспериментальная. Используйте отдельный Linux-сервер или тестовую VM с `/dev/net/tun` и правом `CAP_NET_ADMIN`. По умолчанию TUN выключен.
 
@@ -42,37 +42,92 @@ TUN-подсистема пока экспериментальная. Испол
 - очередь пакетов от клиентов к TUN: 512;
 - адреса сессий не переиспользуются до перезапуска процесса;
 - IPv4 и IPv6 маршрутизируются через dual-stack TUN; публичный IPv6 egress требует отдельно настроенного upstream route или NAT66;
-- egress ACL по умолчанию блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, IETF protocol-assignment, documentation и benchmarking диапазоны.
+- gateway проверяет назначенный source IPv4/IPv6 адрес; фильтрация непубличных destination ranges на уровне ядра включается только после установки отдельной nftables-политики ниже.
 
-Включать TUN следует только после настройки IP forwarding и firewall. Пример ниже предназначен для отдельного хоста, где этот процесс может управлять всей цепочкой FORWARD. Не вставляйте политику DROP в существующий firewall без проверки его текущих правил.
+Включайте TUN только после настройки forwarding, маршрутов и firewall. Не устанавливайте глобальную политику `FORWARD DROP` поверх действующего firewall без отдельного аудита: это может нарушить работу других сервисов.
+
+### Sysctl и WAN
+
+Сначала определите реальный внешний интерфейс:
 
 ```sh
-# Включить IPv4 forwarding до запуска сервера.
-sudo sysctl -w net.ipv4.ip_forward=1
+ip -4 route show default
+ip -6 route show default
+```
 
-# Замените eth0 на внешний интерфейс сервера.
+Для примера ниже используется `eth0`; замените его на фактический WAN. Включите forwarding:
+
+```sh
+sudo tee /etc/sysctl.d/90-ghulakh-forwarding.conf >/dev/null <<'SYSCTL'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+SYSCTL
+sudo sysctl --system
+```
+
+Если IPv6 default route на WAN получается через Router Advertisements, forwarding переводит интерфейс в режим router, где RA по умолчанию игнорируются. Включите приём RA только на WAN-интерфейсе:
+
+```sh
 WAN_IF=eth0
+sudo sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=2"
+```
 
-sudo nft add table inet ghulakh
-sudo nft 'add chain inet ghulakh forward { type filter hook forward priority filter; policy drop; }'
-sudo nft add rule inet ghulakh forward iifname "ghulakh0" oifname "$WAN_IF" ip saddr 10.77.0.0/16 accept
-sudo nft add rule inet ghulakh forward iifname "$WAN_IF" oifname "ghulakh0" ip daddr 10.77.0.0/16 ct state established,related accept
+При необходимости сохраните этот параметр в отдельном sysctl-файле после проверки, что WAN действительно использует RA.
 
-sudo nft add table ip ghulakh_nat
-sudo nft 'add chain ip ghulakh_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip ghulakh_nat postrouting ip saddr 10.77.0.0/16 oifname "$WAN_IF" masquerade
+### Установка ограниченной egress-политики
 
+Используйте поставляемый скрипт вместо ручного добавления широких правил `FORWARD ACCEPT`:
+
+```sh
+WAN_IF=eth0
+sudo bash tools/configure-egress-nftables.sh ghulakh0 "$WAN_IF" nat66
+```
+
+TUN-интерфейс может ещё не существовать: nftables сопоставляет его по имени, поэтому правила начнут действовать после создания `ghulakh0` сервером. WAN-интерфейс должен существовать при установке.
+
+Скрипт устанавливает только собственные таблицы nftables:
+
+- разрешает IPv4 из `10.77.0.0/16` и IPv6 из `fd77:77::/64` с TUN-интерфейса только в заданный WAN;
+- блокирует подмену исходного адреса, доступ клиентов к локальным сервисам сервера, непубличные IPv4/IPv6 назначения и передачу пакетов с TUN в другие интерфейсы;
+- разрешает обратный трафик к TUN только для `established,related` соединений и блокирует новые входящие соединения;
+- выполняет IPv4 masquerade; режим `nat66` (по умолчанию) также выполняет NAT66;
+- режим `routed` не создаёт NAT66 и предназначен только для сети, где upstream действительно маршрутизирует клиентский IPv6-префикс.
+
+Таблицы и цепочка имеют отдельные имена; скрипт не меняет глобальную политику FORWARD, INPUT, sysctl, маршруты или чужие таблицы. Он отказывается перезаписывать уже существующие таблицы. Для удаления только созданных им правил выполните:
+
+```sh
+sudo bash tools/configure-egress-nftables.sh --remove
+```
+
+**Важно:** `accept` в отдельной nftables base chain не отменяет `drop` в другой base chain. Действующий firewall хоста должен независимо разрешать нужный forwarding и не должен иметь конфликтующих правил. Скрипт намеренно не открывает forwarding для прочих интерфейсов: их изоляция остаётся ответственностью общей политики хоста. До включения сервера проверьте итоговый ruleset через `sudo nft list ruleset`.
+
+После проверки правил запустите сервер:
+
+```sh
 export GHULAKH_TUN_ENABLED=true
 export GHULAKH_TUN_NAME=ghulakh0
-# Установить true только после проверки sysctl и всех firewall/NAT правил.
+# Подтверждение администратора после проверки sysctl, маршрутов и firewall.
 export GHULAKH_FORWARDING_ENABLED=true
 cargo run --release -p ghulakh-server
 ```
 
-Команды nftables приведены как минимальный пример для выделенного хоста. Для существующей системы объедините правила с действующей политикой firewall, сохраните их в постоянной конфигурации и проверьте обратный трафик. Сервер не включает IP forwarding и не меняет firewall автоматически. Даже при созданном TUN Android-клиент откажется активировать маршруты, пока администратор явно не установит `GHULAKH_FORWARDING_ENABLED=true`. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности firewall.
+Не включайте `GHULAKH_FORWARDING_ENABLED` до проверки действующего firewall. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности сетевой конфигурации.
+
+## Изолированная проверка сетевой конфигурации
+
+На отдельной Linux VM или CI runner с правами root и CAP_NET_ADMIN, `iproute2`, `nftables` и `ping` выполните:
+
+```sh
+sudo bash tools/test-network-namespaces.sh
+```
+
+Скрипт создаёт четыре network namespaces и три veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
+
+Все тестовые адреса существуют только внутри изолированных namespaces; трафик не отправляется во внешнюю сеть. Проверка относится к Linux routing/NAT/firewall и не заменяет проверку source-address validation в gateway, интеграцию с реальным firewall хоста или испытание на реальном upstream.
 
 ## Ограничения
 
-Сервер назначает парные IPv4/IPv6 адреса после успешной аутентификации. Клиентские пакеты обоих семейств проверяются по назначенным source IP и проходят базовую egress ACL. Пакеты с некорректным IP, подменённым source IP или запрещённым destination IP отбрасываются. Переполнение ограниченной очереди TUN также приводит к потере пакета.
+Сервер назначает парные IPv4/IPv6 адреса после успешной аутентификации и проверяет source IP входящих пакетов по адресу сессии. Отбрасывание непубличных destination ranges, unsolicited return traffic и прочего forwarding обеспечивается host nftables-политикой только после её явной установки администратором. Без неё эти ограничения на уровне ядра не активны. Переполнение ограниченной очереди TUN также приводит к потере пакета.
 
-Эта версия обеспечивает IPv4/IPv6 packet forwarding внутри туннеля и автоматическое восстановление отказавших TURN paths. Публичный IPv6 egress, DNS-конфигурация, доступ к частным сетям, управление устройствами через API и production-grade firewall orchestration не входят в подтверждённую эксплуатационную готовность. Не включайте маршрутизацию на рабочем сервере до завершения CI, изолированных интеграционных и нагрузочных проверок.
+Эта версия обеспечивает IPv4/IPv6 packet forwarding внутри туннеля и автоматическое восстановление отказавших TURN paths. Публичный IPv6 egress требует либо upstream-маршрута к fd77:77::/64, либо NAT66, если upstream не маршрутизирует этот префикс. NAT66 не требуется при наличии корректного маршрута. DNS-конфигурация, доступ к частным сетям, управление устройствами через API и production-grade firewall orchestration не входят в подтверждённую эксплуатационную готовность. Не включайте маршрутизацию на рабочем сервере до завершения CI, изолированных интеграционных и нагрузочных проверок.

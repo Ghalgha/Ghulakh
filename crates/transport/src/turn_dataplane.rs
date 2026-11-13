@@ -246,3 +246,92 @@ mod tests {
 
 
 }
+
+
+#[cfg(test)]
+mod keepalive_fault_injection_tests {
+    use super::*;
+
+    const CHANNEL: u16 = 0x4001;
+    const SESSION: [u8; 8] = [0x31; 8];
+    const CLIENT_KEY: [u8; 32] = [0x11; 32];
+    const SERVER_KEY: [u8; 32] = [0x22; 32];
+    const CLIENT_PREFIX: [u8; 4] = [0x41; 4];
+    const SERVER_PREFIX: [u8; 4] = [0x52; 4];
+    use ghulakh_protocol::{
+        secure_frame::{keepalive_request, FrameDirection, FrameOpener, FrameSealer},
+        turn_channel_data::decode_channel_data,
+    };
+    use crate::{turn_socket_actor::TurnSocketActor, turn_udp::TurnUdpSocket};
+    use tokio::{net::UdpSocket, sync::mpsc, time::{advance, Duration}};
+
+    #[tokio::test(start_paused = true)]
+    async fn missing_authenticated_keepalive_ack_marks_path_failed_at_deadline() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
+            .await.unwrap();
+        let (actor, receivers) = TurnSocketActor::spawn(socket);
+        let (uplink_tx, uplink_rx) = mpsc::channel::<SequencedDataDatagram>(1);
+        let (downlink_tx, _downlink_rx) = mpsc::channel(1);
+        let (observed_tx, mut observed_rx) = mpsc::channel::<Vec<u8>>(4);
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            loop {
+                let (length, _) = relay.recv_from(&mut buffer).await.unwrap();
+                let frame = decode_channel_data(&buffer[..length]).unwrap();
+                observed_tx.send(frame.data.to_vec()).await.unwrap();
+            }
+        });
+
+        let plane = TurnDataPlane::new(
+            actor,
+            receivers.data,
+            relay_addr,
+            TurnDataSender::new(
+                CHANNEL,
+                FrameSealer::new(CLIENT_KEY, CLIENT_PREFIX, SESSION, FrameDirection::ClientToServer),
+            ),
+            TurnDataReceiver::new(
+                CHANNEL,
+                FrameOpener::new(SERVER_KEY, SERVER_PREFIX, SESSION, FrameDirection::ServerToClient),
+            ),
+        );
+        let plane_task = tokio::spawn(plane.run(uplink_rx, downlink_tx));
+
+        let mut gateway_opener = FrameOpener::new(
+            CLIENT_KEY,
+            CLIENT_PREFIX,
+            SESSION,
+            FrameDirection::ClientToServer,
+        );
+        advance(KEEPALIVE_INTERVAL).await;
+        let first = observed_rx.recv().await.unwrap();
+        assert_eq!(
+            gateway_opener.open(&first).unwrap(),
+            keepalive_request(0).as_slice(),
+        );
+
+        advance(KEEPALIVE_INTERVAL).await;
+        let second = observed_rx.recv().await.unwrap();
+        assert_eq!(
+            gateway_opener.open(&second).unwrap(),
+            keepalive_request(1).as_slice(),
+        );
+
+        advance(KEEPALIVE_TIMEOUT - KEEPALIVE_INTERVAL * 2 - Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(!plane_task.is_finished(), "path failed before the acknowledgement deadline");
+
+        advance(Duration::from_secs(1)).await;
+        let error = plane_task.await.unwrap().unwrap_err();
+        assert!(
+            error.to_string().contains("acknowledgements timed out"),
+            "unexpected dataplane error: {error:#}",
+        );
+
+        relay_task.abort();
+        drop(uplink_tx);
+    }
+}
