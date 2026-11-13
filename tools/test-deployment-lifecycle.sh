@@ -36,6 +36,10 @@ grep -Fq 'marker_backup' "$DEPLOY"
 grep -Fq 'mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"' "$DEPLOY"
 grep -Fq 'mv -f "$tmpdir/new-server" "$SERVER_UNIT"' "$DEPLOY"
 grep -Fq 'sha256sum "$SERVER_UNIT" "$EGRESS_UNIT" >"$marker_tmp"' "$DEPLOY"
+if grep -Fq 'install -o root -g root -m 0600 /dev/null "$MARKER"' "$DEPLOY"; then
+  echo "Deployment must not pre-create the ownership marker before transaction snapshot." >&2
+  exit 1
+fi
 grep -Fq 'expected-gid' "$DEPLOY"
 grep -Fq -- '--mode 0640' "$DEPLOY"
 grep -Fq 'choices=("0600", "0640")' "$CREDENTIAL"
