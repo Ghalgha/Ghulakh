@@ -20,8 +20,8 @@
 - Серверный gateway интегрирован с UDP ingress, authenticated session registration, TUN reader/writer и downlink route lookup. Очереди, handshake admission и основные resource limits ограничены.
 - IPv4/IPv6 packet processing и source-address validation присутствуют на клиенте и сервере. Host egress policy вынесена в отдельный nftables script и не включается автоматически.
 - Android Keystore сохраняет полный connection profile единым AES-GCM payload. При отсутствии ключа расшифрования профиль не пересоздаётся молча.
-- Rust TURN credentials используют zeroizing storage/redacted Debug. В PR №14 добавлена очистка TURN challenge strings, STUN attribute buffers (включая частичный decode), signing/verification staging buffers, transaction request/retransmission buffers, socket actor command/control/receive buffers и временных query-параметров URI. Результат CI для расширенного изменения ещё не подтверждён.
-- Android передаёт TURN JSON в native через one-shot handoff и очищает ссылки; JVM immutable String/JSONObject не гарантируют физическое затирание памяти.
+- Rust TURN credentials используют zeroizing storage/redacted Debug. PR №14 добавляет очистку TURN challenge strings, STUN attribute buffers (включая частичный decode), signing/verification staging buffers, transaction request/retransmission buffers, socket actor command/control/receive buffers и временных query-параметров URI. JNI оборачивает полученные TURN JSON и tunnel credential в `Zeroizing`; парсер Rust очищает строки промежуточного JSON дерева.
+- Kotlin/JNI lifetime audit: после сериализации удаляются ссылки из промежуточных `JSONObject`/`JSONArray`; service-local VK access token освобождается после передачи активному credential broker; `VkCallsSession`/broker очищают удерживаемые ссылки при finish. HTTP request/response byte arrays очищаются. JVM immutable `String` (включая access token, TURN JSON, session key и URL-encoded request body) нельзя физически обнулить; их копии в `org.json`, HTTP/JNI и runtime также не могут быть гарантированно стерты. Это остаточное ограничение, а не гарантия zeroization.
 - CI включает Rust tests/Clippy/audit, пять коротких fuzz targets, Android JVM unit tests/native build/debug APK и Linux network namespace test.
 
 ## Автоматически проверено
@@ -39,7 +39,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 5. Android OAuth: встроенного OAuth/login UI и автоматического обновления VK access token нет; токен вводится вручную.
 6. Server deployment: нет безопасного полного install/update/uninstall lifecycle. Администратор вручную создаёт ключи/credentials, включает sysctl, проверяет маршруты и устанавливает ограниченную nftables policy. Автоматическое изменение глобальных настроек сервера не выполняется.
 7. Supply chain: нужно отдельно подтвердить Gradle dependency locking/verification, pinning GitHub Actions по SHA и воспроизводимость сборок; наличие lockfiles/Wrapper само по себе аудит не завершает.
-8. Secrets: Rust TURN/STUN буферы рассмотрены в PR №14; остаётся CI-подтверждение изменений и аудит Kotlin String/JSON объектов, native copies, crash/backup paths и полного удаления после teardown.
+8. Secrets: аудит Rust TURN/STUN и Kotlin/JNI control-plane lifetime выполнен в PR №14. Проверены one-shot handoff, broker/session finish, late credential fetch, JNI conversion и teardown. Добавлено освобождение ссылок из промежуточных JSON containers и сокращено время удержания service-local VK access token. Неустранимое ограничение — immutable JVM strings и копии в сторонних runtime/API; crash dump/backup paths и независимая проверка остаются отдельными задачами.
 9. Security assurance: не завершены независимый review Noise/session framing, длительные fuzz/property/fault runs, нагрузочные и resource-exhaustion проверки.
 10. Производительность: нет сопоставимых реальных измерений goodput, p50/p95/p99 latency, loss, CPU, wakeups, RSS и энергопотребления.
 11. Release: CI собирает debug APK; подписанный release artifact и безопасная процедура распространения не подтверждены.
@@ -51,7 +51,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 ## Порядок завершения
 
 1. Аудит основных IPv4/IPv6 egress edge cases и изолированный тест обходного fwmark policy routing для обоих семейств включены в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Это закрывает тестирование описанной топологии, но не произвольных правил реального хоста.
-2. Завершить оставшийся аудит Kotlin/JNI secrets lifetime и подтвердить тестами Rust STUN/TURN buffer cleanup из PR №14.
+2. Завершён аудит Kotlin/JNI secrets lifetime; подтвердить новые изменения PR №14 CI на точном HEAD. Остаточные JVM immutable-string/runtime-copy ограничения документированы.
 3. Закрыть dependency locking/verification и SHA pinning CI actions.
 4. Завершить crypto composition review и длительные fuzz/property/fault/resource tests.
 5. Завершить операционную модель deployment, не затрагивающую чужие настройки сервера.
