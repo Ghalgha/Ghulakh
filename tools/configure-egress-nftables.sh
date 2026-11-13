@@ -25,7 +25,7 @@ table_is_present() {
 }
 
 table_is_owned() {
-  nft -j list table "$1" "$2" 2>/dev/null | grep -Fq '"comment":"ghulakh-egress-v1"'
+  nft -j list table "$1" "$2" 2>/dev/null | grep -Eq '"comment"[[:space:]]*:[[:space:]]*"ghulakh-egress-v1"'
 }
 
 if [[ ${1:-} == "--remove" ]]; then
