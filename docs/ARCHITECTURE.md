@@ -54,7 +54,7 @@ Ghulakh — Android VPN-клиент и серверный шлюз для за�
 - Сохранённый transaction request, retransmission copy, socket actor outbound command, inbound control wire и UDP receive buffer очищаются после завершения своего использования.
 - TURN URI query parameters очищаются при уничтожении `TurnEndpoint`, в том числе при ошибке разбора неполного списка параметров.
 
-Сетевые байты и порядок retransmission не меняются. Очистка ограничена памятью, контролируемой приложением; она не доказывает стирание копий в JVM, ядре ОС или внутренних состояниях криптографических библиотек.
+На Android credential provider снимает ссылки с промежуточных JSON containers после формирования результата; service-local VK access token освобождается после передачи активному broker. JNI преобразует входные TURN JSON и tunnel credential в контролируемые Rust-копии под `Zeroizing`. Сетевые байты и порядок retransmission не меняются. Очистка ограничена памятью, контролируемой приложением; immutable JVM `String`, внутренние копии `org.json`/HTTP/JNI, память ядра и внутренние состояния криптографических библиотек не гарантированно стираются.
 ## Абстракция транспорта
 
 Ввести интерфейс `TransportProvider`, отвечающий за создание сессии, отправку/приём кадров, состояние и закрытие. Первая и единственная реализация — VK Calls TURN. Получение credentials и TURN endpoint выделяется в отдельный интерфейс, чтобы не связывать TURN protocol engine с конкретным способом авторизации VK Calls.
