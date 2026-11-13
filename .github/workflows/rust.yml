@@ -18,6 +18,8 @@ jobs:
   rust:
     name: Rust checks
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -48,13 +50,22 @@ jobs:
         run: |
           cargo +nightly-2026-11-12 generate-lockfile --manifest-path fuzz/Cargo.toml
           cargo +nightly-2026-11-12 check --manifest-path fuzz/Cargo.toml --locked
-      - name: Upload generated fuzz lockfile
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: fuzz-cargo-lock
-          path: fuzz/Cargo.lock
-          if-no-files-found: error
-          retention-days: 3
+      - name: Commit generated fuzz lockfile to the PR branch
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git fetch origin "$PR_BRANCH"
+          git checkout -B "$PR_BRANCH" FETCH_HEAD
+          git add fuzz/Cargo.lock
+          if git diff --cached --quiet; then
+            echo "Fuzz lockfile is unchanged"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "build: lock fuzz workspace dependencies"
+          git push origin "HEAD:$PR_BRANCH"
       - name: Fuzz STUN decoder
         run: cargo +nightly-2026-11-12 fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
