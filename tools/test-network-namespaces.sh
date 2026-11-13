@@ -244,4 +244,38 @@ ip netns exec "$C" ping -6 -I fd77:77::3 -c 2 -W 2 2606:4700:4700::ffff
 ip netns exec "$U" nft list chain inet upstream_probe input \
   | grep -F 'ip6 saddr fd77:77::3' | grep -Eq 'counter packets [1-9][0-9]*'
 
-echo "PASS: IPv4 NAT, IPv6 NAT66/routing, stateful return traffic, source anti-spoofing, unrelated-ingress isolation and unsolicited-forward drops"
+# Removal must verify ownership before changing any table. A same-named table
+# created by the administrator must survive both failed installation and removal.
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" --remove
+ip netns exec "$R" nft add table ip6 ghulakh_nat6 '{ comment "administrator-owned"; }'
+if ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" rc0 ru0 nat66; then
+  echo "FAIL: installer accepted a pre-existing administrator-owned table" >&2
+  exit 1
+fi
+if ip netns exec "$R" nft list table inet ghulakh_egress >/dev/null 2>&1; then
+  echo "FAIL: installer left a partial filter table after ownership collision" >&2
+  exit 1
+fi
+if ip netns exec "$R" nft list table ip ghulakh_nat4 >/dev/null 2>&1; then
+  echo "FAIL: installer left a partial IPv4 NAT table after ownership collision" >&2
+  exit 1
+fi
+if ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" --remove; then
+  echo "FAIL: remover accepted an administrator-owned table" >&2
+  exit 1
+fi
+ip netns exec "$R" nft list table ip6 ghulakh_nat6 >/dev/null
+ip netns exec "$R" nft delete table ip6 ghulakh_nat6
+
+# A normal removal must delete all and only the marked application tables.
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" rc0 ru0 nat66
+ip netns exec "$R" bash "$SCRIPT_DIR/configure-egress-nftables.sh" --remove
+for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
+  read -r family name <<<"$table"
+  if ip netns exec "$R" nft list table "$family" "$name" >/dev/null 2>&1; then
+    echo "FAIL: owned table survived complete removal: $family $name" >&2
+    exit 1
+  fi
+done
+
+echo "PASS: IPv4 NAT, IPv6 NAT66/routing, stateful return traffic, source anti-spoofing, unrelated-ingress isolation, ownership-safe removal and unsolicited-forward drops"

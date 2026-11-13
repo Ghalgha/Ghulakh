@@ -20,11 +20,30 @@ fi
 command -v nft >/dev/null || { echo "Missing dependency: nft" >&2; exit 2; }
 command -v ip >/dev/null || { echo "Missing dependency: ip" >&2; exit 2; }
 
+table_is_present() {
+  nft list table "$1" "$2" >/dev/null 2>&1
+}
+
+table_is_owned() {
+  nft -j list table "$1" "$2" 2>/dev/null | grep -Eq '"comment"[[:space:]]*:[[:space:]]*"ghulakh-egress-v1"'
+}
+
 if [[ ${1:-} == "--remove" ]]; then
   [[ $# -eq 1 ]] || usage
-  nft delete table inet ghulakh_egress 2>/dev/null || true
-  nft delete table ip ghulakh_nat4 2>/dev/null || true
-  nft delete table ip6 ghulakh_nat6 2>/dev/null || true
+  remove_commands=()
+  for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
+    read -r family name <<<"$table"
+    if table_is_present "$family" "$name"; then
+      if ! table_is_owned "$family" "$name"; then
+        echo "Refusing to remove table without Ghulakh ownership marker: $family $name" >&2
+        exit 2
+      fi
+      remove_commands+=("delete table $family $name")
+    fi
+  done
+  if (( ${#remove_commands[@]} > 0 )); then
+    printf '%s\n' "${remove_commands[@]}" | nft -f -
+  fi
   echo "Removed Ghulakh-owned egress/NAT tables."
   exit 0
 fi
@@ -43,20 +62,22 @@ ip link show "$WAN_IF" >/dev/null 2>&1 || { echo "WAN interface not found: $WAN_
 
 for table in "inet ghulakh_egress" "ip ghulakh_nat4"; do
   read -r family name <<<"$table"
-  if nft list table "$family" "$name" >/dev/null 2>&1; then
+  if table_is_present "$family" "$name"; then
     echo "Refusing to overwrite existing table: $family $name (use --remove first)." >&2
     exit 2
   fi
 done
-if nft list table ip6 ghulakh_nat6 >/dev/null 2>&1; then
+if table_is_present ip6 ghulakh_nat6; then
   echo "Refusing to overwrite existing table: ip6 ghulakh_nat6 (use --remove first)." >&2
   exit 2
 fi
 
 # This dedicated base chain constrains only traffic entering/leaving the TUN.
 # Its accept policy does not replace or override other host firewall chains.
-nft -f - <<NFT
+{
+cat <<NFT
 table inet ghulakh_egress {
+  comment "ghulakh-egress-v1";
   chain input {
     type filter hook input priority -10; policy accept;
     # IPv6 Neighbor Discovery is required for clients to resolve the TUN
@@ -95,16 +116,17 @@ table inet ghulakh_egress {
   }
 }
 table ip ghulakh_nat4 {
+  comment "ghulakh-egress-v1";
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     ip saddr 10.77.0.0/16 oifname "$WAN_IF" counter masquerade
   }
 }
 NFT
-
 if [[ $IPV6_MODE == "nat66" ]]; then
-  nft -f - <<NFT
+  cat <<NFT
 table ip6 ghulakh_nat6 {
+  comment "ghulakh-egress-v1";
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     ip6 saddr fd77:77::/64 oifname "$WAN_IF" counter masquerade
@@ -112,5 +134,6 @@ table ip6 ghulakh_nat6 {
 }
 NFT
 fi
+} | nft -f -
 
 echo "Installed Ghulakh egress policy: TUN=$TUN_IF WAN=$WAN_IF IPv6=$IPV6_MODE"
