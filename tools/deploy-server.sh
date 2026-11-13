@@ -168,10 +168,12 @@ write_units() {
       rm -f "$MARKER" || rollback_failed=1
     fi
     if (( rollback_failed )); then
+      trap - EXIT HUP INT TERM
       printf 'CRITICAL: unit rollback was incomplete; recovery files retained in %s\\n' "$tmpdir" >&2
       return 1
     fi
     transaction_active=0
+    trap - EXIT HUP INT TERM
     rm -f "$marker_tmp" "$marker_backup"
     rm -rf -- "$tmpdir"
     return 0
