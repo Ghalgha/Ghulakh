@@ -110,7 +110,7 @@ private class AndroidProfileKeyProvider : ProfileKeyProvider {
     }
 }
 
-private class WipingByteArrayOutputStream : ByteArrayOutputStream() {
+internal open class WipingByteArrayOutputStream : ByteArrayOutputStream() {
     fun wipe() {
         buf.fill(0)
         reset()

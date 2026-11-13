@@ -50,7 +50,7 @@ class GhulakhVpnService : VpnService() {
         try {
             startForeground(NOTIFICATION_ID, notification("Получение временных credentials VK Calls"))
         } catch (error: Exception) {
-            Log.e(TAG, "Unable to start foreground VPN service", error)
+            Log.e(TAG, "Unable to start foreground VPN service: ${safeErrorSummary(error)}")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -89,7 +89,7 @@ class GhulakhVpnService : VpnService() {
                 try {
                     if (!isCurrent(generation)) {
                         runCatching { candidate.finish() }
-                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group: ${safeErrorSummary(finishError)}") }
                         return
                     }
                     candidateCredentialsJson = candidate.takeTurnCredentialsJson()
@@ -111,7 +111,7 @@ class GhulakhVpnService : VpnService() {
                     val connectedHandle = synchronized(nativeOperationLock) {
                         if (!isCurrent(generation)) {
                             runCatching { transport.nativeTurnClose(connected) }
-                                .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session", closeError) }
+                                .onFailure { closeError -> Log.w(TAG, "Failed to close stale native TURN session: ${safeErrorSummary(closeError)}") }
                             null
                         } else {
                             nativeTransport = transport
@@ -121,7 +121,7 @@ class GhulakhVpnService : VpnService() {
                     }
                     if (connectedHandle == null) {
                         runCatching { candidate.finish() }
-                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group", finishError) }
+                            .onFailure { finishError -> Log.w(TAG, "Failed to finish stale VK Calls credential group: ${safeErrorSummary(finishError)}") }
                         return
                     }
                     handle = connectedHandle
@@ -246,8 +246,8 @@ class GhulakhVpnService : VpnService() {
             tunWriter.join()
         } catch (error: Throwable) {
             if (isCurrent(generation)) {
-                Log.e(TAG, "VPN session failed", error)
-                updateNotification("Ошибка VPN · ${error.message ?: "соединение прервано"}")
+                Log.e(TAG, "VPN session failed: ${safeErrorSummary(error)}")
+                updateNotification("Ошибка VPN · ${safeErrorSummary(error)}")
             }
         } finally {
             val ownsLifecycle = isCurrent(generation)
@@ -273,7 +273,7 @@ class GhulakhVpnService : VpnService() {
             synchronized(credentialGroups) {
                 credentialGroups.forEach { group ->
                     runCatching { group.finish() }
-                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls credential group", error) }
+                        .onFailure { error -> Log.w(TAG, "Failed to finish VK Calls credential group: ${safeErrorSummary(error)}") }
                 }
                 credentialGroups.clear()
             }
@@ -308,7 +308,7 @@ class GhulakhVpnService : VpnService() {
                     }
                 }.getOrElse { error ->
                     if (isCurrent(generation) && recoveryToken.get()) {
-                        Log.w(TAG, "Unable to inspect TURN path health", error)
+                        Log.w(TAG, "Unable to inspect TURN path health: ${safeErrorSummary(error)}")
                     }
                     emptyList()
                 }
@@ -349,7 +349,7 @@ class GhulakhVpnService : VpnService() {
                                 }
                             }
                             if (isCurrent(generation) && recoveryToken.get()) {
-                                Log.w(TAG, "Unable to start TURN path $pathId recovery worker", error)
+                                Log.w(TAG, "Unable to start TURN path $pathId recovery worker: ${safeErrorSummary(error)}")
                             }
                         }
                     }
@@ -414,7 +414,7 @@ class GhulakhVpnService : VpnService() {
             val delayMillis = TurnRecoveryBackoffPolicy.delayMillis(count, jitterMillis)
             nextAttemptAt[pathId] = SystemClock.elapsedRealtime() + delayMillis
             if (isCurrent(generation) && recoveryToken.get()) {
-                Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delayMillis}ms", error)
+                Log.w(TAG, "TURN path $pathId recovery failed; retry in ${delayMillis}ms: ${safeErrorSummary(error)}")
                 updateNotification("VPN активен · восстановление TURN-пути $pathId")
             }
         } finally {
@@ -439,8 +439,8 @@ class GhulakhVpnService : VpnService() {
 
     private fun failSession(generation: Long, startId: Int, message: String, error: Throwable) {
         if (!stopTunnel(generation)) return
-        Log.e(TAG, message, error)
-        updateNotification("$message: ${error.message ?: "ошибка"}")
+        Log.e(TAG, "$message: ${safeErrorSummary(error)}")
+        updateNotification("$message: ${safeErrorSummary(error)}")
         // Do not stop a service instance that has since received a newer start request.
         stopSelfResult(startId)
     }
@@ -484,7 +484,7 @@ class GhulakhVpnService : VpnService() {
                 try {
                     transport?.nativeTurnClose(handle)
                 } catch (error: Throwable) {
-                    Log.w(TAG, "Failed to close native TURN session", error)
+                    Log.w(TAG, "Failed to close native TURN session: ${safeErrorSummary(error)}")
                 }
             }
         }

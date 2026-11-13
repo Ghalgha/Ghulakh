@@ -165,7 +165,7 @@ internal object TurnQuotaRetryPolicy {
 }
 
 
-private class FingerprintWipingByteArrayOutputStream : ByteArrayOutputStream() {
+internal open class FingerprintWipingByteArrayOutputStream : ByteArrayOutputStream() {
     fun wipe() {
         buf.fill(0)
         reset()
