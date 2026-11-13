@@ -1627,6 +1627,7 @@ mod cancelled_allocate_cleanup_tests {
         let socket = crate::turn_udp::TurnUdpSocket::bind(
             "127.0.0.1:0".parse().unwrap(), relay_addr,
         ).await.unwrap();
+        let (authenticated_tx, authenticated_rx) = oneshot::channel();
         let (continue_tx, continue_rx) = oneshot::channel();
 
         let relay_task = tokio::spawn(async move {
@@ -1651,6 +1652,7 @@ mod cancelled_allocate_cleanup_tests {
             assert!(authenticated.attributes.iter().any(|a|
                 a.kind == ATTR_NONCE && a.value == b"cancel-nonce"
             ));
+            authenticated_tx.send(()).unwrap();
             continue_rx.await.unwrap();
 
             let relayed: SocketAddr = "198.51.100.44:50000".parse().unwrap();
@@ -1702,12 +1704,7 @@ mod cancelled_allocate_cleanup_tests {
 
         // Wait until the authenticated Allocate is on the wire, then cancel
         // only the caller. The independently owned worker must finish cleanup.
-        let mut probe = [0u8; 1];
-        // The relay task owns the socket; the synchronization signal is sent
-        // by the test after observing the authenticated request through a
-        // separate channel in the relay task below.
-        let _ = &mut probe;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        timeout(Duration::from_secs(3), authenticated_rx).await.unwrap().unwrap();
         allocation_task.abort();
         let _ = continue_tx.send(());
         relay_task.await.unwrap();
