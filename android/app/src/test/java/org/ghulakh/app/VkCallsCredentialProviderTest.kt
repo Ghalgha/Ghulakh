@@ -1,6 +1,7 @@
 package org.ghulakh.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Test
 
@@ -47,6 +48,40 @@ class VkCallsCredentialProviderTest {
         broker.finish()
         broker.finish()
         assertEquals("each replacement session is finished exactly once", 2, finishedSessions)
+    }
+
+    @Test
+    fun credentialModelsRedactSecretsFromDiagnosticStrings() {
+        val credentialJson = credentialsJson("turn-user", "turn-password-secret")
+        val session = VkCallsSession(
+            turnCredentialsJson = credentialJson,
+            apiUrl = "https://calls.example.invalid/",
+            sessionKey = "calls-session-secret",
+            conversationId = "conversation-secret",
+            finishAction = {},
+        )
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "vk-access-token-secret",
+            conversationId = "conversation-secret",
+            initialCredentialsJson = credentialJson,
+            sessionFetcher = { error("not used") },
+        )
+        val group = VkCallsCredentialGroup(
+            turnCredentialsJson = credentialJson,
+            ownerSession = session,
+            credentialBroker = broker,
+        )
+
+        val diagnostics = listOf(session.toString(), group.toString()).joinToString("\\n")
+        for (secret in listOf(
+            "turn-password-secret",
+            "calls-session-secret",
+            "conversation-secret",
+            "vk-access-token-secret",
+        )) {
+            assertFalse("diagnostics exposed $secret", diagnostics.contains(secret))
+        }
+        assertFalse(diagnostics.contains("turn-user"))
     }
 
     private fun credentialsJson(username: String, password: String): String =
