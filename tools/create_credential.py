@@ -24,8 +24,8 @@ def open_verified_digest(path: Path, expected_uid: int, expected_gid: int, mode:
     dir_fd = os.open(parent, dir_flags)
     try:
         dir_stat = os.fstat(dir_fd)
-        if not stat.S_ISDIR(dir_stat.st_mode) or dir_stat.st_uid != 0:
-            raise ValueError("digest parent must be a root-owned directory")
+        if not stat.S_ISDIR(dir_stat.st_mode) or dir_stat.st_uid != expected_uid:
+            raise ValueError("digest parent owner does not match expected owner")
 
         flags = os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = os.open(name, flags, dir_fd=dir_fd)
