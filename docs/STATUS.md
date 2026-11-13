@@ -1,6 +1,6 @@
 # Текущий статус проекта
 
-Дата сверки: 2026-11-13. Ветка: main. Текущий commit: 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (merge PR №3). Последний CI для вошедшего в merge head eb92fd6e1628508c22c5eabf0f8ae5b291ed13d6: все три проверки успешны.
+Дата сверки: 2026-11-13. Базовый main: `d62e9b45cde0f5ee6502196128eb5d60041304f2` (после PR №11). Открытый PR №12 добавляет IPv4/IPv6 fwmark policy-routing regression test; его head `298fd96b510166e79700ecdb185eab5258e73379` прошёл все три CI jobs. Изменения PR ещё не входят в main.
 
 Документ отделяет наличие реализации и автоматических тестов от подтверждения работы с внешней сетью. Успешный CI не доказывает совместимость с VK Calls relay или production readiness.
 
@@ -25,7 +25,7 @@
 
 ## Автоматически проверено
 
-Для merge head eb92fd6e1628508c22c5eabf0f8ae5b291ed13d6 успешно завершились Rust checks, Android debug build и Linux network namespace integration. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic и firewall drop cases. Это не тест реального VPS или Android туннеля.
+Для merge head eb92fd6e1628508c22c5eabf0f8ae5b291ed13d6 успешно завершились Rust checks, Android debug build и Linux network namespace integration. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic, firewall drop cases, а в PR №12 — IPv4/IPv6 fwmark policy routing через посторонний интерфейс с подтверждением, что пакеты не достигают rogue peer и попадают под TUN catch-all drop. Это не тест реального VPS или Android туннеля.
 
 Mock UDP/integration tests покрывают TURN control/data composition, Noise handshake, session registration, protected uplink/downlink, multipath, path loss/replacement, IPv4/IPv6 forwarding, ordering, lifecycle races и cleanup. Mock relay не является реализацией VK TURN и не подтверждает внешний auth profile.
 
@@ -45,11 +45,11 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 
 ## Эксплуатационные ограничения
 
-Не использовать проект как production VPN. Не включать forwarding на рабочем сервере до ручной проверки firewall, маршрутов, NAT и правил провайдера. Скрипт tools/configure-egress-nftables.sh управляет только собственными таблицами inet ghulakh_egress, ip ghulakh_nat4 и ip6 ghulakh_nat6; он не меняет глобальные sysctl, маршруты, default FORWARD policy, INPUT rules или чужие таблицы. Его accept verdict не отменяет drop в другой base chain.
+Не использовать проект как production VPN. Не включать forwarding на рабочем сервере до ручной проверки firewall, маршрутов, NAT и правил провайдера. Скрипт tools/configure-egress-nftables.sh устанавливает собственные таблицы `inet ghulakh_egress`, `ip ghulakh_nat4` и `ip6 ghulakh_nat6` одной nftables batch transaction. Таблицы помечены ownership marker `ghulakh-egress-v1`; `--remove` предварительно проверяет владельца всех существующих таблиц и отказывается удалять чужие. Установка не меняет глобальные sysctl, маршруты, default FORWARD policy, INPUT rules или чужие таблицы. Его accept verdict не отменяет drop в другой base chain.
 
 ## Порядок завершения
 
-1. Закончить аудит IPv4/IPv6 egress edge cases и расширить изолированные тесты только при наличии пробелов.
+1. Завершён аудит основных IPv4/IPv6 egress edge cases; PR №12 добавляет изолированный тест обходного fwmark policy routing для обоих семейств. После слияния актуализировать ссылку на merge commit.
 2. Закончить аудит секретов и lifetime на Kotlin/JNI/Rust границах.
 3. Закрыть dependency locking/verification и SHA pinning CI actions.
 4. Завершить crypto composition review и длительные fuzz/property/fault/resource tests.
