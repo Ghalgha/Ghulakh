@@ -11,6 +11,7 @@ use std::{
 };
 
 use crate::stun::{StunClass, StunMessage};
+use zeroize::{Zeroize, Zeroizing};
 
 pub const DEFAULT_RTO: Duration = Duration::from_millis(500);
 pub const DEFAULT_MAX_REQUESTS: u8 = 7;
@@ -76,6 +77,14 @@ pub enum TransactionEvent {
     },
 }
 
+impl Drop for TransactionEvent {
+    fn drop(&mut self) {
+        if let Self::Retransmit { request, .. } = self {
+            request.zeroize();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedResponse {
     pub transaction_id: [u8; 12],
@@ -89,7 +98,7 @@ pub struct MatchedResponse {
 struct PendingTransaction {
     method: u16,
     destination: SocketAddr,
-    request: Vec<u8>,
+    request: Zeroizing<Vec<u8>>,
     requests_sent: u8,
     retransmitted: bool,
     next_deadline: Instant,
@@ -122,6 +131,7 @@ impl TransactionManager {
         now: Instant,
         policy: TransactionPolicy,
     ) -> Result<[u8; 12], TransactionError> {
+        let request = Zeroizing::new(request);
         policy.validate()?;
         let decoded = StunMessage::decode(&request).map_err(|_| TransactionError::InvalidRequest)?;
         if decoded.class != StunClass::Request {
@@ -193,7 +203,7 @@ impl TransactionManager {
                 pending.retransmitted = true;
                 events.push(TransactionEvent::Retransmit {
                     transaction_id: id,
-                    request: pending.request.clone(),
+                    request: pending.request.to_vec(),
                     attempt: pending.requests_sent,
                     destination: pending.destination,
                 });
