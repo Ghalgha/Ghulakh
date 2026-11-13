@@ -90,6 +90,40 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
         anyhow::bail!("TURN Allocate retry loop exhausted")
     }
 
+    /// Run initial allocation in an independently owned task.
+    ///
+    /// If the caller is cancelled, the task continues to own the TURN control
+    /// plane. A late successful Allocate is retired with authenticated
+    /// Refresh(0), rather than leaving a relay-side allocation behind.
+    pub async fn allocate_owned(
+        self,
+    ) -> Result<(Self, ghulakh_protocol::turn_allocation::AllocationLease)>
+    where
+        P: 'static,
+    {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut supervisor = self;
+            match supervisor.allocate().await {
+                Ok(lease) => {
+                    if let Err(payload) = result_tx.send(Ok((supervisor, lease))) {
+                        if let Ok((mut supervisor, _lease)) = payload {
+                            let _ = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                supervisor.deallocate(),
+                            ).await;
+                            supervisor.close();
+                        }
+                    }
+                }
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                }
+            }
+        });
+        result_rx.await.context("TURN Allocate worker stopped")?
+    }
+
     /// Refresh the active allocation and recover from a verified 438 response.
     pub async fn refresh(&mut self, lifetime_seconds: u32) -> Result<Option<ghulakh_protocol::turn_allocation::AllocationLease>> {
         for attempt in 0..=self.max_challenge_retries {
