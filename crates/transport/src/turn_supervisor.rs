@@ -104,6 +104,10 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                         return Err(error).context("unexpected TURN Refresh challenge");
                     }
                     if attempt == self.max_challenge_retries {
+                        if challenge.code == 438 {
+                            return Err(TurnDriverError::CredentialsRejected.into())
+                                .context("TURN Refresh stale-nonce retry limit reached; credentials require replacement");
+                        }
                         return Err(error).context("TURN Refresh stale-nonce retry limit reached");
                     }
                     let next = self.provider.context_for_challenge(challenge).await
@@ -1420,6 +1424,10 @@ mod stale_nonce_retry_limit_tests {
         let before = supervisor.allocate().await.unwrap();
         let error = supervisor.refresh(600).await.unwrap_err();
         assert!(error.to_string().contains("stale-nonce retry limit reached"));
+        assert!(error.chain().any(|cause| matches!(
+            cause.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::CredentialsRejected)
+        )), "exhausted authenticated 438 must trigger credential replacement: {error:#}");
         assert_eq!(supervisor.provider.calls, MAX_CHALLENGE_RETRIES + 1);
         let after = supervisor.allocation().expect("stale-nonce exhaustion must retain confirmed lease");
         assert_eq!(after.relayed_address, before.relayed_address);
