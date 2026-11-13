@@ -1801,7 +1801,7 @@ mod turn_credential_recovery_tests {
         };
 
         buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
-        buffer.push(SequencedDataDatagram::new(1, duplicate_pending, now), now);
+        buffer.push(SequencedDataDatagram::new(1, duplicate_pending), now, now);
         buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
         buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
         buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
