@@ -129,14 +129,14 @@ impl NoiseServerKeyPair {
 
     /// Load a persisted key pair and verify that its public/private halves match.
     pub fn from_bytes(
-        private_key: Vec<u8>,
+        private_key: Zeroizing<Vec<u8>>,
         public_key: Vec<u8>,
     ) -> Result<Self, SessionHandshakeError> {
         if private_key.len() != 32 || public_key.len() != 32 {
             return Err(SessionHandshakeError::ServerIdentityMismatch);
         }
         let keypair = Self {
-            private_key: Zeroizing::new(private_key),
+            private_key,
             public_key,
         };
         let (client, first) = NoiseClientHandshake::new(keypair.public_key(), b"key-pair-check")?;
@@ -556,14 +556,14 @@ mod tests {
     fn persisted_server_key_pair_is_validated() {
         let generated = NoiseServerKeyPair::generate().unwrap();
         let loaded = NoiseServerKeyPair::from_bytes(
-            generated.private_key_bytes().to_vec(),
+            Zeroizing::new(generated.private_key_bytes().to_vec()),
             generated.public_key().to_vec(),
         ).unwrap();
         assert_eq!(loaded.public_key(), generated.public_key());
 
         let wrong = NoiseServerKeyPair::generate().unwrap();
         assert!(NoiseServerKeyPair::from_bytes(
-            generated.private_key_bytes().to_vec(),
+            Zeroizing::new(generated.private_key_bytes().to_vec()),
             wrong.public_key().to_vec(),
         ).is_err());
     }
