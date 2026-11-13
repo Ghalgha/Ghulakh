@@ -85,28 +85,43 @@ ensure_account() {
     IFS=: read -r account_name account_password account_uid account_gid account_gecos account_home account_shell <<<"$account_entry"
     [[ "$account_home" == /var/lib/ghulakh && "$account_shell" == /usr/sbin/nologin ]] || die "Existing ghulakh account has an unexpected home or shell; refusing to adopt it."
   fi
-  for directory in /var/lib/ghulakh "$CONFIG"; do
-    if [[ -e "$directory" ]]; then
-      [[ -d "$directory" && ! -L "$directory" ]] || die "Refusing non-directory or symlink path: $directory"
-      [[ $(stat -c '%U:%G' "$directory") == "$NAME:$NAME" ]] || die "Existing directory $directory must be owned by $NAME:$NAME; it was left unchanged."
-    else
-      install -d -o "$NAME" -g "$NAME" -m 0700 "$directory"
-    fi
-  done
+  if [[ -e /var/lib/ghulakh ]]; then
+    [[ -d /var/lib/ghulakh && ! -L /var/lib/ghulakh ]] || die "Refusing non-directory or symlink path: /var/lib/ghulakh"
+    [[ $(stat -c '%U:%G:%a' /var/lib/ghulakh) == "$NAME:$NAME:700" ]] || die "Existing /var/lib/ghulakh must be owned by $NAME:$NAME mode 0700."
+  else
+    install -d -o "$NAME" -g "$NAME" -m 0700 /var/lib/ghulakh
+  fi
+  if [[ -e "$CONFIG" ]]; then
+    [[ -d "$CONFIG" && ! -L "$CONFIG" ]] || die "Refusing non-directory or symlink path: $CONFIG"
+    [[ $(stat -c '%U:%G:%a' "$CONFIG") == "root:$NAME:750" ]] || die "Existing $CONFIG must be owned by root:$NAME mode 0750."
+  else
+    install -d -o root -g "$NAME" -m 0750 "$CONFIG"
+  fi
 }
 ensure_config() {
   if [[ ! -e "$CREDENTIALS" ]]; then
-    install -o "$NAME" -g "$NAME" -m 0600 /dev/null "$CREDENTIALS"
+    install -o root -g "$NAME" -m 0640 /dev/null "$CREDENTIALS"
   else
     safe_file "$CREDENTIALS" || die "Credential digest path must be a regular file."
-    [[ $(stat -c '%U:%G:%a' "$CREDENTIALS") == "$NAME:$NAME:600" ]] || die "Credential digest file must be owned by $NAME:$NAME mode 0600; left unchanged."
+    [[ $(stat -c '%U:%G:%a' "$CREDENTIALS") == "root:$NAME:640" ]] || die "Credential digest file must be owned by root:$NAME mode 0640; left unchanged."
   fi
   if [[ -e "$NOISE_PRIVATE" || -e "$NOISE_PUBLIC" ]]; then
     safe_file "$NOISE_PRIVATE" && safe_file "$NOISE_PUBLIC" || die "Both Noise key files must be regular files."
     [[ $(stat -c '%U:%G:%a' "$NOISE_PRIVATE") == "$NAME:$NAME:600" ]] || die "Noise private key must be owned by $NAME:$NAME mode 0600."
     [[ $(stat -c '%U:%G:%a' "$NOISE_PUBLIC") == "$NAME:$NAME:644" ]] || die "Noise public key must be owned by $NAME:$NAME mode 0644."
   else
-    runuser -u "$NAME" -- "$STAGED_BINARY" --generate-noise-keypair "$NOISE_PRIVATE" "$NOISE_PUBLIC" >/dev/null
+    local generated_private="/var/lib/ghulakh/noise-private.generated"
+    local generated_public="/var/lib/ghulakh/noise-public.generated"
+    [[ ! -e "$generated_private" && ! -e "$generated_public" ]] || die "Stale temporary Noise key files exist; inspect them before retrying."
+    runuser -u "$NAME" -- "$STAGED_BINARY" --generate-noise-keypair "$generated_private" "$generated_public" >/dev/null
+    safe_file "$generated_private" && safe_file "$generated_public" || die "Noise key generation did not produce regular files."
+    install -o "$NAME" -g "$NAME" -m 0600 "$generated_private" "$NOISE_PRIVATE"
+    if ! install -o "$NAME" -g "$NAME" -m 0644 "$generated_public" "$NOISE_PUBLIC"; then
+      rm -f "$NOISE_PRIVATE"
+      rm -f "$generated_private" "$generated_public"
+      die "Could not install the public Noise key; partial keypair was removed."
+    fi
+    rm -f "$generated_private" "$generated_public"
   fi
   if [[ ! -e "$ENV_FILE" ]]; then
     local tmp
@@ -247,7 +262,9 @@ deploy() {
   if ! grep -Eq "^[[:space:]]*[0-9a-f]{64}[[:space:]]*$" "$CREDENTIALS"; then
     [[ -z "$old_target" ]] || die "No valid device credential digests exist; update refused."
     printf "Initial device credential (copy it now; it is shown only once):\n"
-    runuser -u "$NAME" -- python3 "$release_dir/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS"
+    python3 "$release_dir/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640
+    chown root:"$NAME" "$CREDENTIALS"
+    chmod 0640 "$CREDENTIALS"
   fi
   printf "Pinned Noise server public key (hex):\n"
   cat "$NOISE_PUBLIC"
@@ -287,7 +304,9 @@ credential() {
   require_root
   [[ -f "$MARKER" && -L "$CURRENT" ]] || die "Managed deployment is not installed."
   [[ -s "$CURRENT/$CREDENTIAL_TOOL_NAME" ]] || die "Credential tool is missing."
-  runuser -u "$NAME" -- python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS"
+  python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640
+  chown root:"$NAME" "$CREDENTIALS"
+  chmod 0640 "$CREDENTIALS"
 }
 status() {
   require_root
@@ -299,12 +318,12 @@ uninstall() {
   [[ -f "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
+    for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
+      safe_file "$unit" && grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to remove unmanaged or modified unit: $unit"
+    done
   else
     [[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]] || die "Unverified partial systemd installation found; refusing uninstall."
   fi
-  for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
-    safe_file "$unit" && grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to remove unmanaged or modified unit: $unit"
-  done
   printf 'This stops the VPN and removes its units, releases and owned egress tables.\n'
   printf 'Configuration, keys, credentials, service account, sysctls and routes are preserved.\n'
   printf 'Type REMOVE GHULAKH to continue: '

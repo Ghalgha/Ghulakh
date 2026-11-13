@@ -26,7 +26,7 @@ cargo build --release --locked -p ghulakh-server
 
 ## Первая установка
 
-Если на сервере уже существует /etc/ghulakh или /var/lib/ghulakh, не меняйте владельца автоматически: установщик остановится, если каталог не принадлежит service account. Выполните миграцию прав вручную после проверки содержимого.
+Если на сервере уже существуют /etc/ghulakh или /var/lib/ghulakh, установщик проверит владельца и права каталогов и остановится при несовпадении. Требуются /etc/ghulakh root:ghulakh 0750 и /var/lib/ghulakh ghulakh:ghulakh 0700; мигрируйте права вручную после проверки содержимого.
 
 Скопируйте бинарник и каталог tools/ на сервер, сохранив рядом файлы:
 - deploy-server.sh
@@ -50,7 +50,7 @@ sudo bash tools/deploy-server.sh install \
 - ghulakh-egress.service: устанавливает только принадлежащие приложению nftables tables через configure-egress-nftables.sh; при остановке удаляет только эти таблицы после проверки ownership marker;
 - ghulakh-server.service: запускает сервер от непривилегированного пользователя ghulakh с CAP_NET_ADMIN и доступом к /dev/net/tun.
 
-Сервис не может менять sysctl благодаря systemd hardening. Серверный EnvironmentFile находится в /etc/ghulakh/server.env. Для согласованности egress policy установщик проверяет фиксированные значения TUN name, gateway bind (0.0.0.0:4434), forwarding flags и путей к секретам; изменение этих параметров требует отдельного изменения deployment unit и firewall policy.
+Каталог /etc/ghulakh принадлежит root:ghulakh (0750), EnvironmentFile и credential digest — root:ghulakh (0640), а Noise private key доступен service account только через отдельный файл. Сервер не может заменять конфигурацию или credential digest через права каталога. Сервис не может менять sysctl благодаря systemd hardening. Серверный EnvironmentFile находится в /etc/ghulakh/server.env. Для согласованности egress policy установщик проверяет фиксированные значения TUN name, gateway bind (0.0.0.0:4434), forwarding flags и путей к секретам; изменение этих параметров требует отдельного изменения deployment unit и firewall policy.
 
 ## Добавление устройства
 

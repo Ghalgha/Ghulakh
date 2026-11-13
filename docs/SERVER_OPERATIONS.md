@@ -16,10 +16,11 @@ sudo journalctl -u ghulakh-server.service -f
 
 ## Секреты и конфигурация
 
-- /etc/ghulakh/server.env: EnvironmentFile, root-owned, group ghulakh, mode 0640.
+- /etc/ghulakh: root:ghulakh, mode 0750; каталог не доступен на запись service account.
+- /etc/ghulakh/server.env: EnvironmentFile, root:ghulakh, mode 0640.
+- /etc/ghulakh/device-credentials.sha256: только SHA-256 digests, root:ghulakh, mode 0640; service account читает файл, но не может его заменить или изменить.
 - /etc/ghulakh/noise_private.hex: private Noise key, service-owned, mode 0600.
 - /etc/ghulakh/noise_public.hex: public Noise key, service-owned, mode 0644.
-- /etc/ghulakh/device-credentials.sha256: только SHA-256 digests, service-owned, mode 0600.
 - /var/lib/ghulakh: persistent service state directory.
 
 Не заменяйте Noise keypair при обычном обновлении. Устройства закрепляют публичный ключ сервера. Device credentials выпускаются отдельно для каждого устройства командой deploy-server.sh credential.

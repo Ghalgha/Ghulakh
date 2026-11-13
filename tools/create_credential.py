@@ -17,7 +17,14 @@ def main() -> int:
         type=Path,
         help="server-side file to which the credential digest is appended",
     )
+    parser.add_argument(
+        "--mode",
+        choices=("0600", "0640"),
+        default="0600",
+        help="permissions for the digest file (default: 0600)",
+    )
     args = parser.parse_args()
+    file_mode = int(args.mode, 8)
 
     credential = secrets.token_hex(32)
     digest = hashlib.sha256(credential.encode("ascii")).hexdigest()
@@ -25,13 +32,13 @@ def main() -> int:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    descriptor = os.open(path, flags, 0o600)
+    descriptor = os.open(path, flags, file_mode)
     with os.fdopen(descriptor, "a", encoding="ascii") as digest_file:
         digest_file.write(digest + "\n")
         digest_file.flush()
         os.fsync(digest_file.fileno())
 
-    os.chmod(path, 0o600)
+    os.chmod(path, file_mode)
     sys.stdout.write(credential + "\n")
     sys.stderr.write(
         "Credential created. Store the displayed secret securely; "
