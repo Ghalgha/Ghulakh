@@ -46,20 +46,20 @@ def main():
         assert secret not in regular.read_text(encoding="ascii")
 
         target = root / "target"
-        target.write_text("untouched\\n", encoding="ascii")
+        target.write_text("untouched\n", encoding="ascii")
         target.chmod(0o640)
         symlink = root / "symlink"
         symlink.symlink_to(target)
         expect_refused(symlink, root)
-        assert target.read_text(encoding="ascii") == "untouched\\n"
+        assert target.read_text(encoding="ascii") == "untouched\n"
 
         wrong_mode = root / "wrong-mode"
-        wrong_mode.write_text("original\\n", encoding="ascii")
+        wrong_mode.write_text("original\n", encoding="ascii")
         wrong_mode.chmod(0o600)
         expect_refused(wrong_mode, root)
 
         linked = root / "hardlinked"
-        linked.write_text("original\\n", encoding="ascii")
+        linked.write_text("original\n", encoding="ascii")
         linked.chmod(0o640)
         os.link(linked, root / "hardlink-alias")
         expect_refused(linked, root)
@@ -69,14 +69,14 @@ def main():
         expect_refused(fifo, root)
 
         wrong_gid = root / "wrong-gid"
-        wrong_gid.write_text("original\\n", encoding="ascii")
+        wrong_gid.write_text("original\n", encoding="ascii")
         wrong_gid.chmod(0o640)
         expect_refused(wrong_gid, root, gid=os.getegid() + 1)
 
         parent_target = root / "real-parent"
         parent_target.mkdir()
         parent_file = parent_target / "digests"
-        parent_file.write_text("original\\n", encoding="ascii")
+        parent_file.write_text("original\n", encoding="ascii")
         parent_file.chmod(0o640)
         parent_link = root / "linked-parent"
         parent_link.symlink_to(parent_target, target_is_directory=True)
