@@ -80,9 +80,9 @@ ensure_account() {
     [[ ! -e "$MARKER" && ! -e "$BASE" ]] || die "Managed marker exists but service account is missing."
     useradd --system --home-dir /var/lib/ghulakh --no-create-home --shell /usr/sbin/nologin "$NAME"
   else
-    local account_entry account_home account_shell
+    local account_entry account_name account_password account_uid account_gid account_gecos account_home account_shell
     account_entry="$(getent passwd "$NAME")"
-    IFS=: read -r _ _ _ _ account_home account_shell <<<"$account_entry"
+    IFS=: read -r account_name account_password account_uid account_gid account_gecos account_home account_shell <<<"$account_entry"
     [[ "$account_home" == /var/lib/ghulakh && "$account_shell" == /usr/sbin/nologin ]] || die "Existing ghulakh account has an unexpected home or shell; refusing to adopt it."
   fi
   for directory in /var/lib/ghulakh "$CONFIG"; do
@@ -158,7 +158,7 @@ Type=simple
 User=$NAME
 Group=$NAME
 EnvironmentFile=$ENV_FILE
-ExecStartPre=/bin/sh -c 'test "\$(cat /proc/sys/net/ipv4/ip_forward)" = 1 && test "\$(cat /proc/sys/net/ipv6/conf/all/forwarding)" = 1 && test -c /dev/net/tun'
+ExecStartPre=/usr/bin/test -c /dev/net/tun
 ExecStart=$CURRENT/ghulakh-server
 Restart=on-failure
 RestartSec=3
@@ -211,13 +211,13 @@ deploy() {
   ensure_account
   install -d -o root -g root -m 0755 "$BASE" "$RELEASES"
   if [[ ! -e "$MARKER" ]]; then install -o root -g root -m 0600 /dev/null "$MARKER"; fi
-  release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-20)"
+  release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-64)"
   release_dir="$RELEASES/$release_id"
   if [[ -e "$release_dir" || -L "$release_dir" ]]; then
     [[ -d "$release_dir" && ! -L "$release_dir" && $(stat -c "%U:%G" "$release_dir") == root:root ]] || die "Release directory is not a root-owned real directory."
     safe_file "$release_dir/ghulakh-server" && safe_file "$release_dir/$EGRESS_SCRIPT_NAME" && safe_file "$release_dir/$CREDENTIAL_TOOL_NAME" || die "Release contains a missing file or symlink."
     local existing_id
-    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-20)"
+    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)"
     [[ "$existing_id" == "$release_id" ]] || die "Existing release content does not match its release identifier."
   else
     install -d -o root -g root -m 0755 "$release_dir"
