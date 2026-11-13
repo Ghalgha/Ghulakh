@@ -50,7 +50,7 @@ data class ConnectionProfile(
     }
 }
 
-class CredentialStoreException(message: String, cause: Throwable? = null) : Exception(message, cause) {
+open class CredentialStoreException(message: String, cause: Throwable? = null) : Exception(message, cause) {
     class KeyUnavailable(cause: Throwable? = null) :
         CredentialStoreException("Ключ Android Keystore отсутствует. Сохранённый профиль нельзя расшифровать; введите параметры заново.", cause)
 
