@@ -205,6 +205,47 @@ class VkCallsCredentialProviderTest {
         assertFalse(runCatching { broker.obtainCredentials() }.isSuccess)
     }
 
+    @Test
+    fun concurrentCredentialFetchesAreAllClosedWhenBrokerFinishes() {
+        val workers = 8
+        val fetchesStarted = java.util.concurrent.CountDownLatch(workers)
+        val releaseFetches = java.util.concurrent.CountDownLatch(1)
+        val finishedSessions = java.util.concurrent.atomic.AtomicInteger()
+        val fetchCount = java.util.concurrent.atomic.AtomicInteger()
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "access-token",
+            conversationId = "conversation",
+            initialCredentialsJson = credentialsJson("initial-user", "initial-secret"),
+            sessionFetcher = {
+                val index = fetchCount.incrementAndGet()
+                fetchesStarted.countDown()
+                check(releaseFetches.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                VkCallsSession(
+                    turnCredentialsJson = credentialsJson("late-user-$index", "late-secret-$index"),
+                    apiUrl = "https://calls.example.invalid",
+                    sessionKey = "session-key",
+                    conversationId = "conversation",
+                    finishAction = { finishedSessions.incrementAndGet() },
+                )
+            },
+        )
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(workers)
+        val results = (0 until workers).map {
+            executor.submit<Boolean> {
+                runCatching { broker.obtainCredentials() }.isFailure
+            }
+        }
+
+        assertEquals(true, fetchesStarted.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        broker.finish()
+        releaseFetches.countDown()
+        executor.shutdown()
+        assertEquals(true, executor.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS))
+        assertEquals(workers, results.count { it.get() })
+        assertEquals(workers, finishedSessions.get())
+        assertEquals(workers, fetchCount.get())
+    }
+
     private fun credentialsJson(username: String, password: String): String =
         """{"turn_server":{"username":"$username","credential":"$password","urls":["turn:relay.example.invalid:3478?transport=udp"]}}"""
 }
