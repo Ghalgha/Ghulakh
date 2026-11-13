@@ -57,6 +57,10 @@ fi
 # Its accept policy does not replace or override other host firewall chains.
 nft -f - <<NFT
 table inet ghulakh_egress {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    iifname "$TUN_IF" counter drop
+  }
   chain forward {
     type filter hook forward priority -10; policy accept;
 
