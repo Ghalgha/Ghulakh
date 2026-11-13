@@ -32,15 +32,8 @@ The envelope remains a demultiplexing/retry container, not an authenticator. Aut
 
 ## TURN datagram envelope primitives
 
-`crates/protocol/src/handshake_datagram.rs` now defines a fixed, bounded envelope for the four Noise handshake phases. It carries a 128-bit handshake identifier, phase, version and explicit payload length; reserved bits, zero identifiers, empty payloads, unknown phases, truncation, trailing bytes and oversized payloads are rejected.
+`crates/protocol/src/handshake_datagram.rs` defines the bounded envelope for Noise handshake phases: handshake identifier, phase, version and payload length. It rejects reserved bits, zero identifiers, empty payloads, unknown phases, truncation, trailing bytes and oversized payloads. The protocol module also provides a bounded exact-byte response cache.
 
-The module also provides a bounded response cache keyed by handshake identifier and phase. It fingerprints the exact request bytes and returns the exact cached response for a duplicate. Reusing the same key with different request bytes is rejected. Cache eviction is oldest-first and capacity is fixed at construction.
+The client TURN handshake task is integrated with the shared socket actor. It owns Noise and retry state, validates the configured relay endpoint, performs bounded stop-and-wait delivery and returns frame keys only after accepting the encrypted ServerAck. The server handshake service authenticates the device and registers the resulting session with the gateway. These paths are covered by mock tests, not by a live VK relay.
 
-These are protocol primitives only. The following remain required before any production use over TURN:
-- A network driver must implement bounded stop-and-wait retransmission with an explicit retry budget and backoff, and resend the exact previously encoded datagram.
-- The driver must consult the response cache before advancing a Noise state machine, and cache a response before attempting to send it.
-- The driver must expire handshake state and cache entries, limit concurrent handshakes, and enforce per-source admission/rate limits. The cache itself deliberately has no clock or implicit expiry.
-- The driver must validate the TURN allocation/source tuple and bind the handshake identifier to that allocation.
-- Tests must cover packet loss, duplication, reordering, timeout races, state exhaustion and reconnect behavior.
-
-The envelope does not authenticate the first Noise messages by itself. Authentication remains the responsibility of the Noise handshake; untrusted envelope fields must only be used for bounded demultiplexing.
+The envelope itself is not an authenticator. Noise XX provides peer authentication; directional AEAD protects data frames. Remaining work is independent cryptographic review and broader deterministic loss/duplication/reordering/cancellation tests.
