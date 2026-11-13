@@ -287,6 +287,13 @@ deploy() {
   check_platform
   parse_args "$@"
   assert_managed_layout
+  # The managed egress unit is the persisted source of the original network parameters.
+  # Reject a topology change before creating accounts, directories, releases or credentials.
+  if [[ -L "$CURRENT" ]]; then
+    safe_file "$EGRESS_UNIT" || die "Existing deployment has no regular managed egress unit; refusing an ambiguous update."
+    grep -Fqx "ExecStart=/bin/bash $CURRENT/$EGRESS_SCRIPT_NAME ghulakh0 $WAN $IPV6_MODE" "$EGRESS_UNIT" ||
+      die "WAN interface and IPv6 mode are immutable for an installed deployment; requested values differ from the recorded deployment."
+  fi
   local egress_tool credential_tool release_id release_dir old_target link
   egress_tool="$(cd "$(dirname "$0")" && pwd)/$EGRESS_SCRIPT_NAME"
   credential_tool="$(cd "$(dirname "$0")" && pwd)/$CREDENTIAL_TOOL_NAME"

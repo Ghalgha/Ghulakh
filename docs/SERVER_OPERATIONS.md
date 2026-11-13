@@ -33,7 +33,7 @@ sudo journalctl -u ghulakh-server.service -f
 - WAN-интерфейс и маршруты;
 - доступ к UDP gateway port через существующий host INPUT firewall.
 
-Системные sysctl и маршруты установщик не меняет. Не применяйте глобальную политику FORWARD DROP или широкие правила ACCEPT без отдельного аудита хостового firewall.
+WAN interface и IPv6 mode сохраняются в управляемом egress unit; update сравнивает их до staging и отказывает при изменении. Системные sysctl и маршруты установщик не меняет. Не применяйте глобальную политику FORWARD DROP или широкие правила ACCEPT без отдельного аудита хостового firewall.
 
 ## Восстановление и удаление
 
