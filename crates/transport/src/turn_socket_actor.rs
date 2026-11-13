@@ -16,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use zeroize::Zeroizing;
 use ghulakh_protocol::{
     stun::{StunClass, StunMessage, METHOD_DATA},
     turn_channel_data::{decode_channel_data, encode_channel_data},
@@ -35,7 +36,7 @@ const HANDSHAKE_CAPACITY: usize = 16;
 #[derive(Debug)]
 pub enum TurnInbound {
     /// A decoded STUN message and its actual UDP source endpoint.
-    Control { message: StunMessage, wire: Vec<u8>, source: SocketAddr },
+    Control { message: StunMessage, wire: Zeroizing<Vec<u8>>, source: SocketAddr },
     /// A complete ChannelData or Data-indication datagram from the relay.
     Data { datagram: Vec<u8>, source: SocketAddr },
     /// A validated handshake payload extracted from TURN ChannelData.
@@ -58,7 +59,7 @@ struct Counters {
 
 enum Command {
     Send {
-        datagram: Vec<u8>,
+        datagram: Zeroizing<Vec<u8>>,
         response: oneshot::Sender<std::result::Result<usize, String>>,
     },
 }
@@ -72,6 +73,7 @@ pub struct TurnSocketHandle {
 
 impl TurnSocketHandle {
     pub async fn send_datagram(&self, datagram: Vec<u8>) -> Result<usize> {
+        let datagram = Zeroizing::new(datagram);
         anyhow::ensure!(
             datagram.len() <= MAX_UDP_DATAGRAM_SIZE,
             "TURN UDP datagram exceeds maximum size"
@@ -134,7 +136,7 @@ impl TurnSocketActor {
         let task_counters = Arc::clone(&counters);
 
         tokio::spawn(async move {
-            let mut buffer = vec![0u8; MAX_UDP_DATAGRAM_SIZE];
+            let mut buffer = Zeroizing::new(vec![0u8; MAX_UDP_DATAGRAM_SIZE]);
             loop {
                 tokio::select! {
                     command = command_rx.recv() => {
@@ -197,7 +199,7 @@ impl TurnSocketActor {
                             Ok(message) => {
                                 // Control traffic is not silently dropped. If the consumer
                                 // stalls, bounded backpressure eventually reaches the UDP socket.
-                                if control_tx.send(TurnInbound::Control { message, wire: packet.to_vec(), source }).await.is_err() {
+                                if control_tx.send(TurnInbound::Control { message, wire: Zeroizing::new(packet.to_vec()), source }).await.is_err() {
                                     break;
                                 }
                             }
