@@ -71,7 +71,21 @@ pub struct TurnEndpoint {
     pub port: u16,
     pub transport: TurnWireTransport,
     /// Query parameters are retained verbatim, including unknown parameters.
+    /// They are treated as sensitive because providers may place tokens here.
     pub query: Vec<(String, String)>,
+}
+
+fn zeroize_query_parameters(query: &mut [(String, String)]) {
+    for (key, value) in query {
+        key.zeroize();
+        value.zeroize();
+    }
+}
+
+impl Drop for TurnEndpoint {
+    fn drop(&mut self) {
+        zeroize_query_parameters(&mut self.query);
+    }
 }
 
 impl fmt::Debug for TurnEndpoint {
@@ -426,6 +440,21 @@ mod tests {
         assert_eq!(value["turn_server"]["credential"], "");
         assert_eq!(value["turn_server"]["urls"][0], "");
         assert_eq!(value["nested"][0], "");
+    }
+
+    #[test]
+    fn zeroize_query_parameters_clears_keys_and_values() {
+        let mut query = vec![
+            ("transport".to_owned(), "udp".to_owned()),
+            ("token".to_owned(), "temporary-token".to_owned()),
+        ];
+
+        zeroize_query_parameters(&mut query);
+
+        assert_eq!(query, vec![
+            (String::new(), String::new()),
+            (String::new(), String::new()),
+        ]);
     }
 
     #[test]
