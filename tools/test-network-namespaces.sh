@@ -102,7 +102,35 @@ table inet upstream_probe {
 NFT
 
 ip netns exec "$C" ping -c 2 -W 2 1.1.1.253
-ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff
+
+# Warm up IPv6 neighbor discovery using a client-originated packet through NAT66.
+# A bounded retry handles the initial NDP resolution without weakening the
+# subsequent packet-delivery assertion.
+nat66_warmup_ok=0
+for attempt in 1 2 3; do
+  if ip netns exec "$C" ping -6 -c 1 -W 2 2606:4700:4700::ffff >/dev/null 2>&1; then
+    nat66_warmup_ok=1
+    break
+  fi
+done
+if [[ "$nat66_warmup_ok" != "1" ]]; then
+  echo "FAIL: IPv6 NAT66 warm-up did not receive an echo reply after 3 attempts" >&2
+  exit 1
+fi
+
+# Require every probe packet to return. ping's exit status alone is insufficient:
+# iputils returns success when at least one reply arrives.
+nat66_ping_output="$(LC_ALL=C ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff 2>&1)" || {
+  printf '%s\n' "$nat66_ping_output" >&2
+  echo "FAIL: strict IPv6 NAT66 probe command failed" >&2
+  exit 1
+}
+printf '%s\n' "$nat66_ping_output"
+if ! grep -Eq '^2 packets transmitted, 2 received, 0% packet loss$' <<<"$nat66_ping_output"; then
+  echo "FAIL: IPv6 NAT66 probe must receive exactly 2 of 2 replies" >&2
+  exit 1
+fi
+
 if ip netns exec "$U" ping -c 1 -W 1 10.77.0.2; then
   echo "FAIL: unsolicited IPv4 forwarding was not blocked" >&2
   exit 1
@@ -133,4 +161,4 @@ ip netns exec "$R" nft list chain inet filter forward \
 ip netns exec "$R" nft list chain inet filter forward \
   | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
-echo "PASS: IPv4 NAT source translation, IPv6 NAT66 source translation, native IPv6 routing, stateful return traffic and unsolicited-forward drops"
+echo "PASS: IPv4 NAT source translation, loss-free IPv6 NAT66, native IPv6 routing, stateful return traffic and unsolicited-forward drops"
