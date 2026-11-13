@@ -290,6 +290,7 @@ deploy() {
   # The managed egress unit is the persisted source of the original network parameters.
   # Reject a topology change before creating accounts, directories, releases or credentials.
   if [[ -L "$CURRENT" ]]; then
+    [[ -s "$MARKER" ]] || die "Active release exists without a populated ownership marker; refusing an ambiguous update."
     safe_file "$EGRESS_UNIT" || die "Existing deployment has no regular managed egress unit; refusing an ambiguous update."
     grep -Fqx "ExecStart=/bin/bash $CURRENT/$EGRESS_SCRIPT_NAME ghulakh0 $WAN $IPV6_MODE" "$EGRESS_UNIT" ||
       die "WAN interface and IPv6 mode are immutable for an installed deployment; requested values differ from the recorded deployment."
