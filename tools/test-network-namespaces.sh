@@ -205,6 +205,8 @@ ip netns exec "$U" nft list chain inet upstream_probe input \
 # Anti-spoofing and unrelated-ingress denials must hit explicit drop rules.
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip saddr != 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 saddr != fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip daddr {' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward | grep -F 'ip6 daddr {' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" nft list chain inet host_policy forward | grep -F 'iifname "rx0" oifname "ru0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 
 # Both reverse-direction probes must hit explicit drop rules, not merely time out.
