@@ -5,6 +5,7 @@
 //! TURN authentication-key derivation and allocation state remain separate.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use zeroize::{Zeroize, Zeroizing};
 
 pub const HEADER_LEN: usize = 20;
 pub const MAGIC_COOKIE: u32 = 0x2112_A442;
@@ -78,6 +79,15 @@ pub struct StunMessage {
     pub attributes: Vec<StunAttribute>,
 }
 
+impl Drop for StunMessage {
+    fn drop(&mut self) {
+        for attribute in &mut self.attributes {
+            attribute.value.zeroize();
+        }
+        self.transaction_id.zeroize();
+    }
+}
+
 impl StunMessage {
     pub fn decode(input: &[u8]) -> Result<Self, StunError> {
         if input.len() < HEADER_LEN { return Err(StunError::Truncated); }
@@ -118,7 +128,7 @@ impl StunMessage {
 
     pub fn encode(&self) -> Result<Vec<u8>, StunError> {
         if self.method > 0x0FFF { return Err(StunError::InvalidType); }
-        let mut body = Vec::new();
+        let mut body = Zeroizing::new(Vec::new());
         for attr in &self.attributes {
             if attr.value.len() > u16::MAX as usize { return Err(StunError::AttributeTooLarge); }
             body.extend_from_slice(&attr.kind.to_be_bytes());
@@ -196,7 +206,7 @@ pub fn verify_message_integrity(input: &[u8], key: &[u8]) -> Result<(), StunErro
     if input.len() != expected_len { return Err(StunError::InvalidIntegrityLayout); }
     // RFC 5389 requires the header length used for HMAC to end at MESSAGE-INTEGRITY,
     // even when a FINGERPRINT attribute follows it in the wire message.
-    let mut signed_prefix = input[..offset].to_vec();
+    let mut signed_prefix = Zeroizing::new(input[..offset].to_vec());
     let integrity_end_body_len = u16::try_from(offset + 24 - HEADER_LEN)
         .map_err(|_| StunError::InvalidLength)?;
     signed_prefix[2..4].copy_from_slice(&integrity_end_body_len.to_be_bytes());
