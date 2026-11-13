@@ -160,17 +160,16 @@ class VkCallsSessionIdempotenceTest {
 
     @Test
     fun concurrentFinishRequestsRunCleanupOnlyOnce() {
+        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
         val session = VkCallsSession(
             turnCredentialsJson = "{}",
             apiUrl = "https://calls.example.invalid/fb.do",
             sessionKey = "test-session-key",
             conversationId = "test-conversation",
+            finishAction = { cleanupCalls.incrementAndGet() },
         )
-        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
         val callers = List(16) {
-            Thread {
-                session.finishOnce { cleanupCalls.incrementAndGet() }
-            }
+            Thread { session.finish() }
         }
 
         callers.forEach(Thread::start)
@@ -181,17 +180,16 @@ class VkCallsSessionIdempotenceTest {
 
     @Test
     fun repeatedFinishRequestsDoNotRepeatCleanup() {
+        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
         val session = VkCallsSession(
             turnCredentialsJson = "{}",
             apiUrl = "https://calls.example.invalid/fb.do",
             sessionKey = "test-session-key",
             conversationId = "test-conversation",
+            finishAction = { cleanupCalls.incrementAndGet() },
         )
-        val cleanupCalls = java.util.concurrent.atomic.AtomicInteger(0)
 
-        repeat(3) {
-            session.finishOnce { cleanupCalls.incrementAndGet() }
-        }
+        repeat(3) { session.finish() }
 
         assertEquals(1, cleanupCalls.get())
     }
