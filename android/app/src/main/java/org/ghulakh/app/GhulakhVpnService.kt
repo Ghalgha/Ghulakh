@@ -378,10 +378,11 @@ class GhulakhVpnService : VpnService() {
         generation: Long,
     ) {
         var credentialFingerprint: String? = null
+        var credentialsJson: String? = null
         try {
             if (!isCurrent(generation) || !recoveryToken.get()) return
-            val credentialsJson = credentialBroker.obtainCredentials()
-            credentialFingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
+            credentialsJson = credentialBroker.obtainCredentials()
+            credentialFingerprint = TurnQuotaRetryPolicy.fingerprint(checkNotNull(credentialsJson))
             val alreadyRejected = synchronized(recoveryLock) {
                 TurnQuotaRetryPolicy.wasRejected(rejectedCredentials, credentialFingerprint)
             }
@@ -393,7 +394,7 @@ class GhulakhVpnService : VpnService() {
             // group rejects installation after close(), so do not hold the
             // shutdown lock across the replacement handshake.
             val recovered = transport.nativeTurnRecoverPath(
-                this, handle, profile.host, profile.port, credentialsJson,
+                this, handle, profile.host, profile.port, checkNotNull(credentialsJson),
                 decodeHexKey(profile.pinnedServerPublicKeyHex), profile.credential, pathId,
             )
             if (!isCurrent(generation) || !recoveryToken.get()) return
@@ -417,6 +418,7 @@ class GhulakhVpnService : VpnService() {
                 updateNotification("VPN активен · восстановление TURN-пути $pathId")
             }
         } finally {
+            credentialsJson = null
             synchronized(recoveryLock) {
                 val recoveryKey = recoveryToken to pathId
                 if (pathRecoveryThreads[recoveryKey] === Thread.currentThread()) {
