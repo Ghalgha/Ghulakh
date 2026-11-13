@@ -105,8 +105,8 @@ impl<P: TurnAuthProvider> TurnSessionSupervisor<P> {
                     }
                     if attempt == self.max_challenge_retries {
                         if challenge.code == 438 {
-                            return Err(TurnDriverError::CredentialsRejected.into())
-                                .context("TURN Refresh stale-nonce retry limit reached; credentials require replacement");
+                            return Err(anyhow::Error::new(TurnDriverError::CredentialsRejected)
+                                .context("TURN Refresh stale-nonce retry limit reached; credentials require replacement"));
                         }
                         return Err(error).context("TURN Refresh stale-nonce retry limit reached");
                     }
