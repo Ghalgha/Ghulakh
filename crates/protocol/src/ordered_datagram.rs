@@ -113,11 +113,11 @@ mod tests {
         assert_eq!(SequencedDataDatagram::new(1, packet(1190)).encode(), Err(DatagramError::TooLarge));
     }
 
-    proptest! {
+    proptest::proptest! {
         #[test]
         fn sequenced_datagrams_round_trip_arbitrary_valid_ipv4_packets(
-            sequence in any::<u64>(),
-            mut packet_bytes in prop::collection::vec(any::<u8>(), 20..=1179),
+            sequence in proptest::prelude::any::<u64>(),
+            mut packet_bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 20..=1179),
         ) {
             packet_bytes[0] = 0x45;
             let packet_len = packet_bytes.len() as u16;
