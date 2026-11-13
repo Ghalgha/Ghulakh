@@ -61,7 +61,7 @@ def main() -> int:
             fcntl.flock(digest_file.fileno(), fcntl.LOCK_EX)
             original_size = os.fstat(digest_file.fileno()).st_size
             credential = secrets.token_hex(32)
-            digest = hashlib.sha256(credential.encode("ascii")).hexdigest() + "\\n"
+            digest = hashlib.sha256(credential.encode("ascii")).hexdigest() + "\n"
             try:
                 digest_file.write(digest)
                 digest_file.flush()
@@ -71,11 +71,11 @@ def main() -> int:
                 os.fsync(digest_file.fileno())
                 raise
     except (OSError, ValueError) as error:
-        sys.stderr.write(f"Credential creation refused: {error}\\n")
+        sys.stderr.write(f"Credential creation refused: {error}\n")
         return 1
 
-    sys.stdout.write(credential + "\\n")
-    sys.stderr.write("Credential created. Store the displayed secret securely; the server file contains only its SHA-256 digest.\\n")
+    sys.stdout.write(credential + "\n")
+    sys.stderr.write("Credential created. Store the displayed secret securely; the server file contains only its SHA-256 digest.\n")
     return 0
 
 
