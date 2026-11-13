@@ -99,7 +99,7 @@ ensure_account() {
   fi
 }
 ensure_config() {
-  if [[ ! -e "$CREDENTIALS" ]]; then
+  if [[ ! -e "$CREDENTIALS" && ! -L "$CREDENTIALS" ]]; then
     install -o root -g "$NAME" -m 0640 /dev/null "$CREDENTIALS"
   else
     safe_file "$CREDENTIALS" || die "Credential digest path must be a regular file."
@@ -149,6 +149,7 @@ write_units() {
   marker_tmp="$BASE/.managed-by-ghulakh.tmp.$BASHPID"
   marker_backup="$BASE/.managed-by-ghulakh.backup.$BASHPID"
 
+  local transaction_active=0
   rollback_units() {
     local rollback_failed=0
     if (( had_egress )); then
@@ -170,6 +171,7 @@ write_units() {
       printf 'CRITICAL: unit rollback was incomplete; recovery files retained in %s\\n' "$tmpdir" >&2
       return 1
     fi
+    transaction_active=0
     rm -f "$marker_tmp" "$marker_backup"
     rm -rf -- "$tmpdir"
     return 0
@@ -249,9 +251,12 @@ EOF
 
   install -o root -g root -m 0644 "$tmpdir/ghulakh-egress.service" "$tmpdir/new-egress" &&
     install -o root -g root -m 0644 "$tmpdir/ghulakh-server.service" "$tmpdir/new-server" || {
-      rollback_units || true
+      rm -rf -- "$tmpdir"
       return 1
     }
+  transaction_active=1
+  trap 'if (( transaction_active )); then rollback_units || true; fi' EXIT
+  trap 'if (( transaction_active )); then rollback_units || true; fi; exit 1' HUP INT TERM
   if ! mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"; then
     rollback_units || true
     return 1
@@ -268,6 +273,8 @@ EOF
     return 1
   fi
 
+  transaction_active=0
+  trap - EXIT HUP INT TERM
   rm -f "$marker_backup"
   rm -rf -- "$tmpdir"
   return 0
