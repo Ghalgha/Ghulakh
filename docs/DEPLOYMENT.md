@@ -41,9 +41,19 @@ The dual-stack TUN interface uses 10.77.0.1/16 and fd77:77::1/64 with MTU 1100. 
 
 ## 4. Configure egress routing
 
-Configure the host firewall/NAT for the actual WAN interface. At minimum, IPv4 forwarding from the Ghulakh TUN subnet must be permitted and source-NATed toward the WAN; return traffic for 10.77.0.0/16 must route back through the Ghulakh TUN interface. The IPv6 client prefix is ULA (fd77:77::/64), so public IPv6 egress additionally requires either an upstream route for that prefix or IPv6 source NAT (NAT66) on the actual WAN interface. Permit the corresponding IPv6 forwarding and return traffic. The exact nftables/iptables rules depend on the host firewall and must be reviewed before deployment; IPv6 internet egress is not guaranteed by enabling forwarding alone.
+The server TUN uses `10.77.0.0/16` and `fd77:77::/64`. Configure the actual WAN interface and enable IPv4/IPv6 forwarding persistently. If the IPv6 default route is learned through Router Advertisements, set `net.ipv6.conf.<WAN_IF>.accept_ra=2` only for that WAN interface.
 
-Do not enable unrestricted forwarding to private, loopback, link-local, multicast or other non-public destinations. The server gateway already blocks several non-public IPv4 destination ranges, but host firewall policy remains required.
+Install the scoped nftables policy after verifying the host's existing firewall:
+
+```sh
+sudo bash tools/configure-egress-nftables.sh ghulakh0 <WAN_IF> nat66
+```
+
+The script owns only `inet ghulakh_egress`, `ip ghulakh_nat4` and `ip6 ghulakh_nat6`. It restricts TUN source prefixes, blocks non-public destinations and unsolicited return-direction traffic, permits established replies, and applies IPv4 NAT plus NAT66. Use `routed` instead of `nat66` only when the upstream has an explicit working route and valid egress for the client IPv6 prefix. The default `fd77::/64` prefix is ULA; public IPv6 egress therefore normally requires NAT66 or a separately designed globally routable prefix.
+
+The script does not change global FORWARD policy, INPUT rules, sysctls, routes or unrelated firewall tables. Its accept verdict does not override a drop in another nftables base chain: the host firewall must independently permit the intended traffic. It intentionally does not manage forwarding from unrelated interfaces. Inspect the complete ruleset and verify routing before setting `GHULAKH_FORWARDING_ENABLED=true`. Remove only its tables with `sudo bash tools/configure-egress-nftables.sh --remove`.
+
+The server does not configure IP forwarding or firewall rules automatically. `GHULAKH_FORWARDING_ENABLED=true` is an administrator confirmation, not a firewall health check.
 
 ## 5. Configure Android
 
