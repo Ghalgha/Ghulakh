@@ -46,6 +46,12 @@ jobs:
         run: cargo +nightly fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
         run: cargo +nightly fuzz run --fuzz-dir fuzz handshake_envelope -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz TURN ChannelData decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz channel_data_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz sequenced datagram decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz sequenced_datagram_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
+      - name: Fuzz protected frame decoder
+        run: cargo +nightly fuzz run --fuzz-dir fuzz secure_frame_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
 
   android:
     name: Android debug build
