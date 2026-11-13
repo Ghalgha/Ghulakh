@@ -63,6 +63,10 @@ ip netns exec "$R" ip link del v6probe0
 
 ip netns exec "$R" sysctl -q -w net.ipv4.ip_forward=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.all.forwarding=1
+# Set forwarding explicitly on both routed interfaces; this avoids depending
+# on kernel-specific propagation of the all.forwarding setting.
+ip netns exec "$R" sysctl -q -w net.ipv6.conf.rc0.forwarding=1
+ip netns exec "$R" sysctl -q -w net.ipv6.conf.ru0.forwarding=1
 
 ip netns exec "$R" nft -f - <<'NFT'
 table inet filter {
