@@ -63,7 +63,7 @@ impl TransactionPolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum TransactionEvent {
     Retransmit {
         transaction_id: [u8; 12],
@@ -85,6 +85,27 @@ impl Drop for TransactionEvent {
     }
 }
 
+impl std::fmt::Debug for TransactionEvent {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Retransmit { transaction_id, request, attempt, destination } => {
+                formatter.debug_struct("Retransmit")
+                    .field("transaction_id", transaction_id)
+                    .field("request_len", &request.len())
+                    .field("attempt", attempt)
+                    .field("destination", destination)
+                    .finish()
+            }
+            Self::TimedOut { transaction_id, destination } => {
+                formatter.debug_struct("TimedOut")
+                    .field("transaction_id", transaction_id)
+                    .field("destination", destination)
+                    .finish()
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MatchedResponse {
     pub transaction_id: [u8; 12],
@@ -94,7 +115,6 @@ pub struct MatchedResponse {
     pub was_retransmitted: bool,
 }
 
-#[derive(Debug)]
 struct PendingTransaction {
     method: u16,
     destination: SocketAddr,
@@ -104,6 +124,21 @@ struct PendingTransaction {
     next_deadline: Instant,
     retry_interval: Duration,
     policy: TransactionPolicy,
+}
+
+impl std::fmt::Debug for PendingTransaction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("PendingTransaction")
+            .field("method", &self.method)
+            .field("destination", &self.destination)
+            .field("request_len", &self.request.len())
+            .field("requests_sent", &self.requests_sent)
+            .field("retransmitted", &self.retransmitted)
+            .field("next_deadline", &self.next_deadline)
+            .field("retry_interval", &self.retry_interval)
+            .field("policy", &self.policy)
+            .finish()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -263,6 +298,19 @@ mod tests {
 
     fn policy() -> TransactionPolicy {
         TransactionPolicy::default()
+    }
+
+    #[test]
+    fn debug_output_redacts_retransmission_request_bytes() {
+        let event = TransactionEvent::Retransmit {
+            transaction_id: [0x31; 12],
+            request: b"request-secret-marker".to_vec(),
+            attempt: 2,
+            destination: endpoint(),
+        };
+        let rendered = format!("{event:?}");
+        assert!(!rendered.contains("request-secret-marker"));
+        assert!(rendered.contains("request_len"));
     }
 
     #[test]
