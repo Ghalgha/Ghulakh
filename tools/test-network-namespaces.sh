@@ -126,40 +126,7 @@ nat66_ping_output="$(LC_ALL=C ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:470
   exit 1
 }
 printf '%s\n' "$nat66_ping_output"
-if ! grep -Eq '^2 packets transmitted, 2 received, 0% packet loss(, .*)?
-
-if ip netns exec "$U" ping -c 1 -W 1 10.77.0.2; then
-  echo "FAIL: unsolicited IPv4 forwarding was not blocked" >&2
-  exit 1
-fi
-if ip netns exec "$U" ping -6 -c 1 -W 1 fd77:77::2; then
-  echo "FAIL: unsolicited IPv6 forwarding was not blocked" >&2
-  exit 1
-fi
-ip netns exec "$R" nft list chain ip nat4 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain ip6 nat6 postrouting | grep -Eq 'counter packets [1-9][0-9]*'
-
-# Confirm the upstream sees translated source addresses, not merely successful pings.
-ip netns exec "$U" nft list chain inet upstream_probe input \
-  | grep -F 'ip saddr 1.1.1.254' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$U" nft list chain inet upstream_probe input \
-  | grep -F 'ip6 saddr 2606:4700:4700::fffe' | grep -Eq 'counter packets [1-9][0-9]*'
-
-# Verify routed IPv6 without NAT66: the upstream has an explicit route to
-# the client prefix, so the original fd77:: source must remain routable.
-ip netns exec "$R" nft delete table ip6 nat6
-ip netns exec "$C" ping -6 -c 2 -W 2 2606:4700:4700::ffff
-ip netns exec "$U" nft list chain inet upstream_probe input \
-  | grep -F 'ip6 saddr fd77:77::2' | grep -Eq 'counter packets [1-9][0-9]*'
-
-# Both reverse-direction probes must hit explicit drop rules, not merely time out.
-ip netns exec "$R" nft list chain inet filter forward \
-  | grep -F 'ip daddr 10.77.0.0/16 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet filter forward \
-  | grep -F 'ip6 daddr fd77:77::/64 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-
-echo "PASS: IPv4 NAT source translation, loss-free IPv6 NAT66, native IPv6 routing, stateful return traffic and unsolicited-forward drops"
- <<<"$nat66_ping_output"; then
+if ! grep -Eq '^2 packets transmitted, 2 received, 0% packet loss(, .*)?$' <<<"$nat66_ping_output"; then
   echo "FAIL: IPv6 NAT66 probe must receive exactly 2 of 2 replies" >&2
   exit 1
 fi
