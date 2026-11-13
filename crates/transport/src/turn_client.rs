@@ -1782,4 +1782,61 @@ mod turn_credential_recovery_tests {
         let transient = anyhow::Error::new(crate::turn_driver::TurnDriverError::Timeout);
         assert!(!is_turn_credentials_rejected(&transient));
     }
+
+    #[test]
+    fn downlink_reorder_buffer_ignores_duplicate_sequences() {
+        let now = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let first = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12000),
+        };
+        let duplicate_pending = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12999),
+        };
+        let second = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12001),
+        };
+
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
+        buffer.push(SequencedDataDatagram::new(1, duplicate_pending, now), now);
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), now);
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), now);
+
+        assert_eq!(buffer.pop_ready(), Some(first));
+        assert_eq!(buffer.pop_ready(), Some(second));
+        assert!(buffer.pop_ready().is_none());
+    }
+
+    #[test]
+    fn downlink_reorder_buffer_accepts_delayed_missing_packet_before_gap_deadline() {
+        let start = Instant::now();
+        let mut buffer = DownlinkReorderBuffer::default();
+        let first = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12000),
+        };
+        let second = DataDatagram {
+            kind: ghulakh_protocol::IpPacketKind::Ipv4,
+            packet: packet(12001),
+        };
+
+        buffer.push(SequencedDataDatagram::new(1, second.clone()), start);
+        assert_eq!(
+            buffer.gap_deadline(),
+            Some(start + DOWNLINK_REORDER_GAP_TIMEOUT),
+        );
+        assert!(buffer.pop_ready().is_none());
+
+        let delayed_arrival = start + DOWNLINK_REORDER_GAP_TIMEOUT / 2;
+        buffer.push(SequencedDataDatagram::new(0, first.clone()), delayed_arrival);
+        assert_eq!(buffer.pop_ready(), Some(first));
+        assert_eq!(buffer.pop_ready(), Some(second));
+        assert!(buffer.pop_ready().is_none());
+        assert_eq!(buffer.gap_deadline(), None);
+    }
+
 }
