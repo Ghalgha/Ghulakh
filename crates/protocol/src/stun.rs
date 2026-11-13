@@ -65,18 +65,39 @@ impl std::error::Error for StunError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StunClass { Request, Indication, SuccessResponse, ErrorResponse }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct StunAttribute {
     pub kind: u16,
     pub value: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl std::fmt::Debug for StunAttribute {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("StunAttribute")
+            .field("kind", &self.kind)
+            .field("value_len", &self.value.len())
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct StunMessage {
     pub method: u16,
     pub class: StunClass,
     pub transaction_id: [u8; 12],
     pub attributes: Vec<StunAttribute>,
+}
+
+impl std::fmt::Debug for StunMessage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("StunMessage")
+            .field("method", &self.method)
+            .field("class", &self.class)
+            .field("transaction_id", &self.transaction_id)
+            .field("attributes", &self.attributes)
+            .finish()
+    }
 }
 
 struct SensitiveAttributes(Vec<StunAttribute>);
@@ -373,6 +394,18 @@ mod tests {
             StunAttribute { kind: 0xC001, value: vec![1,2,3] },
         ]}
     }
+    #[test]
+    fn debug_output_redacts_attribute_values() {
+        let mut message = sample(StunClass::Request);
+        message.attributes.push(StunAttribute {
+            kind: ATTR_USERNAME,
+            value: b"credential-secret-marker".to_vec(),
+        });
+        let rendered = format!("{message:?}");
+        assert!(!rendered.contains("credential-secret-marker"));
+        assert!(rendered.contains("<redacted>"));
+    }
+
     #[test] fn message_integrity_round_trip_and_tamper_detection() {
         let m = sample(StunClass::Request);
         let encoded = append_message_integrity(&m, b"test-key").unwrap();
