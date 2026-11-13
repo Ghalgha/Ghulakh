@@ -144,11 +144,11 @@ class VkCallsCredentialProviderTest {
             },
         )
 
-        repeat(128) { broker.obtainCredentials() }
+        repeat(127) { broker.obtainCredentials() }
         assertFalse(runCatching { broker.obtainCredentials() }.isSuccess)
         broker.finish()
-        assertEquals(129, fetched)
-        assertEquals(129, finished)
+        assertEquals(128, fetched)
+        assertEquals(128, finished)
     }
 
     private fun credentialsJson(username: String, password: String): String =
