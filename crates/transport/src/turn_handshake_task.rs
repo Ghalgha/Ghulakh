@@ -48,8 +48,15 @@ pub async fn run_turn_client_handshake(
     credential: &[u8],
 ) -> Result<TurnClientSession> {
     run_turn_client_handshake_inner(
-        socket, inbound, relay_endpoint, channel_number, pinned_server_key, credential, None,
-    ).await
+        socket,
+        inbound,
+        relay_endpoint,
+        channel_number,
+        pinned_server_key,
+        credential,
+        None,
+    )
+    .await
 }
 
 pub async fn run_turn_client_handshake_with_path_context(
@@ -69,7 +76,8 @@ pub async fn run_turn_client_handshake_with_path_context(
         pinned_server_key,
         credential,
         Some(path_context),
-    ).await
+    )
+    .await
 }
 
 async fn run_turn_client_handshake_inner(
@@ -87,14 +95,21 @@ async fn run_turn_client_handshake_inner(
     );
     let mut handshake_id = [0u8; 16];
     OsRng.fill_bytes(&mut handshake_id);
-    anyhow::ensure!(handshake_id.iter().any(|byte| *byte != 0), "invalid random handshake ID");
+    anyhow::ensure!(
+        handshake_id.iter().any(|byte| *byte != 0),
+        "invalid random handshake ID"
+    );
 
     let (mut noise, first_message) = match path_context {
         Some(context) => TurnHandshakeClient::new_with_path_context(
-            pinned_server_key, credential, context, handshake_id,
+            pinned_server_key,
+            credential,
+            context,
+            handshake_id,
         ),
         None => TurnHandshakeClient::new(pinned_server_key, credential, handshake_id),
-    }.context("initialize client Noise handshake")?;
+    }
+    .context("initialize client Noise handshake")?;
 
     let mut delivery = HandshakeDatagramDriver::new(
         1,
@@ -103,7 +118,8 @@ async fn run_turn_client_handshake_inner(
         2,
         Duration::from_secs(30),
         HandshakeRetryPolicy::default(),
-    ).context("initialize handshake retry manager")?;
+    )
+    .context("initialize handshake retry manager")?;
 
     let started = Instant::now();
     let mut expected_response = HandshakePhase::ServerResponse;
@@ -115,7 +131,8 @@ async fn run_turn_client_handshake_inner(
         relay_endpoint,
         channel_number,
         expected_response,
-    ).await?;
+    )
+    .await?;
 
     let mut retry_tick = tokio::time::interval(RETRY_POLL_INTERVAL);
     retry_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -214,13 +231,16 @@ async fn register_and_send(
     channel_number: u16,
     expected_response: HandshakePhase,
 ) -> Result<()> {
-    delivery.register_request(
-        datagram.clone(),
-        relay_endpoint,
-        expected_response,
-        Instant::now(),
-    ).context("register TURN handshake retry transaction")?;
-    socket.send_handshake(channel_number, &datagram)
+    delivery
+        .register_request(
+            datagram.clone(),
+            relay_endpoint,
+            expected_response,
+            Instant::now(),
+        )
+        .context("register TURN handshake retry transaction")?;
+    socket
+        .send_handshake(channel_number, &datagram)
         .await
         .context("send TURN handshake envelope")?;
     Ok(())

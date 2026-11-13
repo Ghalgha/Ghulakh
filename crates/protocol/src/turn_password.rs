@@ -67,9 +67,11 @@ fn parse_entries(input: &[u8]) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorit
             return Err(PasswordAlgorithmError::ParametersTooLarge);
         }
         let value_start = offset + 4;
-        let value_end = value_start.checked_add(parameter_len)
+        let value_end = value_start
+            .checked_add(parameter_len)
             .ok_or(PasswordAlgorithmError::InvalidEncoding)?;
-        let padded_end = value_start.checked_add((parameter_len + 3) & !3)
+        let padded_end = value_start
+            .checked_add((parameter_len + 3) & !3)
             .ok_or(PasswordAlgorithmError::InvalidEncoding)?;
         if padded_end > input.len() || value_end > input.len() {
             return Err(PasswordAlgorithmError::InvalidEncoding);
@@ -87,7 +89,9 @@ fn parse_entries(input: &[u8]) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorit
 }
 
 /// Parse PASSWORD-ALGORITHMS, preserving unknown algorithm IDs for safe negotiation.
-pub fn parse_password_algorithms(input: &[u8]) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorithmError> {
+pub fn parse_password_algorithms(
+    input: &[u8],
+) -> Result<Vec<PasswordAlgorithm>, PasswordAlgorithmError> {
     parse_entries(input)
 }
 
@@ -109,12 +113,12 @@ pub fn select_password_algorithm(
     offered: &[PasswordAlgorithm],
     supported: &[PasswordAlgorithmId],
 ) -> Result<PasswordAlgorithmId, PasswordAlgorithmError> {
-    let offered_md5 = offered.iter().any(|entry| {
-        entry.id == PASSWORD_ALGORITHM_MD5 && entry.parameters.is_empty()
-    });
-    let offered_sha256 = offered.iter().any(|entry| {
-        entry.id == PASSWORD_ALGORITHM_SHA256 && entry.parameters.is_empty()
-    });
+    let offered_md5 = offered
+        .iter()
+        .any(|entry| entry.id == PASSWORD_ALGORITHM_MD5 && entry.parameters.is_empty());
+    let offered_sha256 = offered
+        .iter()
+        .any(|entry| entry.id == PASSWORD_ALGORITHM_SHA256 && entry.parameters.is_empty());
     let supports_md5 = supported.contains(&PasswordAlgorithmId::Md5);
     let supports_sha256 = supported.contains(&PasswordAlgorithmId::Sha256);
 
@@ -126,7 +130,10 @@ pub fn select_password_algorithm(
         if !entry.parameters.is_empty() {
             continue;
         }
-        if let Some(selected) = supported.iter().find(|candidate| candidate.wire_id() == entry.id) {
+        if let Some(selected) = supported
+            .iter()
+            .find(|candidate| candidate.wire_id() == entry.id)
+        {
             return Ok(*selected);
         }
     }
@@ -138,7 +145,10 @@ pub fn password_algorithm_attribute(selected: PasswordAlgorithmId) -> StunAttrib
     let mut value = Vec::with_capacity(4);
     value.extend_from_slice(&selected.wire_id().to_be_bytes());
     value.extend_from_slice(&0u16.to_be_bytes());
-    StunAttribute { kind: ATTR_PASSWORD_ALGORITHM, value }
+    StunAttribute {
+        kind: ATTR_PASSWORD_ALGORITHM,
+        value,
+    }
 }
 
 /// Build the attribute carrying the server's offered algorithm list.
@@ -167,7 +177,10 @@ pub fn password_algorithms_attribute(
         value.extend_from_slice(&algorithm.parameters);
         value.resize(value.len() + ((4 - algorithm.parameters.len() % 4) % 4), 0);
     }
-    Ok(StunAttribute { kind: ATTR_PASSWORD_ALGORITHMS, value })
+    Ok(StunAttribute {
+        kind: ATTR_PASSWORD_ALGORITHMS,
+        value,
+    })
 }
 
 #[cfg(test)]
@@ -176,11 +189,7 @@ mod tests {
 
     #[test]
     fn parses_known_and_unknown_algorithms() {
-        let value = vec![
-            0, 1, 0, 0,
-            0, 2, 0, 0,
-            0x7f, 0xff, 0, 2, 0xaa, 0xbb, 0, 0,
-        ];
+        let value = vec![0, 1, 0, 0, 0, 2, 0, 0, 0x7f, 0xff, 0, 2, 0xaa, 0xbb, 0, 0];
         let parsed = parse_password_algorithms(&value).unwrap();
         assert_eq!(parsed.len(), 3);
         assert_eq!(parsed[2].parameters, [0xaa, 0xbb]);
@@ -193,8 +202,14 @@ mod tests {
     #[test]
     fn follows_rfc8656_sha256_mandate_and_server_order_otherwise() {
         let offered = [
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] },
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_MD5,
+                parameters: vec![],
+            },
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_SHA256,
+                parameters: vec![],
+            },
         ];
         assert_eq!(
             select_password_algorithm(
@@ -204,10 +219,7 @@ mod tests {
             Ok(PasswordAlgorithmId::Sha256)
         );
         assert_eq!(
-            select_password_algorithm(
-                &offered,
-                &[PasswordAlgorithmId::Sha256],
-            ),
+            select_password_algorithm(&offered, &[PasswordAlgorithmId::Sha256],),
             Ok(PasswordAlgorithmId::Sha256)
         );
         assert_eq!(
@@ -234,8 +246,14 @@ mod tests {
     #[test]
     fn does_not_select_known_algorithm_with_unimplemented_parameters() {
         let offered = [
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![1] },
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_SHA256,
+                parameters: vec![1],
+            },
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_MD5,
+                parameters: vec![],
+            },
         ];
         assert_eq!(
             select_password_algorithm(
@@ -248,8 +266,14 @@ mod tests {
 
     #[test]
     fn rejects_malformed_duplicate_and_oversized_lists() {
-        assert_eq!(parse_password_algorithms(&[]), Err(PasswordAlgorithmError::InvalidEncoding));
-        assert_eq!(parse_password_algorithms(&[0, 1, 0]), Err(PasswordAlgorithmError::InvalidEncoding));
+        assert_eq!(
+            parse_password_algorithms(&[]),
+            Err(PasswordAlgorithmError::InvalidEncoding)
+        );
+        assert_eq!(
+            parse_password_algorithms(&[0, 1, 0]),
+            Err(PasswordAlgorithmError::InvalidEncoding)
+        );
         assert_eq!(
             parse_password_algorithms(&[0, 1, 0, 0, 0, 1, 0, 0]),
             Err(PasswordAlgorithmError::DuplicateAlgorithm)
@@ -266,17 +290,30 @@ mod tests {
         assert_eq!(attribute.kind, ATTR_PASSWORD_ALGORITHM);
         assert_eq!(
             parse_password_algorithm(&attribute.value),
-            Ok(PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] })
+            Ok(PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_SHA256,
+                parameters: vec![]
+            })
         );
     }
 
     #[test]
     fn encodes_offered_algorithm_list() {
         let attribute = password_algorithms_attribute(&[
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_MD5, parameters: vec![] },
-            PasswordAlgorithm { id: PASSWORD_ALGORITHM_SHA256, parameters: vec![] },
-        ]).unwrap();
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_MD5,
+                parameters: vec![],
+            },
+            PasswordAlgorithm {
+                id: PASSWORD_ALGORITHM_SHA256,
+                parameters: vec![],
+            },
+        ])
+        .unwrap();
         assert_eq!(attribute.kind, ATTR_PASSWORD_ALGORITHMS);
-        assert_eq!(parse_password_algorithms(&attribute.value).unwrap().len(), 2);
+        assert_eq!(
+            parse_password_algorithms(&attribute.value).unwrap().len(),
+            2
+        );
     }
 }

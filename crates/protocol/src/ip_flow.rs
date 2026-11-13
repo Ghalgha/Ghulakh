@@ -55,7 +55,6 @@ pub fn ipv4_flow_key(packet: &[u8]) -> Option<Ipv4FlowKey> {
     })
 }
 
-
 /// Collision-safe identity for an IPv6 flow, including fragment identification.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Ipv6FlowKey {
@@ -102,27 +101,40 @@ pub fn ipv6_flow_key(packet: &[u8]) -> Option<Ipv6FlowKey> {
     loop {
         match protocol {
             0 | 43 | 60 | 135 | 139 | 140 => {
-                if packet.len() < offset + 2 { return None; }
+                if packet.len() < offset + 2 {
+                    return None;
+                }
                 let next = packet[offset];
                 let length = (usize::from(packet[offset + 1]) + 1).checked_mul(8)?;
-                if packet.len() < offset + length { return None; }
+                if packet.len() < offset + length {
+                    return None;
+                }
                 protocol = next;
                 offset += length;
             }
             51 => {
-                if packet.len() < offset + 2 { return None; }
+                if packet.len() < offset + 2 {
+                    return None;
+                }
                 let next = packet[offset];
                 let length = (usize::from(packet[offset + 1]) + 2).checked_mul(4)?;
-                if packet.len() < offset + length { return None; }
+                if packet.len() < offset + length {
+                    return None;
+                }
                 protocol = next;
                 offset += length;
             }
             44 => {
-                if packet.len() < offset + 8 { return None; }
+                if packet.len() < offset + 8 {
+                    return None;
+                }
                 let next = packet[offset];
-                let fragment_id = u32::from_be_bytes(packet[offset + 4..offset + 8].try_into().ok()?);
+                let fragment_id =
+                    u32::from_be_bytes(packet[offset + 4..offset + 8].try_into().ok()?);
                 return Some(Ipv6FlowKey {
-                    source, destination, protocol: next,
+                    source,
+                    destination,
+                    protocol: next,
                     discriminator: Ipv6FlowDiscriminator::Fragment(fragment_id),
                 });
             }
@@ -131,7 +143,9 @@ pub fn ipv6_flow_key(packet: &[u8]) -> Option<Ipv6FlowKey> {
     }
 
     let discriminator = if protocol == 6 || protocol == 17 {
-        if packet.len() < offset + 4 { return None; }
+        if packet.len() < offset + 4 {
+            return None;
+        }
         Ipv6FlowDiscriminator::Ports {
             source: u16::from_be_bytes([packet[offset], packet[offset + 1]]),
             destination: u16::from_be_bytes([packet[offset + 2], packet[offset + 3]]),
@@ -139,7 +153,12 @@ pub fn ipv6_flow_key(packet: &[u8]) -> Option<Ipv6FlowKey> {
     } else {
         Ipv6FlowDiscriminator::Other
     };
-    Some(Ipv6FlowKey { source, destination, protocol, discriminator })
+    Some(Ipv6FlowKey {
+        source,
+        destination,
+        protocol,
+        discriminator,
+    })
 }
 
 /// Parse a flow key for either supported IP version.
@@ -186,7 +205,13 @@ pub fn flow_hash(packet: &[u8]) -> u64 {
 mod tests {
     use super::*;
 
-    fn ipv4(src: [u8; 4], dst: [u8; 4], proto: u8, source_port: u16, destination_port: u16) -> Vec<u8> {
+    fn ipv4(
+        src: [u8; 4],
+        dst: [u8; 4],
+        proto: u8,
+        source_port: u16,
+        destination_port: u16,
+    ) -> Vec<u8> {
         let mut packet = vec![0u8; 24];
         packet[0] = 0x45;
         let length = packet.len() as u16;
@@ -303,7 +328,6 @@ mod tests {
         assert!(matches!(ip_flow_key(&packet), Some(IpFlowKey::Ipv6(_))));
     }
 
-
     fn ipv6_with_extension_headers(chain: &[(u8, Vec<u8>)], transport: &[u8]) -> Vec<u8> {
         let mut packet = vec![0u8; 40];
         packet[0] = 0x60;
@@ -336,24 +360,31 @@ mod tests {
             panic!("IPv6 flow key was not parsed");
         };
         assert_eq!(key.protocol, 17);
-        assert_eq!(key.discriminator, Ipv6FlowDiscriminator::Ports {
-            source: 1234,
-            destination: 443,
-        });
+        assert_eq!(
+            key.discriminator,
+            Ipv6FlowDiscriminator::Ports {
+                source: 1234,
+                destination: 443,
+            }
+        );
     }
 
     #[test]
     fn ipv6_flow_key_walks_authentication_header() {
         let authentication = vec![0, 0, 0, 0, 0, 0, 0, 0];
-        let packet = ipv6_with_extension_headers(&[(51, authentication)], &[0x00, 0x35, 0x01, 0xbb]);
+        let packet =
+            ipv6_with_extension_headers(&[(51, authentication)], &[0x00, 0x35, 0x01, 0xbb]);
         let Some(IpFlowKey::Ipv6(key)) = ip_flow_key(&packet) else {
             panic!("IPv6 AH flow key was not parsed");
         };
         assert_eq!(key.protocol, 17);
-        assert_eq!(key.discriminator, Ipv6FlowDiscriminator::Ports {
-            source: 53,
-            destination: 443,
-        });
+        assert_eq!(
+            key.discriminator,
+            Ipv6FlowDiscriminator::Ports {
+                source: 53,
+                destination: 443,
+            }
+        );
     }
 
     #[test]
@@ -379,5 +410,4 @@ mod tests {
         packet[41] = 1;
         assert_eq!(ipv6_flow_key(&packet), None);
     }
-
 }

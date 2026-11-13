@@ -54,10 +54,7 @@ pub struct TurnClientAuthPayload {
 }
 
 impl TurnClientAuthPayload {
-    pub fn new(
-        context: TurnPathContext,
-        credential: &[u8],
-    ) -> Result<Self, TurnPathContextError> {
+    pub fn new(context: TurnPathContext, credential: &[u8]) -> Result<Self, TurnPathContextError> {
         context.validate()?;
         if credential.is_empty() || credential.len() > MAX_CREDENTIAL_LEN {
             return Err(TurnPathContextError::InvalidCredentialLength);
@@ -100,7 +97,8 @@ impl TurnClientAuthPayload {
             group_id,
             path_id: u16::from_be_bytes([encoded[21], encoded[22]]),
             path_count: u16::from_be_bytes([encoded[23], encoded[24]]),
-        }.validate()?;
+        }
+        .validate()?;
         let credential_len = usize::from(u16::from_be_bytes([encoded[25], encoded[26]]));
         if credential_len == 0 || credential_len > MAX_CREDENTIAL_LEN {
             return Err(TurnPathContextError::InvalidCredentialLength);
@@ -147,14 +145,20 @@ mod tests {
     fn rejects_path_count_below_multipath_minimum() {
         let mut value = context(0);
         value.path_count = 1;
-        assert_eq!(value.validate(), Err(TurnPathContextError::InvalidPathCount));
+        assert_eq!(
+            value.validate(),
+            Err(TurnPathContextError::InvalidPathCount)
+        );
     }
 
     #[test]
     fn rejects_path_count_above_limit() {
         let mut value = context(0);
         value.path_count = MAX_TURN_PATHS + 1;
-        assert_eq!(value.validate(), Err(TurnPathContextError::InvalidPathCount));
+        assert_eq!(
+            value.validate(),
+            Err(TurnPathContextError::InvalidPathCount)
+        );
     }
 
     #[test]

@@ -8,9 +8,9 @@ use std::net::SocketAddr;
 
 use crate::stun::{
     decode_xor_address, encode_xor_address, StunAttribute, StunClass, StunMessage,
-    ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY,
-    ATTR_REQUESTED_TRANSPORT, ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS,
-    METHOD_ALLOCATE, METHOD_CHANNEL_BIND, METHOD_CREATE_PERMISSION, METHOD_REFRESH,
+    ATTR_CHANNEL_NUMBER, ATTR_LIFETIME, ATTR_REQUESTED_ADDRESS_FAMILY, ATTR_REQUESTED_TRANSPORT,
+    ATTR_XOR_PEER_ADDRESS, ATTR_XOR_RELAYED_ADDRESS, METHOD_ALLOCATE, METHOD_CHANNEL_BIND,
+    METHOD_CREATE_PERMISSION, METHOD_REFRESH,
 };
 
 const UDP_PROTOCOL_NUMBER: u8 = 17;
@@ -65,16 +65,16 @@ fn attr(kind: u16, value: Vec<u8>) -> StunAttribute {
 
 /// Construct a UDP Allocate request for the requested relayed-address family.
 /// Authentication attributes and MESSAGE-INTEGRITY are added by the TURN provider.
-pub fn allocate_request_for_family(
-    transaction_id: [u8; 12],
-    ipv4: bool,
-) -> StunMessage {
+pub fn allocate_request_for_family(transaction_id: [u8; 12], ipv4: bool) -> StunMessage {
     request(
         METHOD_ALLOCATE,
         transaction_id,
         vec![
             attr(ATTR_REQUESTED_TRANSPORT, vec![UDP_PROTOCOL_NUMBER, 0, 0, 0]),
-            attr(ATTR_REQUESTED_ADDRESS_FAMILY, vec![if ipv4 { 1 } else { 2 }, 0, 0, 0]),
+            attr(
+                ATTR_REQUESTED_ADDRESS_FAMILY,
+                vec![if ipv4 { 1 } else { 2 }, 0, 0, 0],
+            ),
         ],
     )
 }
@@ -106,9 +106,18 @@ pub fn create_permission_request(
     }
     let attributes = peers
         .iter()
-        .map(|peer| attr(ATTR_XOR_PEER_ADDRESS, encode_xor_address(SocketAddr::new(peer.ip(), 0), &transaction_id)))
+        .map(|peer| {
+            attr(
+                ATTR_XOR_PEER_ADDRESS,
+                encode_xor_address(SocketAddr::new(peer.ip(), 0), &transaction_id),
+            )
+        })
         .collect();
-    Ok(request(METHOD_CREATE_PERMISSION, transaction_id, attributes))
+    Ok(request(
+        METHOD_CREATE_PERMISSION,
+        transaction_id,
+        attributes,
+    ))
 }
 
 /// Construct a ChannelBind request. The channel number is allocated by the
@@ -125,23 +134,23 @@ pub fn channel_bind_request(
         METHOD_CHANNEL_BIND,
         transaction_id,
         vec![
-            attr(ATTR_CHANNEL_NUMBER, vec![
-                (channel_number >> 8) as u8,
-                channel_number as u8,
-                0,
-                0,
-            ]),
-            attr(ATTR_XOR_PEER_ADDRESS, encode_xor_address(peer, &transaction_id)),
+            attr(
+                ATTR_CHANNEL_NUMBER,
+                vec![(channel_number >> 8) as u8, channel_number as u8, 0, 0],
+            ),
+            attr(
+                ATTR_XOR_PEER_ADDRESS,
+                encode_xor_address(peer, &transaction_id),
+            ),
         ],
     ))
 }
 
-fn unique_attribute(
-    message: &StunMessage,
-    kind: u16,
-) -> Result<&[u8], TurnRequestError> {
+fn unique_attribute(message: &StunMessage, kind: u16) -> Result<&[u8], TurnRequestError> {
     let mut matches = message.attributes.iter().filter(|a| a.kind == kind);
-    let first = matches.next().ok_or(TurnRequestError::MissingOrDuplicateAttribute)?;
+    let first = matches
+        .next()
+        .ok_or(TurnRequestError::MissingOrDuplicateAttribute)?;
     if matches.next().is_some() {
         return Err(TurnRequestError::MissingOrDuplicateAttribute);
     }
@@ -153,7 +162,11 @@ fn lifetime(message: &StunMessage) -> Result<u32, TurnRequestError> {
     if value.len() != 4 {
         return Err(TurnRequestError::InvalidLifetime);
     }
-    Ok(u32::from_be_bytes(value.try_into().map_err(|_| TurnRequestError::InvalidLifetime)?))
+    Ok(u32::from_be_bytes(
+        value
+            .try_into()
+            .map_err(|_| TurnRequestError::InvalidLifetime)?,
+    ))
 }
 
 /// Parse a successful response for a previously issued request.
@@ -174,7 +187,10 @@ pub fn parse_success_response(
             let relayed_address = decode_xor_address(relayed, &response.transaction_id)
                 .map_err(|_| TurnRequestError::InvalidAddress)?;
             let lifetime_seconds = lifetime(response)?;
-            Ok(TurnSuccess::Allocate { relayed_address, lifetime_seconds })
+            Ok(TurnSuccess::Allocate {
+                relayed_address,
+                lifetime_seconds,
+            })
         }
         METHOD_REFRESH => Ok(TurnSuccess::Refresh {
             lifetime_seconds: lifetime(response)?,
@@ -190,23 +206,40 @@ mod tests {
     use super::*;
     use std::net::IpAddr;
 
-    fn id() -> [u8; 12] { [0xA5; 12] }
+    fn id() -> [u8; 12] {
+        [0xA5; 12]
+    }
 
     #[test]
     fn allocate_requests_udp_peer_transport() {
         let message = allocate_request(id());
         assert_eq!(message.method, METHOD_ALLOCATE);
         assert_eq!(message.class, StunClass::Request);
-        assert_eq!(message.attribute(ATTR_REQUESTED_TRANSPORT), Some(&[17, 0, 0, 0][..]));
-        assert_eq!(message.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[1, 0, 0, 0][..]));
+        assert_eq!(
+            message.attribute(ATTR_REQUESTED_TRANSPORT),
+            Some(&[17, 0, 0, 0][..])
+        );
+        assert_eq!(
+            message.attribute(ATTR_REQUESTED_ADDRESS_FAMILY),
+            Some(&[1, 0, 0, 0][..])
+        );
         let ipv6 = allocate_request_for_family(id(), false);
-        assert_eq!(ipv6.attribute(ATTR_REQUESTED_ADDRESS_FAMILY), Some(&[2, 0, 0, 0][..]));
+        assert_eq!(
+            ipv6.attribute(ATTR_REQUESTED_ADDRESS_FAMILY),
+            Some(&[2, 0, 0, 0][..])
+        );
     }
 
     #[test]
     fn refresh_supports_expiry_and_delete() {
-        assert_eq!(refresh_request(id(), 600).attribute(ATTR_LIFETIME), Some(&600u32.to_be_bytes()[..]));
-        assert_eq!(refresh_request(id(), 0).attribute(ATTR_LIFETIME), Some(&0u32.to_be_bytes()[..]));
+        assert_eq!(
+            refresh_request(id(), 600).attribute(ATTR_LIFETIME),
+            Some(&600u32.to_be_bytes()[..])
+        );
+        assert_eq!(
+            refresh_request(id(), 0).attribute(ATTR_LIFETIME),
+            Some(&0u32.to_be_bytes()[..])
+        );
     }
 
     #[test]
@@ -217,7 +250,14 @@ mod tests {
         ];
         let message = create_permission_request(id(), &peers).unwrap();
         assert_eq!(message.method, METHOD_CREATE_PERMISSION);
-        assert_eq!(message.attributes.iter().filter(|a| a.kind == ATTR_XOR_PEER_ADDRESS).count(), 2);
+        assert_eq!(
+            message
+                .attributes
+                .iter()
+                .filter(|a| a.kind == ATTR_XOR_PEER_ADDRESS)
+                .count(),
+            2
+        );
         for (attribute, peer) in message.attributes.iter().zip(peers) {
             let decoded = decode_xor_address(&attribute.value, &id()).unwrap();
             assert_eq!(decoded.ip(), peer.ip());
@@ -227,12 +267,18 @@ mod tests {
 
     #[test]
     fn create_permission_rejects_empty_or_mixed_families() {
-        assert_eq!(create_permission_request(id(), &[]), Err(TurnRequestError::EmptyPeerList));
+        assert_eq!(
+            create_permission_request(id(), &[]),
+            Err(TurnRequestError::EmptyPeerList)
+        );
         let peers = vec![
             "192.0.2.1:1".parse().unwrap(),
             "[2001:db8::1]:1".parse().unwrap(),
         ];
-        assert_eq!(create_permission_request(id(), &peers), Err(TurnRequestError::MixedPeerFamilies));
+        assert_eq!(
+            create_permission_request(id(), &peers),
+            Err(TurnRequestError::MixedPeerFamilies)
+        );
     }
 
     #[test]
@@ -245,9 +291,13 @@ mod tests {
             channel_bind_request(id(), 0x5000, "192.0.2.1:3478".parse().unwrap()),
             Err(TurnRequestError::InvalidChannelNumber)
         );
-        let message = channel_bind_request(id(), 0x4fff, "192.0.2.1:3478".parse().unwrap()).unwrap();
+        let message =
+            channel_bind_request(id(), 0x4fff, "192.0.2.1:3478".parse().unwrap()).unwrap();
         assert_eq!(message.method, METHOD_CHANNEL_BIND);
-        assert_eq!(message.attribute(ATTR_CHANNEL_NUMBER), Some(&[0x4f, 0xff, 0, 0][..]));
+        assert_eq!(
+            message.attribute(ATTR_CHANNEL_NUMBER),
+            Some(&[0x4f, 0xff, 0, 0][..])
+        );
     }
 
     #[test]
@@ -264,7 +314,10 @@ mod tests {
         };
         assert_eq!(
             parse_success_response(&allocate, METHOD_ALLOCATE),
-            Ok(TurnSuccess::Allocate { relayed_address: relayed, lifetime_seconds: 600 })
+            Ok(TurnSuccess::Allocate {
+                relayed_address: relayed,
+                lifetime_seconds: 600
+            })
         );
         let refresh = StunMessage {
             method: METHOD_REFRESH,
@@ -274,7 +327,9 @@ mod tests {
         };
         assert_eq!(
             parse_success_response(&refresh, METHOD_REFRESH),
-            Ok(TurnSuccess::Refresh { lifetime_seconds: 300 })
+            Ok(TurnSuccess::Refresh {
+                lifetime_seconds: 300
+            })
         );
     }
 

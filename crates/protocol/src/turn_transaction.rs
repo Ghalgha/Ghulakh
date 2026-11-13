@@ -88,20 +88,26 @@ impl Drop for TransactionEvent {
 impl std::fmt::Debug for TransactionEvent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Retransmit { transaction_id, request, attempt, destination } => {
-                formatter.debug_struct("Retransmit")
-                    .field("transaction_id", transaction_id)
-                    .field("request_len", &request.len())
-                    .field("attempt", attempt)
-                    .field("destination", destination)
-                    .finish()
-            }
-            Self::TimedOut { transaction_id, destination } => {
-                formatter.debug_struct("TimedOut")
-                    .field("transaction_id", transaction_id)
-                    .field("destination", destination)
-                    .finish()
-            }
+            Self::Retransmit {
+                transaction_id,
+                request,
+                attempt,
+                destination,
+            } => formatter
+                .debug_struct("Retransmit")
+                .field("transaction_id", transaction_id)
+                .field("request_len", &request.len())
+                .field("attempt", attempt)
+                .field("destination", destination)
+                .finish(),
+            Self::TimedOut {
+                transaction_id,
+                destination,
+            } => formatter
+                .debug_struct("TimedOut")
+                .field("transaction_id", transaction_id)
+                .field("destination", destination)
+                .finish(),
         }
     }
 }
@@ -128,7 +134,8 @@ struct PendingTransaction {
 
 impl std::fmt::Debug for PendingTransaction {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("PendingTransaction")
+        formatter
+            .debug_struct("PendingTransaction")
             .field("method", &self.method)
             .field("destination", &self.destination)
             .field("request_len", &self.request.len())
@@ -168,30 +175,36 @@ impl TransactionManager {
     ) -> Result<[u8; 12], TransactionError> {
         let request = Zeroizing::new(request);
         policy.validate()?;
-        let decoded = StunMessage::decode(&request).map_err(|_| TransactionError::InvalidRequest)?;
+        let decoded =
+            StunMessage::decode(&request).map_err(|_| TransactionError::InvalidRequest)?;
         if decoded.class != StunClass::Request {
             return Err(TransactionError::InvalidRequest);
         }
         if self.pending.contains_key(&decoded.transaction_id) {
             return Err(TransactionError::DuplicateTransaction);
         }
-        let outstanding = self.pending.values()
+        let outstanding = self
+            .pending
+            .values()
             .filter(|pending| pending.destination == destination)
             .count();
         if outstanding >= MAX_OUTSTANDING_PER_SERVER {
             return Err(TransactionError::TooManyOutstanding);
         }
         let id = decoded.transaction_id;
-        self.pending.insert(id, PendingTransaction {
-            method: decoded.method,
-            destination,
-            request,
-            requests_sent: 1,
-            retransmitted: false,
-            next_deadline: now + policy.initial_rto,
-            retry_interval: policy.initial_rto,
-            policy,
-        });
+        self.pending.insert(
+            id,
+            PendingTransaction {
+                method: decoded.method,
+                destination,
+                request,
+                requests_sent: 1,
+                retransmitted: false,
+                next_deadline: now + policy.initial_rto,
+                retry_interval: policy.initial_rto,
+                policy,
+            },
+        );
         Ok(id)
     }
 
@@ -203,7 +216,10 @@ impl TransactionManager {
         response: StunMessage,
         source: SocketAddr,
     ) -> Option<MatchedResponse> {
-        if !matches!(response.class, StunClass::SuccessResponse | StunClass::ErrorResponse) {
+        if !matches!(
+            response.class,
+            StunClass::SuccessResponse | StunClass::ErrorResponse
+        ) {
             return None;
         }
         let pending = self.pending.get(&response.transaction_id)?;
@@ -227,12 +243,16 @@ impl TransactionManager {
 
     /// Produce due retransmissions and timeout events. No I/O or sleeping occurs here.
     pub fn poll(&mut self, now: Instant) -> Vec<TransactionEvent> {
-        let due: Vec<[u8; 12]> = self.pending.iter()
+        let due: Vec<[u8; 12]> = self
+            .pending
+            .iter()
             .filter_map(|(id, pending)| (now >= pending.next_deadline).then_some(*id))
             .collect();
         let mut events = Vec::with_capacity(due.len());
         for id in due {
-            let Some(pending) = self.pending.get_mut(&id) else { continue };
+            let Some(pending) = self.pending.get_mut(&id) else {
+                continue;
+            };
             if pending.requests_sent < pending.policy.max_requests {
                 pending.requests_sent += 1;
                 pending.retransmitted = true;
@@ -243,7 +263,9 @@ impl TransactionManager {
                     destination: pending.destination,
                 });
                 pending.retry_interval = pending.retry_interval.saturating_mul(2);
-                let max_interval = pending.policy.initial_rto
+                let max_interval = pending
+                    .policy
+                    .initial_rto
                     .saturating_mul(pending.policy.final_timeout_multiplier);
                 pending.retry_interval = pending.retry_interval.min(max_interval);
                 pending.next_deadline = now + pending.retry_interval;
@@ -263,7 +285,10 @@ impl TransactionManager {
     }
 
     pub fn outstanding_for(&self, destination: SocketAddr) -> usize {
-        self.pending.values().filter(|pending| pending.destination == destination).count()
+        self.pending
+            .values()
+            .filter(|pending| pending.destination == destination)
+            .count()
     }
 
     pub fn len(&self) -> usize {
@@ -293,7 +318,9 @@ mod tests {
                 kind: crate::stun::ATTR_REQUESTED_TRANSPORT,
                 value: vec![17, 0, 0, 0],
             }],
-        }.encode().unwrap()
+        }
+        .encode()
+        .unwrap()
     }
 
     fn policy() -> TransactionPolicy {
@@ -318,18 +345,25 @@ mod tests {
         let start = Instant::now();
         let mut manager = TransactionManager::new();
         let id = [7; 12];
-        manager.register(request(id), endpoint(), start, policy()).unwrap();
+        manager
+            .register(request(id), endpoint(), start, policy())
+            .unwrap();
 
         let expected_ms = [500, 1500, 3500, 7500, 15500, 31500];
         for (index, elapsed) in expected_ms.into_iter().enumerate() {
             let events = manager.poll(start + Duration::from_millis(elapsed));
-            assert!(matches!(&events[..], [TransactionEvent::Retransmit { attempt, .. }] if *attempt == index as u8 + 2));
+            assert!(
+                matches!(&events[..], [TransactionEvent::Retransmit { attempt, .. }] if *attempt == index as u8 + 2)
+            );
         }
         let events = manager.poll(start + Duration::from_millis(39500));
-        assert_eq!(events, vec![TransactionEvent::TimedOut {
-            transaction_id: id,
-            destination: endpoint(),
-        }]);
+        assert_eq!(
+            events,
+            vec![TransactionEvent::TimedOut {
+                transaction_id: id,
+                destination: endpoint(),
+            }]
+        );
         assert!(manager.is_empty());
     }
 
@@ -338,14 +372,18 @@ mod tests {
         let now = Instant::now();
         let mut manager = TransactionManager::new();
         let id = [9; 12];
-        manager.register(request(id), endpoint(), now, policy()).unwrap();
+        manager
+            .register(request(id), endpoint(), now, policy())
+            .unwrap();
         let response = StunMessage {
             method: METHOD_ALLOCATE,
             class: StunClass::SuccessResponse,
             transaction_id: id,
             attributes: vec![],
         };
-        assert!(manager.accept_response(response.clone(), "192.0.2.11:3478".parse().unwrap()).is_none());
+        assert!(manager
+            .accept_response(response.clone(), "192.0.2.11:3478".parse().unwrap())
+            .is_none());
         let mut wrong_method = response.clone();
         wrong_method.method = crate::stun::METHOD_REFRESH;
         assert!(manager.accept_response(wrong_method, endpoint()).is_none());
@@ -362,7 +400,9 @@ mod tests {
         let start = Instant::now();
         let mut manager = TransactionManager::new();
         let id = [4; 12];
-        manager.register(request(id), endpoint(), start, policy()).unwrap();
+        manager
+            .register(request(id), endpoint(), start, policy())
+            .unwrap();
         manager.poll(start + DEFAULT_RTO);
         let response = StunMessage {
             method: METHOD_ALLOCATE,
@@ -370,7 +410,12 @@ mod tests {
             transaction_id: id,
             attributes: vec![],
         };
-        assert!(manager.accept_response(response, endpoint()).unwrap().was_retransmitted);
+        assert!(
+            manager
+                .accept_response(response, endpoint())
+                .unwrap()
+                .was_retransmitted
+        );
         assert_eq!(manager.len(), 1);
         assert!(manager.complete(&id));
     }
@@ -380,7 +425,9 @@ mod tests {
         let now = Instant::now();
         let mut manager = TransactionManager::new();
         for n in 0..MAX_OUTSTANDING_PER_SERVER {
-            manager.register(request([n as u8; 12]), endpoint(), now, policy()).unwrap();
+            manager
+                .register(request([n as u8; 12]), endpoint(), now, policy())
+                .unwrap();
         }
         assert_eq!(
             manager.register(request([99; 12]), endpoint(), now, policy()),
@@ -397,7 +444,9 @@ mod tests {
             class: StunClass::Indication,
             transaction_id: [1; 12],
             attributes: vec![],
-        }.encode().unwrap();
+        }
+        .encode()
+        .unwrap();
         assert_eq!(
             manager.register(invalid, endpoint(), now, policy()),
             Err(TransactionError::InvalidRequest)
@@ -410,11 +459,18 @@ mod tests {
         let mut manager = TransactionManager::new();
         let id = [0xA5; 12];
         let wire = request(id);
-        manager.register(wire.clone(), endpoint(), start, TransactionPolicy {
-            initial_rto: Duration::from_millis(10),
-            max_requests: 3,
-            final_timeout_multiplier: 4,
-        }).unwrap();
+        manager
+            .register(
+                wire.clone(),
+                endpoint(),
+                start,
+                TransactionPolicy {
+                    initial_rto: Duration::from_millis(10),
+                    max_requests: 3,
+                    final_timeout_multiplier: 4,
+                },
+            )
+            .unwrap();
 
         for (attempt, elapsed_ms) in [(2, 10), (3, 30)] {
             let events = manager.poll(start + Duration::from_millis(elapsed_ms));
@@ -429,7 +485,9 @@ mod tests {
         let now = Instant::now();
         let mut manager = TransactionManager::new();
         let id = [2; 12];
-        manager.register(request(id), endpoint(), now, policy()).unwrap();
+        manager
+            .register(request(id), endpoint(), now, policy())
+            .unwrap();
         assert!(manager.cancel(&id));
         assert!(!manager.cancel(&id));
     }

@@ -16,15 +16,13 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use zeroize::Zeroizing;
 use ghulakh_protocol::{
+    handshake_datagram::HandshakeEnvelope,
     stun::{StunClass, StunMessage, METHOD_DATA},
     turn_channel_data::{decode_channel_data, encode_channel_data},
-    handshake_datagram::HandshakeEnvelope,
 };
-use tokio::{
-    sync::{mpsc, oneshot},
-};
+use tokio::sync::{mpsc, oneshot};
+use zeroize::Zeroizing;
 
 use crate::turn_udp::{TurnUdpSocket, MAX_UDP_DATAGRAM_SIZE};
 
@@ -36,11 +34,21 @@ const HANDSHAKE_CAPACITY: usize = 16;
 #[derive(Debug)]
 pub enum TurnInbound {
     /// A decoded STUN message and its actual UDP source endpoint.
-    Control { message: StunMessage, wire: Zeroizing<Vec<u8>>, source: SocketAddr },
+    Control {
+        message: StunMessage,
+        wire: Zeroizing<Vec<u8>>,
+        source: SocketAddr,
+    },
     /// A complete ChannelData or Data-indication datagram from the relay.
-    Data { datagram: Vec<u8>, source: SocketAddr },
+    Data {
+        datagram: Vec<u8>,
+        source: SocketAddr,
+    },
     /// A validated handshake payload extracted from TURN ChannelData.
-    Handshake { datagram: Vec<u8>, source: SocketAddr },
+    Handshake {
+        datagram: Vec<u8>,
+        source: SocketAddr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -92,13 +100,8 @@ impl TurnSocketHandle {
     /// Send a validated handshake envelope as TURN ChannelData over the
     /// existing socket actor. The caller must have completed ChannelBind for
     /// this peer/channel before using this method.
-    pub async fn send_handshake(
-        &self,
-        channel_number: u16,
-        envelope: &[u8],
-    ) -> Result<usize> {
-        HandshakeEnvelope::decode(envelope)
-            .context("validate outgoing TURN handshake envelope")?;
+    pub async fn send_handshake(&self, channel_number: u16, envelope: &[u8]) -> Result<usize> {
+        HandshakeEnvelope::decode(envelope).context("validate outgoing TURN handshake envelope")?;
         let datagram = encode_channel_data(channel_number, envelope)
             .context("encode TURN handshake ChannelData")?;
         self.send_datagram(datagram).await
@@ -108,7 +111,10 @@ impl TurnSocketHandle {
         TurnSocketActorStats {
             malformed_datagrams: self.counters.malformed_datagrams.load(Ordering::Relaxed),
             dropped_data_datagrams: self.counters.dropped_data_datagrams.load(Ordering::Relaxed),
-            dropped_handshake_datagrams: self.counters.dropped_handshake_datagrams.load(Ordering::Relaxed),
+            dropped_handshake_datagrams: self
+                .counters
+                .dropped_handshake_datagrams
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -233,13 +239,22 @@ mod tests {
         stun::{StunAttribute, ATTR_DATA, METHOD_ALLOCATE},
         turn_channel_data::encode_channel_data,
     };
-    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+    use tokio::{
+        net::UdpSocket,
+        time::{timeout, Duration},
+    };
 
-    async fn pair() -> (TurnSocketHandle, TurnSocketActorReceivers, UdpSocket, SocketAddr) {
+    async fn pair() -> (
+        TurnSocketHandle,
+        TurnSocketActorReceivers,
+        UdpSocket,
+        SocketAddr,
+    ) {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let (handle, receivers) = TurnSocketActor::spawn(socket);
         (handle, receivers, relay, relay_addr)
     }
@@ -256,18 +271,29 @@ mod tests {
                 class: StunClass::SuccessResponse,
                 transaction_id: [8; 12],
                 attributes: vec![],
-            }.encode().unwrap();
+            }
+            .encode()
+            .unwrap();
             relay.send_to(&control, source).await.unwrap();
-            relay.send_to(&[0x40, 0x01, 0, 3, 1, 2, 3], source).await.unwrap();
+            relay
+                .send_to(&[0x40, 0x01, 0, 3, 1, 2, 3], source)
+                .await
+                .unwrap();
         });
         client_addr.send_datagram(vec![1]).await.unwrap();
 
         let control = timeout(Duration::from_secs(2), receivers.control.recv())
-            .await.unwrap().unwrap();
-        assert!(matches!(control, TurnInbound::Control { message, source, .. }
-            if message.transaction_id == [8; 12] && source == relay_addr));
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(control, TurnInbound::Control { message, source, .. }
+            if message.transaction_id == [8; 12] && source == relay_addr)
+        );
         let data = timeout(Duration::from_secs(2), receivers.data.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(data, TurnInbound::Data { datagram, source }
             if datagram == [0x40, 0x01, 0, 3, 1, 2, 3] && source == relay_addr));
         relay_task.await.unwrap();
@@ -283,13 +309,20 @@ mod tests {
                 method: METHOD_DATA,
                 class: StunClass::Indication,
                 transaction_id: [4; 12],
-                attributes: vec![StunAttribute { kind: ATTR_DATA, value: b"payload".to_vec() }],
-            }.encode().unwrap();
+                attributes: vec![StunAttribute {
+                    kind: ATTR_DATA,
+                    value: b"payload".to_vec(),
+                }],
+            }
+            .encode()
+            .unwrap();
             relay.send_to(&indication, source).await.unwrap();
         });
         handle.send_datagram(vec![1]).await.unwrap();
         let event = timeout(Duration::from_secs(2), receivers.data.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(event, TurnInbound::Data { .. }));
         assert!(receivers.control.try_recv().is_err());
         relay_task.await.unwrap();
@@ -319,13 +352,17 @@ mod tests {
                 phase: ghulakh_protocol::handshake_datagram::HandshakePhase::ServerResponse,
                 handshake_id: [7; 16],
                 payload: b"noise-message-2".to_vec(),
-            }.encode().unwrap();
+            }
+            .encode()
+            .unwrap();
             let channel_data = encode_channel_data(0x4001, &envelope).unwrap();
             relay.send_to(&channel_data, source).await.unwrap();
         });
         handle.send_datagram(vec![1]).await.unwrap();
         let event = timeout(Duration::from_secs(2), receivers.handshake.recv())
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert!(matches!(event, TurnInbound::Handshake { datagram, source }
             if HandshakeEnvelope::decode(&datagram).is_ok() && source == relay_addr));
         assert!(receivers.control.try_recv().is_err());
@@ -340,13 +377,17 @@ mod tests {
             phase: ghulakh_protocol::handshake_datagram::HandshakePhase::ClientInit,
             handshake_id: [9; 16],
             payload: b"noise-message-1".to_vec(),
-        }.encode().unwrap();
+        }
+        .encode()
+        .unwrap();
 
         handle.send_handshake(0x4001, &envelope).await.unwrap();
 
         let mut buffer = [0u8; 256];
         let (length, _) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         let channel = decode_channel_data(&buffer[..length]).unwrap();
         assert_eq!(channel.channel_number, 0x4001);
         assert_eq!(channel.data, envelope);
@@ -383,15 +424,21 @@ mod tests {
                 class: StunClass::SuccessResponse,
                 transaction_id: [0x55; 12],
                 attributes: vec![],
-            }.encode().unwrap();
+            }
+            .encode()
+            .unwrap();
             relay.send_to(&control, source).await.unwrap();
         });
 
         handle.send_datagram(vec![1]).await.unwrap();
         let control = timeout(Duration::from_secs(2), receivers.control.recv())
-            .await.unwrap().unwrap();
-        assert!(matches!(control, TurnInbound::Control { message, source, .. }
-            if message.transaction_id == [0x55; 12] && source == relay_addr));
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(control, TurnInbound::Control { message, source, .. }
+            if message.transaction_id == [0x55; 12] && source == relay_addr)
+        );
         assert_eq!(handle.stats().dropped_data_datagrams, 1);
 
         let mut queued = 0;
@@ -401,5 +448,4 @@ mod tests {
         assert_eq!(queued, DATA_CAPACITY);
         relay_task.await.unwrap();
     }
-
 }

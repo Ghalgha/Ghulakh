@@ -10,6 +10,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    turn_auth::TurnAuthContext,
+    turn_socket_actor::{TurnInbound, TurnSocketActor, TurnSocketHandle},
+    turn_udp::TurnUdpSocket,
+};
 use anyhow::{Context, Result};
 use ghulakh_protocol::{
     stun::{StunClass, StunMessage},
@@ -21,11 +26,6 @@ use ghulakh_protocol::{
         parse_success_response, refresh_request,
     },
     turn_transaction::{TransactionEvent, TransactionManager, TransactionPolicy},
-};
-use crate::{
-    turn_auth::TurnAuthContext,
-    turn_socket_actor::{TurnInbound, TurnSocketActor, TurnSocketHandle},
-    turn_udp::TurnUdpSocket,
 };
 use tokio::sync::mpsc;
 use zeroize::Zeroizing;
@@ -142,14 +142,15 @@ impl TurnClientDriver {
 
     /// Perform an unauthenticated Allocate. A 401 challenge is returned to the
     /// caller; retry by calling allocate again with the newly built auth context.
-    pub async fn allocate(
-        &mut self,
-        auth: Option<&TurnAuthContext>,
-    ) -> Result<AllocationLease> {
-        anyhow::ensure!(self.allocations.lease().is_none(), "TURN allocation already active");
+    pub async fn allocate(&mut self, auth: Option<&TurnAuthContext>) -> Result<AllocationLease> {
+        anyhow::ensure!(
+            self.allocations.lease().is_none(),
+            "TURN allocation already active"
+        );
         let id = TransactionManager::random_transaction_id()
             .map_err(|e| anyhow::anyhow!("generate TURN transaction ID: {e}"))?;
-        self.allocations.begin_allocate(id)
+        self.allocations
+            .begin_allocate(id)
             .map_err(|e| anyhow::anyhow!("begin allocation state: {e}"))?;
         let request = allocate_request_for_family(id, self.requested_relay_ipv4);
         let response = match self.transact(request, auth).await {
@@ -166,13 +167,19 @@ impl TurnClientDriver {
                 return Err(error).context("parse TURN Allocate success");
             }
         };
-        if let ghulakh_protocol::turn_request::TurnSuccess::Allocate { relayed_address, .. } = &success {
+        if let ghulakh_protocol::turn_request::TurnSuccess::Allocate {
+            relayed_address, ..
+        } = &success
+        {
             if relayed_address.is_ipv4() != self.requested_relay_ipv4 {
                 let _ = self.allocations.abort_allocate(id);
                 anyhow::bail!("TURN Allocate returned a relayed address with the wrong IP family");
             }
         }
-        let lease = match self.allocations.accept_allocate(id, success, Instant::now()) {
+        let lease = match self
+            .allocations
+            .accept_allocate(id, success, Instant::now())
+        {
             Ok(lease) => lease.clone(),
             Err(error) => {
                 let _ = self.allocations.abort_allocate(id);
@@ -192,15 +199,16 @@ impl TurnClientDriver {
         self.require_live_allocation()?;
         let id = TransactionManager::random_transaction_id()
             .map_err(|e| anyhow::anyhow!("generate TURN transaction ID: {e}"))?;
-        let request = create_permission_request(id, peers)
-            .context("build TURN CreatePermission request")?;
+        let request =
+            create_permission_request(id, peers).context("build TURN CreatePermission request")?;
         let response = self.transact(request, Some(auth)).await?;
         parse_success_response(&response, response.method)
             .context("parse TURN CreatePermission success")?;
         let now = Instant::now();
         let registry = self.peers.as_mut().ok_or(TurnDriverError::NoAllocation)?;
         for peer in peers {
-            registry.install_permission(peer.ip(), now)
+            registry
+                .install_permission(peer.ip(), now)
                 .map_err(|e| anyhow::anyhow!("record TURN permission: {e}"))?;
         }
         Ok(())
@@ -221,7 +229,9 @@ impl TurnClientDriver {
         let response = self.transact(request, Some(auth)).await?;
         parse_success_response(&response, response.method)
             .context("parse TURN ChannelBind success")?;
-        self.peers.as_mut().ok_or(TurnDriverError::NoAllocation)?
+        self.peers
+            .as_mut()
+            .ok_or(TurnDriverError::NoAllocation)?
             .install_channel_binding(channel_number, peer, Instant::now())
             .map_err(|e| anyhow::anyhow!("record TURN channel binding: {e}"))?;
         Ok(())
@@ -237,7 +247,8 @@ impl TurnClientDriver {
         let id = TransactionManager::random_transaction_id()
             .map_err(|e| anyhow::anyhow!("generate TURN transaction ID: {e}"))?;
         let now = Instant::now();
-        self.allocations.begin_refresh(id, now)
+        self.allocations
+            .begin_refresh(id, now)
             .map_err(|e| anyhow::anyhow!("begin TURN refresh: {e}"))?;
         let request = refresh_request(id, lifetime_seconds);
         let response = match self.transact(request, Some(auth)).await {
@@ -286,8 +297,14 @@ impl TurnClientDriver {
     }
 
     fn require_live_allocation(&self) -> Result<()> {
-        let lease = self.allocations.lease().ok_or(TurnDriverError::NoAllocation)?;
-        anyhow::ensure!(Instant::now() < lease.expires_at, "TURN allocation has expired");
+        let lease = self
+            .allocations
+            .lease()
+            .ok_or(TurnDriverError::NoAllocation)?;
+        anyhow::ensure!(
+            Instant::now() < lease.expires_at,
+            "TURN allocation has expired"
+        );
         Ok(())
     }
 
@@ -297,17 +314,28 @@ impl TurnClientDriver {
         auth: Option<&TurnAuthContext>,
     ) -> Result<StunMessage> {
         let destination = self.relay_endpoint;
-        let actor = self.socket.as_ref().cloned().ok_or(TurnDriverError::SocketActorClosed)?;
+        let actor = self
+            .socket
+            .as_ref()
+            .cloned()
+            .ok_or(TurnDriverError::SocketActorClosed)?;
         let mut wire = Zeroizing::new(match auth {
-            Some(context) => context.sign_request(&request).context("authenticate TURN request")?,
-            None => request.encode().context("encode unauthenticated TURN request")?,
+            Some(context) => context
+                .sign_request(&request)
+                .context("authenticate TURN request")?,
+            None => request
+                .encode()
+                .context("encode unauthenticated TURN request")?,
         });
-        let id = self.transactions.register(
-            wire.to_vec(),
-            destination,
-            Instant::now(),
-            self.transaction_policy,
-        ).map_err(|e| anyhow::anyhow!("register TURN transaction: {e}"))?;
+        let id = self
+            .transactions
+            .register(
+                wire.to_vec(),
+                destination,
+                Instant::now(),
+                self.transaction_policy,
+            )
+            .map_err(|e| anyhow::anyhow!("register TURN transaction: {e}"))?;
         if let Err(error) = actor.send_datagram(std::mem::take(&mut *wire)).await {
             self.transactions.cancel(&id);
             return Err(error).context("send TURN request");
@@ -403,39 +431,55 @@ impl TurnClientDriver {
     }
 }
 
-
 #[cfg(test)]
 mod socket_actor_integration_tests {
     use super::*;
     use ghulakh_protocol::stun::{
         StunAttribute, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_REALM, METHOD_ALLOCATE,
     };
-    use tokio::{net::UdpSocket, time::{timeout, Duration}};
+    use tokio::{
+        net::UdpSocket,
+        time::{timeout, Duration},
+    };
 
     #[tokio::test]
     async fn driver_receives_initial_challenge_through_single_socket_actor() {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let mut driver = TurnClientDriver::new(socket);
         assert!(driver.take_data_receiver().is_some());
 
         let relay_task = tokio::spawn(async move {
             let mut buffer = [0u8; 1024];
             let (length, source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             let request = StunMessage::decode(&buffer[..length]).unwrap();
             let challenge = StunMessage {
                 method: request.method,
                 class: StunClass::ErrorResponse,
                 transaction_id: request.transaction_id,
                 attributes: vec![
-                    StunAttribute { kind: ATTR_ERROR_CODE, value: vec![0, 0, 4, 1] },
-                    StunAttribute { kind: ATTR_REALM, value: b"turn.example.invalid".to_vec() },
-                    StunAttribute { kind: ATTR_NONCE, value: b"opaque-nonce".to_vec() },
+                    StunAttribute {
+                        kind: ATTR_ERROR_CODE,
+                        value: vec![0, 0, 4, 1],
+                    },
+                    StunAttribute {
+                        kind: ATTR_REALM,
+                        value: b"turn.example.invalid".to_vec(),
+                    },
+                    StunAttribute {
+                        kind: ATTR_NONCE,
+                        value: b"opaque-nonce".to_vec(),
+                    },
                 ],
-            }.encode().unwrap();
+            }
+            .encode()
+            .unwrap();
             relay.send_to(&challenge, source).await.unwrap();
         });
 
@@ -451,14 +495,15 @@ mod socket_actor_integration_tests {
     async fn invalid_authenticated_success_is_ignored_and_request_is_retransmitted() {
         use crate::turn_auth::TurnIntegrityAlgorithm;
         use ghulakh_protocol::stun::{
-            append_message_integrity, encode_xor_address, StunAttribute,
-            ATTR_LIFETIME, ATTR_XOR_RELAYED_ADDRESS,
+            append_message_integrity, encode_xor_address, StunAttribute, ATTR_LIFETIME,
+            ATTR_XOR_RELAYED_ADDRESS,
         };
 
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let policy = TransactionPolicy {
             initial_rto: Duration::from_millis(20),
             max_requests: 2,
@@ -471,12 +516,15 @@ mod socket_actor_integration_tests {
             "test-nonce".into(),
             vec![0x44; 32],
             TurnIntegrityAlgorithm::Sha1,
-        ).unwrap();
+        )
+        .unwrap();
 
         let relay_task = tokio::spawn(async move {
             let mut buffer = [0u8; 2048];
             let (first_len, client) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+                .await
+                .unwrap()
+                .unwrap();
             let first_wire = buffer[..first_len].to_vec();
             let request = StunMessage::decode(&first_wire).unwrap();
             assert_eq!(request.method, METHOD_ALLOCATE);
@@ -491,15 +539,24 @@ mod socket_actor_integration_tests {
                         kind: ATTR_XOR_RELAYED_ADDRESS,
                         value: encode_xor_address(relayed, &request.transaction_id),
                     },
-                    StunAttribute { kind: ATTR_LIFETIME, value: 600u32.to_be_bytes().to_vec() },
+                    StunAttribute {
+                        kind: ATTR_LIFETIME,
+                        value: 600u32.to_be_bytes().to_vec(),
+                    },
                 ],
             };
 
             // Correct transaction ID and source, but no MESSAGE-INTEGRITY.
-            relay.send_to(&response.encode().unwrap(), client).await.unwrap();
+            relay
+                .send_to(&response.encode().unwrap(), client)
+                .await
+                .unwrap();
 
-            let (retry_len, retry_client) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+            let (retry_len, retry_client) =
+                timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
             assert_eq!(retry_client, client);
             assert_eq!(
                 &buffer[..retry_len],
@@ -513,7 +570,9 @@ mod socket_actor_integration_tests {
         });
 
         let lease = timeout(Duration::from_secs(2), driver.allocate(Some(&auth)))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(lease.relayed_address, relay_task.await.unwrap());
         assert!(driver.allocation().is_some());
         driver.close();
@@ -524,7 +583,8 @@ mod socket_actor_integration_tests {
         let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let relay_addr = relay.local_addr().unwrap();
         let socket = TurnUdpSocket::bind("127.0.0.1:0".parse().unwrap(), relay_addr)
-            .await.unwrap();
+            .await
+            .unwrap();
         let policy = TransactionPolicy {
             initial_rto: Duration::from_millis(20),
             max_requests: 2,
@@ -534,21 +594,42 @@ mod socket_actor_integration_tests {
 
         let relay_task = tokio::spawn(async move {
             let mut buffer = [0u8; 1024];
-            let (first_len, first_source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+            let (first_len, first_source) =
+                timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
             let first = buffer[..first_len].to_vec();
-            let (second_len, second_source) = timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
-                .await.unwrap().unwrap();
+            let (second_len, second_source) =
+                timeout(Duration::from_secs(2), relay.recv_from(&mut buffer))
+                    .await
+                    .unwrap()
+                    .unwrap();
             let second = buffer[..second_len].to_vec();
             assert_eq!(first_source, second_source);
-            assert_eq!(first, second, "retransmission must preserve exact request bytes");
+            assert_eq!(
+                first, second,
+                "retransmission must preserve exact request bytes"
+            );
         });
 
         let error = timeout(Duration::from_secs(2), driver.allocate(None))
-            .await.unwrap().unwrap_err();
-        assert!(matches!(error.downcast_ref::<TurnDriverError>(), Some(TurnDriverError::Timeout)));
-        assert!(driver.allocation().is_none(), "failed Allocate must leave no active lease");
-        assert_eq!(driver.transactions.len(), 0, "timed-out transaction must be removed");
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::Timeout)
+        ));
+        assert!(
+            driver.allocation().is_none(),
+            "failed Allocate must leave no active lease"
+        );
+        assert_eq!(
+            driver.transactions.len(),
+            0,
+            "timed-out transaction must be removed"
+        );
         relay_task.await.unwrap();
         driver.close();
     }

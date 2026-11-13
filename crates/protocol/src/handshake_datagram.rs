@@ -73,8 +73,8 @@ impl HandshakeEnvelope {
         if self.payload.len() > MAX_HANDSHAKE_PAYLOAD {
             return Err(HandshakeEnvelopeError::TooLarge);
         }
-        let payload_len = u16::try_from(self.payload.len())
-            .map_err(|_| HandshakeEnvelopeError::TooLarge)?;
+        let payload_len =
+            u16::try_from(self.payload.len()).map_err(|_| HandshakeEnvelopeError::TooLarge)?;
         let mut encoded = Vec::with_capacity(HANDSHAKE_HEADER_LEN + self.payload.len());
         encoded.extend_from_slice(MAGIC);
         encoded.push(HANDSHAKE_ENVELOPE_VERSION);
@@ -167,9 +167,11 @@ impl HandshakeResponseCache {
         request: &[u8],
     ) -> Result<Option<&[u8]>, HandshakeReplayCacheError> {
         let digest: [u8; 32] = Sha256::digest(request).into();
-        let Some(entry) = self.entries.iter().find(|entry| {
-            entry.handshake_id == *handshake_id && entry.phase == phase
-        }) else {
+        let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.handshake_id == *handshake_id && entry.phase == phase)
+        else {
             return Ok(None);
         };
         if entry.request_digest != digest {
@@ -186,9 +188,11 @@ impl HandshakeResponseCache {
         response: &[u8],
     ) -> Result<(), HandshakeReplayCacheError> {
         let digest: [u8; 32] = Sha256::digest(request).into();
-        if let Some(entry) = self.entries.iter().find(|entry| {
-            entry.handshake_id == handshake_id && entry.phase == phase
-        }) {
+        if let Some(entry) = self
+            .entries
+            .iter()
+            .find(|entry| entry.handshake_id == handshake_id && entry.phase == phase)
+        {
             if entry.request_digest == digest && entry.response == response {
                 return Ok(());
             }
@@ -214,7 +218,6 @@ impl HandshakeResponseCache {
         self.entries.is_empty()
     }
 }
-
 
 use std::{
     collections::BTreeMap,
@@ -372,20 +375,27 @@ impl HandshakeDatagramDriver {
         if self.pending.len() >= self.max_pending {
             return Err(HandshakeDriverError::CapacityReached);
         }
-        if self.pending.keys().filter(|(_, _, peer)| *peer == destination).count()
+        if self
+            .pending
+            .keys()
+            .filter(|(_, _, peer)| *peer == destination)
+            .count()
             >= self.max_pending_per_peer
         {
             return Err(HandshakeDriverError::PeerLimitReached);
         }
-        self.pending.insert(key, PendingHandshake {
-            request_phase: envelope.phase,
-            response_phase: expected_response,
-            datagram,
-            destination,
-            transmissions: 1,
-            retry_interval: self.retry_policy.initial_rto,
-            next_deadline: now + self.retry_policy.initial_rto,
-        });
+        self.pending.insert(
+            key,
+            PendingHandshake {
+                request_phase: envelope.phase,
+                response_phase: expected_response,
+                datagram,
+                destination,
+                transmissions: 1,
+                retry_interval: self.retry_policy.initial_rto,
+                next_deadline: now + self.retry_policy.initial_rto,
+            },
+        );
         Ok(envelope.handshake_id)
     }
 
@@ -425,12 +435,16 @@ impl HandshakeDatagramDriver {
     }
 
     pub fn poll(&mut self, now: Instant) -> Vec<HandshakeDriverEvent> {
-        let due: Vec<_> = self.pending.iter()
+        let due: Vec<_> = self
+            .pending
+            .iter()
             .filter_map(|(key, pending)| (now >= pending.next_deadline).then_some(*key))
             .collect();
         let mut events = Vec::with_capacity(due.len());
         for key in due {
-            let Some(pending) = self.pending.get_mut(&key) else { continue };
+            let Some(pending) = self.pending.get_mut(&key) else {
+                continue;
+            };
             if pending.transmissions < self.retry_policy.max_transmissions {
                 pending.transmissions += 1;
                 events.push(HandshakeDriverEvent::Retransmit {
@@ -440,7 +454,9 @@ impl HandshakeDatagramDriver {
                     attempt: pending.transmissions,
                     destination: pending.destination,
                 });
-                pending.retry_interval = pending.retry_interval.saturating_mul(2)
+                pending.retry_interval = pending
+                    .retry_interval
+                    .saturating_mul(2)
                     .min(self.retry_policy.max_rto);
                 pending.next_deadline = now + pending.retry_interval;
             } else {
@@ -495,7 +511,11 @@ impl HandshakeDatagramDriver {
         // doing so could invalidate a response that a peer is still retrying.
         // Fail closed until an entry expires instead.
         if self.responses.len() >= self.max_cached_responses
-            || self.responses.iter().filter(|entry| entry.source == source).count()
+            || self
+                .responses
+                .iter()
+                .filter(|entry| entry.source == source)
+                .count()
                 >= self.max_cached_per_peer
         {
             return Err(HandshakeDriverError::CacheCapacity);
@@ -590,27 +610,42 @@ mod tests {
     #[test]
     fn envelope_round_trip() {
         let message = sample();
-        assert_eq!(HandshakeEnvelope::decode(&message.encode().unwrap()).unwrap(), message);
+        assert_eq!(
+            HandshakeEnvelope::decode(&message.encode().unwrap()).unwrap(),
+            message
+        );
     }
 
     #[test]
     fn rejects_trailing_and_truncated_bytes() {
         let mut encoded = sample().encode().unwrap();
         encoded.push(0);
-        assert_eq!(HandshakeEnvelope::decode(&encoded), Err(HandshakeEnvelopeError::InvalidLength));
+        assert_eq!(
+            HandshakeEnvelope::decode(&encoded),
+            Err(HandshakeEnvelopeError::InvalidLength)
+        );
         encoded.pop();
         encoded.pop();
-        assert_eq!(HandshakeEnvelope::decode(&encoded), Err(HandshakeEnvelopeError::InvalidLength));
+        assert_eq!(
+            HandshakeEnvelope::decode(&encoded),
+            Err(HandshakeEnvelopeError::InvalidLength)
+        );
     }
 
     #[test]
     fn rejects_reserved_flags_and_zero_identifier() {
         let mut encoded = sample().encode().unwrap();
         encoded[7] = 1;
-        assert_eq!(HandshakeEnvelope::decode(&encoded), Err(HandshakeEnvelopeError::ReservedFlags));
+        assert_eq!(
+            HandshakeEnvelope::decode(&encoded),
+            Err(HandshakeEnvelopeError::ReservedFlags)
+        );
         let mut encoded = sample().encode().unwrap();
         encoded[8..24].fill(0);
-        assert_eq!(HandshakeEnvelope::decode(&encoded), Err(HandshakeEnvelopeError::InvalidHandshakeId));
+        assert_eq!(
+            HandshakeEnvelope::decode(&encoded),
+            Err(HandshakeEnvelopeError::InvalidHandshakeId)
+        );
     }
 
     #[test]
@@ -621,16 +656,23 @@ mod tests {
         encoded[5] = HandshakePhase::ClientInit as u8;
         encoded[8..24].fill(1);
         encoded[24..26].copy_from_slice(&((MAX_HANDSHAKE_PAYLOAD + 1) as u16).to_be_bytes());
-        assert_eq!(HandshakeEnvelope::decode(&encoded), Err(HandshakeEnvelopeError::TooLarge));
+        assert_eq!(
+            HandshakeEnvelope::decode(&encoded),
+            Err(HandshakeEnvelopeError::TooLarge)
+        );
     }
 
     #[test]
     fn duplicate_request_returns_exact_cached_response() {
         let mut cache = HandshakeResponseCache::new(2).unwrap();
         let id = [3; 16];
-        cache.insert(id, HandshakePhase::ClientInit, b"hello", b"server-response").unwrap();
+        cache
+            .insert(id, HandshakePhase::ClientInit, b"hello", b"server-response")
+            .unwrap();
         assert_eq!(
-            cache.get(&id, HandshakePhase::ClientInit, b"hello").unwrap(),
+            cache
+                .get(&id, HandshakePhase::ClientInit, b"hello")
+                .unwrap(),
             Some(b"server-response".as_slice())
         );
         assert_eq!(
@@ -643,7 +685,9 @@ mod tests {
     fn reused_transaction_key_with_different_request_is_rejected() {
         let mut cache = HandshakeResponseCache::new(2).unwrap();
         let id = [4; 16];
-        cache.insert(id, HandshakePhase::ClientInit, b"first", b"response").unwrap();
+        cache
+            .insert(id, HandshakePhase::ClientInit, b"first", b"response")
+            .unwrap();
         assert_eq!(
             cache.get(&id, HandshakePhase::ClientInit, b"second"),
             Err(HandshakeReplayCacheError::TransactionConflict)
@@ -657,16 +701,33 @@ mod tests {
     #[test]
     fn cache_evicts_oldest_entry_at_capacity() {
         let mut cache = HandshakeResponseCache::new(1).unwrap();
-        cache.insert([1; 16], HandshakePhase::ClientInit, b"a", b"ra").unwrap();
-        cache.insert([2; 16], HandshakePhase::ClientInit, b"b", b"rb").unwrap();
+        cache
+            .insert([1; 16], HandshakePhase::ClientInit, b"a", b"ra")
+            .unwrap();
+        cache
+            .insert([2; 16], HandshakePhase::ClientInit, b"b", b"rb")
+            .unwrap();
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(&[1; 16], HandshakePhase::ClientInit, b"a").unwrap(), None);
-        assert_eq!(cache.get(&[2; 16], HandshakePhase::ClientInit, b"b").unwrap(), Some(b"rb".as_slice()));
+        assert_eq!(
+            cache
+                .get(&[1; 16], HandshakePhase::ClientInit, b"a")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            cache
+                .get(&[2; 16], HandshakePhase::ClientInit, b"b")
+                .unwrap(),
+            Some(b"rb".as_slice())
+        );
     }
 
     #[test]
     fn rejects_zero_capacity() {
-        assert_eq!(HandshakeResponseCache::new(0).err(), Some(HandshakeReplayCacheError::ZeroCapacity));
+        assert_eq!(
+            HandshakeResponseCache::new(0).err(),
+            Some(HandshakeReplayCacheError::ZeroCapacity)
+        );
     }
 
     fn peer() -> SocketAddr {
@@ -678,18 +739,25 @@ mod tests {
             phase,
             handshake_id: id,
             payload: payload.to_vec(),
-        }.encode().unwrap()
+        }
+        .encode()
+        .unwrap()
     }
 
     fn driver() -> HandshakeDatagramDriver {
         HandshakeDatagramDriver::new(
-            8, 2, 8, 2, Duration::from_secs(10),
+            8,
+            2,
+            8,
+            2,
+            Duration::from_secs(10),
             HandshakeRetryPolicy {
                 initial_rto: Duration::from_millis(100),
                 max_rto: Duration::from_millis(250),
                 max_transmissions: 3,
             },
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -697,9 +765,9 @@ mod tests {
         let now = Instant::now();
         let request = envelope(HandshakePhase::ClientInit, [9; 16], b"noise-msg-1");
         let mut driver = driver();
-        driver.register_request(
-            request.clone(), peer(), HandshakePhase::ServerResponse, now,
-        ).unwrap();
+        driver
+            .register_request(request.clone(), peer(), HandshakePhase::ServerResponse, now)
+            .unwrap();
 
         assert!(driver.poll(now + Duration::from_millis(99)).is_empty());
         assert!(matches!(
@@ -725,12 +793,12 @@ mod tests {
         let request = envelope(HandshakePhase::ClientInit, [8; 16], b"m1");
         let valid = envelope(HandshakePhase::ServerResponse, [8; 16], b"m2");
         let mut driver = driver();
-        driver.register_request(
-            request, peer(), HandshakePhase::ServerResponse, now,
-        ).unwrap();
-        assert!(!driver.match_response(
-            &valid, "192.0.2.45:50000".parse().unwrap(),
-        ).unwrap());
+        driver
+            .register_request(request, peer(), HandshakePhase::ServerResponse, now)
+            .unwrap();
+        assert!(!driver
+            .match_response(&valid, "192.0.2.45:50000".parse().unwrap(),)
+            .unwrap());
         let wrong_phase = envelope(HandshakePhase::ServerAck, [8; 16], b"bad");
         assert!(!driver.match_response(&wrong_phase, peer()).unwrap());
         assert!(driver.match_response(&valid, peer()).unwrap());
@@ -743,13 +811,21 @@ mod tests {
     fn response_cache_capacity_does_not_evict_existing_replay_entries() {
         let now = Instant::now();
         let mut driver = HandshakeDatagramDriver::new(
-            8, 2, 1, 1, Duration::from_secs(10), HandshakeRetryPolicy::default(),
-        ).unwrap();
+            8,
+            2,
+            1,
+            1,
+            Duration::from_secs(10),
+            HandshakeRetryPolicy::default(),
+        )
+        .unwrap();
         let first = envelope(HandshakePhase::ClientInit, [0x61; 16], b"first");
         let first_response = envelope(HandshakePhase::ServerResponse, [0x61; 16], b"reply");
         let second = envelope(HandshakePhase::ClientInit, [0x62; 16], b"second");
         let second_response = envelope(HandshakePhase::ServerResponse, [0x62; 16], b"reply");
-        driver.cache_response(&first, first_response.clone(), peer(), now).unwrap();
+        driver
+            .cache_response(&first, first_response.clone(), peer(), now)
+            .unwrap();
         assert_eq!(
             driver.cache_response(&second, second_response, peer(), now),
             Err(HandshakeDriverError::CacheCapacity),
@@ -767,13 +843,20 @@ mod tests {
         let request = envelope(HandshakePhase::ClientInit, [6; 16], b"m1");
         let response = envelope(HandshakePhase::ServerResponse, [6; 16], b"m2");
         let mut driver = driver();
-        driver.cache_response(&request, response.clone(), peer(), now).unwrap();
+        driver
+            .cache_response(&request, response.clone(), peer(), now)
+            .unwrap();
         assert_eq!(
             driver.cached_response(&request, peer(), now).unwrap(),
             Some(response.as_slice())
         );
         assert_eq!(driver.prune_expired(now + Duration::from_secs(10)), 1);
-        assert_eq!(driver.cached_response(&request, peer(), now + Duration::from_secs(10)).unwrap(), None);
+        assert_eq!(
+            driver
+                .cached_response(&request, peer(), now + Duration::from_secs(10))
+                .unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -783,13 +866,18 @@ mod tests {
         let altered = envelope(HandshakePhase::ClientFinish, [0x31; 16], b"altered");
         let response = envelope(HandshakePhase::ServerAck, [0x31; 16], b"ack");
         let mut driver = driver();
-        driver.cache_response(&request, response, peer(), now).unwrap();
+        driver
+            .cache_response(&request, response, peer(), now)
+            .unwrap();
 
         assert_eq!(
             driver.remove_cached_response(&altered, peer()),
             Err(HandshakeDriverError::CacheConflict)
         );
-        assert!(driver.cached_response(&request, peer(), now).unwrap().is_some());
+        assert!(driver
+            .cached_response(&request, peer(), now)
+            .unwrap()
+            .is_some());
         assert!(driver.remove_cached_response(&request, peer()).unwrap());
         assert_eq!(driver.cached_response(&request, peer(), now).unwrap(), None);
         assert!(!driver.remove_cached_response(&request, peer()).unwrap());
@@ -802,7 +890,9 @@ mod tests {
         let altered = envelope(HandshakePhase::ClientInit, [5; 16], b"other");
         let response = envelope(HandshakePhase::ServerResponse, [5; 16], b"reply");
         let mut driver = driver();
-        driver.cache_response(&request, response, peer(), now).unwrap();
+        driver
+            .cache_response(&request, response, peer(), now)
+            .unwrap();
         assert_eq!(
             driver.cached_response(&altered, peer(), now),
             Err(HandshakeDriverError::CacheConflict)
@@ -813,28 +903,42 @@ mod tests {
     fn driver_enforces_global_and_per_peer_pending_limits() {
         let now = Instant::now();
         let mut driver = HandshakeDatagramDriver::new(
-            2, 1, 2, 1, Duration::from_secs(1), HandshakeRetryPolicy::default(),
-        ).unwrap();
-        driver.register_request(
-            envelope(HandshakePhase::ClientInit, [1; 16], b"a"),
-            peer(), HandshakePhase::ServerResponse, now,
-        ).unwrap();
+            2,
+            1,
+            2,
+            1,
+            Duration::from_secs(1),
+            HandshakeRetryPolicy::default(),
+        )
+        .unwrap();
+        driver
+            .register_request(
+                envelope(HandshakePhase::ClientInit, [1; 16], b"a"),
+                peer(),
+                HandshakePhase::ServerResponse,
+                now,
+            )
+            .unwrap();
         assert_eq!(
             driver.register_request(
                 envelope(HandshakePhase::ClientInit, [2; 16], b"b"),
-                peer(), HandshakePhase::ServerResponse, now,
+                peer(),
+                HandshakePhase::ServerResponse,
+                now,
             ),
             Err(HandshakeDriverError::PeerLimitReached)
         );
-        driver.register_request(
-            envelope(HandshakePhase::ClientInit, [3; 16], b"c"),
-            "192.0.2.45:50000".parse().unwrap(),
-            HandshakePhase::ServerResponse, now,
-        ).unwrap();
+        driver
+            .register_request(
+                envelope(HandshakePhase::ClientInit, [3; 16], b"c"),
+                "192.0.2.45:50000".parse().unwrap(),
+                HandshakePhase::ServerResponse,
+                now,
+            )
+            .unwrap();
         assert_eq!(driver.pending_len(), 2);
     }
 }
-
 
 #[cfg(test)]
 mod arbitrary_input_property_tests {

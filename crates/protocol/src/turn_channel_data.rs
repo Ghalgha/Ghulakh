@@ -86,17 +86,38 @@ mod tests {
 
     #[test]
     fn rejects_invalid_channel_numbers() {
-        assert_eq!(encode_channel_data(0x3fff, b"x"), Err(ChannelDataError::InvalidChannelNumber));
-        assert_eq!(decode_channel_data(&[0x3f, 0xff, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
-        assert_eq!(decode_channel_data(&[0x50, 0, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
-        assert_eq!(decode_channel_data(&[0x80, 0, 0, 1, 1]), Err(ChannelDataError::InvalidChannelNumber));
+        assert_eq!(
+            encode_channel_data(0x3fff, b"x"),
+            Err(ChannelDataError::InvalidChannelNumber)
+        );
+        assert_eq!(
+            decode_channel_data(&[0x3f, 0xff, 0, 1, 1]),
+            Err(ChannelDataError::InvalidChannelNumber)
+        );
+        assert_eq!(
+            decode_channel_data(&[0x50, 0, 0, 1, 1]),
+            Err(ChannelDataError::InvalidChannelNumber)
+        );
+        assert_eq!(
+            decode_channel_data(&[0x80, 0, 0, 1, 1]),
+            Err(ChannelDataError::InvalidChannelNumber)
+        );
     }
 
     #[test]
     fn rejects_truncated_and_mismatched_lengths() {
-        assert_eq!(decode_channel_data(&[0x40, 0, 0]), Err(ChannelDataError::Truncated));
-        assert_eq!(decode_channel_data(&[0x40, 0, 0, 2, 1]), Err(ChannelDataError::InvalidLength));
-        assert_eq!(decode_channel_data(&[0x40, 0, 0, 1, 1, 0]), Err(ChannelDataError::InvalidLength));
+        assert_eq!(
+            decode_channel_data(&[0x40, 0, 0]),
+            Err(ChannelDataError::Truncated)
+        );
+        assert_eq!(
+            decode_channel_data(&[0x40, 0, 0, 2, 1]),
+            Err(ChannelDataError::InvalidLength)
+        );
+        assert_eq!(
+            decode_channel_data(&[0x40, 0, 0, 1, 1, 0]),
+            Err(ChannelDataError::InvalidLength)
+        );
     }
 
     #[test]
@@ -138,5 +159,4 @@ mod tests {
         assert_eq!(decoded.channel_number, CHANNEL_NUMBER_MAX);
         assert_eq!(decoded.data, payload);
     }
-
 }
