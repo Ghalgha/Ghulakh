@@ -80,7 +80,7 @@ jobs:
           java-version: '17'
       - uses: android-actions/setup-android@v3
         with:
-          packages: 'platforms;android-35 build-tools;35.0.0 ndk;27.3.13750724'
+          packages: 'platforms;android-35 build-tools;36.0.0 ndk;27.3.13750724'
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
@@ -93,7 +93,7 @@ jobs:
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 --platform 26 -o android/app/src/main/jniLibs build --release -p ghulakh-transport
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.11.1'
+          gradle-version: '9.6.0'
       - name: Run Android JVM unit tests
         run: gradle -p android testDebugUnitTest
       - name: Assemble debug APK
