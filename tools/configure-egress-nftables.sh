@@ -59,6 +59,10 @@ nft -f - <<NFT
 table inet ghulakh_egress {
   chain input {
     type filter hook input priority -10; policy accept;
+    # IPv6 Neighbor Discovery is required for clients to resolve the TUN
+    # gateway. Accept only valid link-local control messages (hop limit 255);
+    # all other traffic addressed to server-local services remains blocked.
+    iifname "$TUN_IF" ip6 hoplimit 255 icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert } counter accept
     iifname "$TUN_IF" counter drop
   }
   chain forward {
