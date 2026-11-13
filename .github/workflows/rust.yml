@@ -27,6 +27,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Resolve dependencies
         run: cargo generate-lockfile
+      - name: Export generated dependency lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-dependency-lockfile
+          path: Cargo.lock
+          if-no-files-found: error
+          retention-days: 1
       - uses: taiki-e/install-action@cargo-audit
       - name: Audit dependencies
         run: cargo audit
