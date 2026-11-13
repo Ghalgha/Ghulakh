@@ -183,6 +183,53 @@ if ip netns exec "$C" ping -6 -c 1 -W 1 fd99::1; then
   echo "FAIL: ULA IPv6 destination escaped the egress ACL" >&2
   exit 1
 fi
+# Exercise fwmark-based policy routing. A marked packet from the TUN is deliberately
+# routed toward the unrelated/rogue interface instead of WAN. The egress policy
+# must still drop it; policy routing must not create an alternate escape path.
+ip netns exec "$R" nft -f - <<'NFT'
+table inet policy_route_probe {
+  chain prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+    iifname "rc0" meta mark set 0x42
+  }
+}
+NFT
+ip -n "$R" route add default via 10.88.0.2 dev rx0 table 100
+ip -n "$R" rule add priority 100 fwmark 0x42/0xff table 100
+ip -n "$R" -6 route add default via fd88::2 dev rx0 table 100
+ip -n "$R" -6 rule add priority 100 fwmark 0x42/0xff table 100
+
+ip netns exec "$X" nft -f - <<'NFT'
+table inet policy_route_probe {
+  chain prerouting {
+    type filter hook prerouting priority filter; policy accept;
+    iifname "x0" ip saddr 10.77.0.2 ip daddr 8.8.8.8 counter
+    iifname "x0" ip6 saddr fd77:77::2 ip6 daddr 2001:4860:4860::8888 counter
+  }
+}
+NFT
+if ip netns exec "$C" ping -c 1 -W 1 8.8.8.8; then
+  echo "FAIL: IPv4 fwmark policy route escaped through the rogue interface" >&2
+  exit 1
+fi
+if ip netns exec "$C" ping -6 -c 1 -W 1 2001:4860:4860::8888; then
+  echo "FAIL: IPv6 fwmark policy route escaped through the rogue interface" >&2
+  exit 1
+fi
+# The rogue peer must never see either packet; both must hit the TUN catch-all drop.
+ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
+  | grep -F 'ip daddr 8.8.8.8 counter packets' | grep -Eq 'counter packets 0'
+ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
+  | grep -F 'ip6 daddr 2001:4860:4860::8888 counter packets' | grep -Eq 'counter packets 0'
+ip netns exec "$R" nft list chain inet ghulakh_egress forward \\
+  | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
+ip netns exec "$R" ip rule del priority 100 fwmark 0x42/0xff table 100
+ip netns exec "$R" ip -6 rule del priority 100 fwmark 0x42/0xff table 100
+ip netns exec "$R" ip route flush table 100
+ip netns exec "$R" ip -6 route flush table 100
+ip netns exec "$R" nft delete table inet policy_route_probe
+ip netns exec "$X" nft delete table inet policy_route_probe
+
 # Add deliberately invalid source addresses only when their negative probes run.
 # Keeping them off the interface during NAT66 warm-up prevents IPv6 source-address
 # selection from choosing the spoof-test ULA instead of the tunnel ULA. The synthetic
