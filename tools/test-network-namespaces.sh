@@ -47,6 +47,14 @@ ip -n "$C" route add default via 10.77.0.1
 ip -n "$U" route add 10.77.0.0/24 via 1.1.1.254
 ip -n "$C" -6 route add default via fd77:77::1
 ip -n "$U" -6 route add fd77:77::/64 via 2606:4700:4700::fffe
+ip netns exec "$R" sysctl -q -w net.ipv6.conf.default.forwarding=1
+ip netns exec "$R" ip link add v6probe0 type veth peer name v6probe1
+if [[ "$(ip netns exec "$R" sysctl -n net.ipv6.conf.v6probe0.forwarding)" != "1" ]]; then
+  echo "FAIL: a newly created interface did not inherit IPv6 router mode" >&2
+  exit 1
+fi
+ip netns exec "$R" ip link del v6probe0
+
 ip netns exec "$R" sysctl -q -w net.ipv4.ip_forward=1
 ip netns exec "$R" sysctl -q -w net.ipv6.conf.all.forwarding=1
 

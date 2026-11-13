@@ -50,9 +50,16 @@ TUN-подсистема пока экспериментальная. Испол
 # Включить IPv4 и IPv6 forwarding до запуска сервера.
 sudo sysctl -w net.ipv4.ip_forward=1
 sudo sysctl -w net.ipv6.conf.all.forwarding=1
+# Значение по умолчанию для интерфейсов, создаваемых после настройки forwarding.
+sudo sysctl -w net.ipv6.conf.default.forwarding=1
 
 # Замените eth0 на внешний интерфейс сервера.
 WAN_IF=eth0
+
+# Только если IPv6 default route на WAN получается через Router Advertisements:
+# forwarding переводит интерфейс в режим router, в котором RA по умолчанию игнорируются.
+# Включайте приём RA только на WAN-интерфейсе, не глобально.
+# sudo sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=2"
 
 sudo nft add table inet ghulakh
 sudo nft 'add chain inet ghulakh forward { type filter hook forward priority filter; policy drop; }'
@@ -78,6 +85,18 @@ cargo run --release -p ghulakh-server
 ```
 
 Команды nftables приведены как минимальный пример для выделенного хоста. Для существующей системы объедините правила с действующей политикой firewall, сохраните их в постоянной конфигурации и проверьте обратный трафик. Сервер не включает IP forwarding и не меняет firewall автоматически. Даже при созданном TUN Android-клиент откажется активировать маршруты, пока администратор явно не установит `GHULAKH_FORWARDING_ENABLED=true`. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности firewall.
+
+## Изолированная проверка сетевой конфигурации
+
+На отдельной Linux VM или CI runner с root/CAP_NET_ADMIN, `iproute2`, `nftables` и `ping` выполните:
+
+```sh
+sudo bash tools/test-network-namespaces.sh
+```
+
+Скрипт создаёт три network namespaces и два veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
+
+Все тестовые адреса существуют только внутри изолированных namespaces; трафик не отправляется во внешнюю сеть. Проверка относится к Linux routing/NAT/firewall и не заменяет отдельные тесты egress ACL в серверном коде или испытание на реальном upstream.
 
 ## Ограничения
 

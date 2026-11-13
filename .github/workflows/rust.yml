@@ -53,6 +53,19 @@ jobs:
       - name: Fuzz protected frame decoder
         run: cargo +nightly fuzz run --fuzz-dir fuzz secure_frame_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
 
+  network-namespace:
+    name: Linux network namespace integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install network test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iproute2 nftables iputils-ping
+      - name: Verify isolated forwarding, NAT and firewall
+        run: sudo bash tools/test-network-namespaces.sh
+
   android:
     name: Android debug build
     runs-on: ubuntu-latest
