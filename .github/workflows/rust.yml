@@ -71,6 +71,8 @@ jobs:
           bash -n tools/deploy-server.sh
       - name: Verify deployment lifecycle safeguards
         run: bash tools/test-deployment-lifecycle.sh
+      - name: Verify credential digest file safety
+        run: python3 tools/test_credential_file_safety.py
       - name: Install network test tools
         run: |
           sudo apt-get update
