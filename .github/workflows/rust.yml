@@ -44,6 +44,17 @@ jobs:
           toolchain: nightly-2026-11-12
       - name: Install cargo-fuzz
         run: cargo +nightly-2026-11-12 install cargo-fuzz --version 0.13.2 --locked
+      - name: Generate and verify fuzz workspace lockfile
+        run: |
+          cargo +nightly-2026-11-12 generate-lockfile --manifest-path fuzz/Cargo.toml
+          cargo +nightly-2026-11-12 check --manifest-path fuzz/Cargo.toml --locked
+      - name: Upload generated fuzz lockfile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-cargo-lock
+          path: fuzz/Cargo.lock
+          if-no-files-found: error
+          retention-days: 3
       - name: Fuzz STUN decoder
         run: cargo +nightly-2026-11-12 fuzz run --fuzz-dir fuzz stun_decode -- -max_total_time=15 -timeout=2 -rss_limit_mb=2048
       - name: Fuzz handshake envelope decoder
