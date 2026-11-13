@@ -5,5 +5,6 @@ plugins {
 allprojects {
     dependencyLocking {
         lockAllConfigurations()
+        lockMode = LockMode.STRICT
     }
 }
