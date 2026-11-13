@@ -128,11 +128,11 @@ mod tests {
             };
             let original = SequencedDataDatagram::new(sequence, datagram);
             let encoded = original.encode().unwrap();
-            prop_assert_eq!(SequencedDataDatagram::decode(&encoded).unwrap(), original);
+            proptest::prop_assert_eq!(SequencedDataDatagram::decode(&encoded).unwrap(), original);
 
             let legacy = SequencedDataDatagram::unsequenced(original.datagram.clone());
             let legacy_wire = legacy.encode().unwrap();
-            prop_assert_eq!(SequencedDataDatagram::decode(&legacy_wire).unwrap(), legacy);
+            proptest::prop_assert_eq!(SequencedDataDatagram::decode(&legacy_wire).unwrap(), legacy);
         }
     }
 
