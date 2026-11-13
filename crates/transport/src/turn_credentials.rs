@@ -82,6 +82,14 @@ fn zeroize_query_parameters(query: &mut [(String, String)]) {
     }
 }
 
+struct SensitiveQueryParameters(Vec<(String, String)>);
+
+impl Drop for SensitiveQueryParameters {
+    fn drop(&mut self) {
+        zeroize_query_parameters(&mut self.0);
+    }
+}
+
 impl Drop for TurnEndpoint {
     fn drop(&mut self) {
         zeroize_query_parameters(&mut self.query);
@@ -307,7 +315,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
     }
 
     let (host, port) = parse_authority(authority, scheme)?;
-    let mut parameters = Vec::new();
+    let mut parameters = SensitiveQueryParameters(Vec::new());
     let mut requested_transport = None;
     for part in query.split('&').filter(|part| !part.is_empty()) {
         let (key, value) = part.split_once('=').unwrap_or((part, ""));
@@ -321,7 +329,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
                 _ => return Err(TurnCredentialError::InvalidTransport),
             });
         }
-        parameters.push((key.to_owned(), value.to_owned()));
+        parameters.0.push((key.to_owned(), value.to_owned()));
     }
 
     let transport = match (scheme, requested_transport) {
@@ -338,7 +346,7 @@ pub fn parse_turn_uri(input: &str) -> Result<TurnEndpoint, TurnCredentialError> 
         host,
         port,
         transport,
-        query: parameters,
+        query: std::mem::take(&mut parameters.0),
     })
 }
 
