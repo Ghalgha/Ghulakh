@@ -81,7 +81,7 @@ sudo bash tools/configure-egress-nftables.sh --remove
 sudo bash tools/test-network-namespaces.sh
 ~~~
 
-Тест создаёт network namespaces/veth, проверяет IPv4 NAT, IPv6 NAT66 и routed mode, обратный established traffic и firewall drops. Дополнительный сценарий в PR №12 проверяет IPv4/IPv6 `fwmark` policy routing: маркированные пакеты намеренно направляются через посторонний интерфейс; rogue peer не должен получить ни один пакет, а TUN catch-all drop должен сработать. Для PR №12 все три CI jobs прошли на head `298fd96b510166e79700ecdb185eab5258e73379`; до слияния этот сценарий ещё не входит в `main`. Он не меняет внешние маршруты хоста и не подтверждает поведение конкретного VPS provider. Дополнительно вручную проверить WAN interface/default routes, конфликты nftables, UDP gateway port, sysctl/IPv6 RA и отсутствие forwarding к private, loopback, link-local и multicast destinations.
+Тест создаёт network namespaces/veth, проверяет IPv4 NAT, IPv6 NAT66 и routed mode, обратный established traffic и firewall drops. Дополнительный сценарий в PR №12 проверяет IPv4/IPv6 `fwmark` policy routing: маркированные пакеты намеренно направляются через посторонний интерфейс; rogue peer не должен получить ни один пакет, а TUN catch-all drop должен сработать. Для PR №12 все три CI jobs прошли на head `2289e4c8718ad5a4372a53c878126e2c76f845db`; сценарий включён в `main` коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Он не меняет внешние маршруты хоста и не подтверждает поведение конкретного VPS provider. Дополнительно вручную проверить WAN interface/default routes, конфликты nftables, UDP gateway port, sysctl/IPv6 RA и отсутствие forwarding к private, loopback, link-local и multicast destinations.
 
 ## 7. Ограничения
 

@@ -1,6 +1,6 @@
 # Модель угроз
 
-**Сверено с базовым main `d62e9b45cde0f5ee6502196128eb5d60041304f2` (2026-11-13); PR №12 содержит дополнительный непрошедший merge fwmark regression test.** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+**Сверено с main `c337b98243f95b15256b4fb56995ff1597684bc2` (2026-11-13); fwmark regression test из PR №12 уже включён в main.** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
 
 ## Защищаемые активы
 
@@ -41,11 +41,16 @@ TURN relay считается недоверенным посредником д
 - gateway проверяет source tuple, AEAD/replay и назначенный inner IPv4/IPv6 source до TUN ingress;
 - path group проверяет общий group ID/path count/virtual IPv4, уникальность path ID и generation-bound replacement;
 - handshake admission, peer rate table, replay cache, transaction concurrency и очереди ограничены;
-- Rust TURN username/password хранятся в `Zeroizing` и redacted `Debug`; временные Rust JSON/JNI-буферы очищаются при освобождении. Android передаёт TURN JSON в native один раз и снимает ссылки после handoff; JVM не гарантирует физическое стирание immutable `String`. VK access token и device credential шифруются с помощью Android Keystore;
+- Rust TURN username/password, challenge strings, STUN attribute values, partially decoded attributes, signing/verification staging buffers, pending transaction bytes, retransmission copies и TURN socket actor control/command/receive buffers очищаются через `Zeroizing` или явный `zeroize` при завершении соответствующего lifetime. TURN URI query keys/values очищаются при уничтожении endpoint, а частично собранные query очищаются при ошибке разбора. Это уменьшает контролируемые приложением копии, но не гарантирует очистку внутренних состояний криптографических библиотек/ядра или любых копий, созданных вне контролируемого кода. Android передаёт TURN JSON в native один раз и снимает ссылки после handoff; JVM не гарантирует физическое стирание immutable `String`/`JSONObject`. VK access token и device credential шифруются с помощью Android Keystore;
 - Android вызывает `VpnService.protect(fd)` для каждого TURN UDP socket до использования его внутри VPN;
 - IPv4 и IPv6 маршруты захватываются Android; оба семейства передаются в dual-stack server TUN, где проверяются source addresses. Публичный IPv6 egress зависит от серверного upstream route/NAT66;
 - отдельный host nftables egress policy script (его должен явно установить администратор) блокирует spoofed TUN source, частные/служебные IPv4 и IPv6 назначения, unsolicited traffic к TUN и исходящий forwarding в другие интерфейсы. Без установки этого ruleset защита egress на уровне ядра не активна. Установка и удаление ограничены собственными nftables tables с ownership marker `ghulakh-egress-v1`; удаление заранее проверяет маркер всех затрагиваемых таблиц и не должно удалять таблицы без подтверждённого владения.
 
+## Жизненный цикл STUN/TURN секретных буферов
+
+В PR №14 добавлена очистка контролируемых Rust-копий на основном control-plane пути: `TurnChallenge` очищает realm/nonce/algorithm offer; `StunMessage` очищает значения атрибутов при drop, а частично декодированные атрибуты очищаются и при ошибке; временные signing/verification/fingerprint buffers используют `Zeroizing`; `TransactionManager` очищает сохранённый запрос, а retransmission event очищает отдельную копию; socket actor очищает исходящие command datagrams, входящие control wire bytes и receive buffer. `TurnAuthContext` удерживает username/realm/nonce/key/algorithm offer в zeroizing storage.
+
+Это не очищает JVM immutable objects, внутренние буферы HMAC/MD5 реализаций, kernel socket buffers или копии вне контролируемого Rust-кода. Очистка требует успешного CI и не заменяет независимый криптографический review.
 ## Проверка policy-routing обхода
 
 В PR №12 изолированный network namespace test помечает IPv4 и IPv6 пакеты, поступающие с TUN, через `fwmark`, а policy rules намеренно направляют их к постороннему интерфейсу. Проверяется, что оба пакета не достигают rogue peer, а egress firewall отбрасывает forwarding с TUN. Это регрессионная проверка конкретной топологии Linux namespaces; она не заменяет аудит произвольных host rules, реального VPS и фактической конфигурации провайдера.

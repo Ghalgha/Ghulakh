@@ -1,6 +1,6 @@
 # Текущий статус проекта
 
-Дата сверки: 2026-11-13. Базовый main: `d62e9b45cde0f5ee6502196128eb5d60041304f2` (после PR №11). Открытый PR №12 добавляет IPv4/IPv6 fwmark policy-routing regression test; его head `298fd96b510166e79700ecdb185eab5258e73379` прошёл все три CI jobs. Изменения PR ещё не входят в main.
+Дата сверки: 2026-11-13. Базовый main: `c337b98243f95b15256b4fb56995ff1597684bc2` (PR №12 и PR №13 слиты). PR №12 добавил IPv4/IPv6 fwmark policy-routing regression test; его head `2289e4c8718ad5a4372a53c878126e2c76f845db` прошёл все три CI jobs до squash-слияния.
 
 Документ отделяет наличие реализации и автоматических тестов от подтверждения работы с внешней сетью. Успешный CI не доказывает совместимость с VK Calls relay или production readiness.
 
@@ -20,12 +20,13 @@
 - Серверный gateway интегрирован с UDP ingress, authenticated session registration, TUN reader/writer и downlink route lookup. Очереди, handshake admission и основные resource limits ограничены.
 - IPv4/IPv6 packet processing и source-address validation присутствуют на клиенте и сервере. Host egress policy вынесена в отдельный nftables script и не включается автоматически.
 - Android Keystore сохраняет полный connection profile единым AES-GCM payload. При отсутствии ключа расшифрования профиль не пересоздаётся молча.
-- Rust TURN credentials используют zeroizing storage/redacted Debug. Android передаёт TURN JSON в native через one-shot handoff и очищает ссылки; JVM immutable String не гарантирует физическое затирание памяти.
+- Rust TURN credentials используют zeroizing storage/redacted Debug. В PR №14 добавлена очистка TURN challenge strings, STUN attribute buffers (включая частичный decode), signing/verification staging buffers, transaction request/retransmission buffers, socket actor command/control/receive buffers и временных query-параметров URI. Результат CI для расширенного изменения ещё не подтверждён.
+- Android передаёт TURN JSON в native через one-shot handoff и очищает ссылки; JVM immutable String/JSONObject не гарантируют физическое затирание памяти.
 - CI включает Rust tests/Clippy/audit, пять коротких fuzz targets, Android JVM unit tests/native build/debug APK и Linux network namespace test.
 
 ## Автоматически проверено
 
-Для merge head eb92fd6e1628508c22c5eabf0f8ae5b291ed13d6 успешно завершились Rust checks, Android debug build и Linux network namespace integration. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic, firewall drop cases, а в PR №12 — IPv4/IPv6 fwmark policy routing через посторонний интерфейс с подтверждением, что пакеты не достигают rogue peer и попадают под TUN catch-all drop. Это не тест реального VPS или Android туннеля.
+Для PR №12 на head `2289e4c8718ad5a4372a53c878126e2c76f845db` успешно завершились Rust checks, Android debug build и Linux network namespace integration; затем изменения слиты в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Namespace test изолированно проверяет IPv4 forwarding/NAT, IPv6 NAT66 и routed egress, established return traffic, firewall drop cases и IPv4/IPv6 fwmark policy routing через посторонний интерфейс: пакеты не достигают rogue peer и попадают под TUN catch-all drop. Это не тест реального VPS или Android туннеля.
 
 Mock UDP/integration tests покрывают TURN control/data composition, Noise handshake, session registration, protected uplink/downlink, multipath, path loss/replacement, IPv4/IPv6 forwarding, ordering, lifecycle races и cleanup. Mock relay не является реализацией VK TURN и не подтверждает внешний auth profile.
 
@@ -38,7 +39,7 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 5. Android OAuth: встроенного OAuth/login UI и автоматического обновления VK access token нет; токен вводится вручную.
 6. Server deployment: нет безопасного полного install/update/uninstall lifecycle. Администратор вручную создаёт ключи/credentials, включает sysctl, проверяет маршруты и устанавливает ограниченную nftables policy. Автоматическое изменение глобальных настроек сервера не выполняется.
 7. Supply chain: нужно отдельно подтвердить Gradle dependency locking/verification, pinning GitHub Actions по SHA и воспроизводимость сборок; наличие lockfiles/Wrapper само по себе аудит не завершает.
-8. Secrets: остаётся аудит срока жизни промежуточных Kotlin String/JSON объектов, native copies, crash/backup paths и полного удаления после teardown.
+8. Secrets: Rust TURN/STUN буферы рассмотрены в PR №14; остаётся CI-подтверждение изменений и аудит Kotlin String/JSON объектов, native copies, crash/backup paths и полного удаления после teardown.
 9. Security assurance: не завершены независимый review Noise/session framing, длительные fuzz/property/fault runs, нагрузочные и resource-exhaustion проверки.
 10. Производительность: нет сопоставимых реальных измерений goodput, p50/p95/p99 latency, loss, CPU, wakeups, RSS и энергопотребления.
 11. Release: CI собирает debug APK; подписанный release artifact и безопасная процедура распространения не подтверждены.
@@ -49,8 +50,8 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 
 ## Порядок завершения
 
-1. Завершён аудит основных IPv4/IPv6 egress edge cases; PR №12 добавляет изолированный тест обходного fwmark policy routing для обоих семейств. После слияния актуализировать ссылку на merge commit.
-2. Закончить аудит секретов и lifetime на Kotlin/JNI/Rust границах.
+1. Аудит основных IPv4/IPv6 egress edge cases и изолированный тест обходного fwmark policy routing для обоих семейств включены в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Это закрывает тестирование описанной топологии, но не произвольных правил реального хоста.
+2. Завершить оставшийся аудит Kotlin/JNI secrets lifetime и подтвердить тестами Rust STUN/TURN buffer cleanup из PR №14.
 3. Закрыть dependency locking/verification и SHA pinning CI actions.
 4. Завершить crypto composition review и длительные fuzz/property/fault/resource tests.
 5. Завершить операционную модель deployment, не затрагивающую чужие настройки сервера.

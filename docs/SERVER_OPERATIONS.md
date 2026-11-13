@@ -1,6 +1,6 @@
 # Эксплуатация сервера
 
-**Сверено с базовым main `d62e9b45cde0f5ee6502196128eb5d60041304f2` (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+**Сверено с main `cf8218a11b56f5cba770f91281af231ef7a2bc7d` (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
 
 ## Выпуск device credential
 
@@ -124,7 +124,7 @@ cargo run --release -p ghulakh-server
 sudo bash tools/test-network-namespaces.sh
 ```
 
-Скрипт создаёт четыре network namespaces и три veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительный сценарий PR №12 маркирует IPv4/IPv6 TUN-пакеты и policy-routes их к rogue interface; проверяется отсутствие пакетов на rogue peer и срабатывание TUN catch-all drop. Этот сценарий ещё не входит в базовый main до слияния PR. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
+Скрипт создаёт четыре network namespaces и три veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительный сценарий PR №12 маркирует IPv4/IPv6 TUN-пакеты и policy-routes их к rogue interface; проверяется отсутствие пакетов на rogue peer и срабатывание TUN catch-all drop. Этот сценарий включён в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
 
 Все тестовые адреса существуют только внутри изолированных namespaces; трафик не отправляется во внешнюю сеть. Проверка относится к Linux routing/NAT/firewall и не заменяет проверку source-address validation в gateway, интеграцию с реальным firewall хоста или испытание на реальном upstream.
 

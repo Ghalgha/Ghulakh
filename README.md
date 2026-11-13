@@ -8,9 +8,9 @@ Ghulakh — исследовательская система защищённо
 
 ## Состояние на 2026-11-13
 
-Базовый main для текущей серии проверок: `d62e9b45cde0f5ee6502196128eb5d60041304f2`. В открытом PR №12 дополнительно проверяется устойчивость egress-политики к IPv4/IPv6 fwmark policy routing. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
+Текущий main: `c337b98243f95b15256b4fb56995ff1597684bc2`; PR №12 и синхронизация документации PR №13 слиты. В main включена проверка устойчивости egress-политики к IPv4/IPv6 fwmark policy routing. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
 
-Для базового main успешно завершались Rust checks, Android debug build и Linux network namespace integration. В PR №12 те же три CI jobs успешно проверили дополнительный fwmark policy-routing сценарий; PR ещё не слит. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
+Для PR №12 все три CI jobs успешно завершились на head `2289e4c8718ad5a4372a53c878126e2c76f845db`; изменения слиты в main коммитом `cf8218a11b56f5cba770f91281af231ef7a2bc7d`. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве. Отдельный аудит Rust STUN/TURN secret-buffer lifetime выполняется в PR №14; его результаты ожидают CI.
 
 **Проект пока не готов к production или повседневному использованию.** Не подтверждены live VK Calls API/TURN auth profile, реальная relay allocation и сквозной маршрут Android → VK TURN → VPS → интернет → Android. Не проверены публичный IPv6 egress на VPS, внешние квоты и длительная стабильность. VK access token вводится вручную; in-app OAuth отсутствует. Подробности — [текущий статус](docs/STATUS.md).
 
