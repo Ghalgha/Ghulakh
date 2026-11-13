@@ -11,7 +11,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const MAX_CHALLENGE_TEXT: usize = 763;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct TurnChallenge {
     pub code: u16,
     pub realm: String,
@@ -19,6 +19,17 @@ pub struct TurnChallenge {
     /// Raw server offer retained for the authenticated follow-up request.
     /// RFC 8489 requires echoing this attribute to prevent algorithm downgrade.
     pub password_algorithms: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for TurnChallenge {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("TurnChallenge")
+            .field("code", &self.code)
+            .field("realm", &"<redacted>")
+            .field("nonce", &"<redacted>")
+            .field("password_algorithms_len", &self.password_algorithms.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 impl Drop for TurnChallenge {
@@ -138,6 +149,20 @@ mod tests {
                 StunAttribute { kind: ATTR_NONCE, value: b"opaque-server-nonce".to_vec() },
             ],
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_challenge_values() {
+        let challenge = TurnChallenge {
+            code: 401,
+            realm: "secret-realm-marker".to_owned(),
+            nonce: "secret-nonce-marker".to_owned(),
+            password_algorithms: Some(vec![1, 2, 3, 4]),
+        };
+        let rendered = format!("{challenge:?}");
+        assert!(!rendered.contains("secret-realm-marker"));
+        assert!(!rendered.contains("secret-nonce-marker"));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
