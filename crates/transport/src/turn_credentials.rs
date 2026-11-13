@@ -5,11 +5,50 @@
 //! when the credential object is dropped.
 
 use std::{fmt, net::IpAddr, str::FromStr};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_CREDENTIAL_LEN: usize = 4096;
 const MAX_TURN_URLS: usize = 16;
 const MAX_URI_LEN: usize = 2048;
+
+struct SensitiveJsonValue(serde_json::Value);
+
+impl Drop for SensitiveJsonValue {
+    fn drop(&mut self) {
+        zeroize_json_strings(&mut self.0);
+    }
+}
+
+fn zeroize_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(value) => value.zeroize(),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                zeroize_json_strings(value);
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                zeroize_json_strings(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn take_secret(
+    object: &mut serde_json::Value,
+    key: &str,
+    error: TurnCredentialError,
+) -> Result<Zeroizing<String>, TurnCredentialError> {
+    match object.get_mut(key) {
+        Some(serde_json::Value::String(value)) => {
+            validate_secret(value, error)?;
+            Ok(Zeroizing::new(std::mem::take(value)))
+        }
+        _ => Err(error),
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnScheme {
@@ -101,12 +140,21 @@ impl TurnCredentials {
         }
         let root: serde_json::Value =
             serde_json::from_str(input).map_err(|_| TurnCredentialError::InvalidJson)?;
-        let values = root.as_array().ok_or(TurnCredentialError::InvalidJson)?;
+        let values = match root {
+            serde_json::Value::Array(values) => {
+                values.into_iter().map(SensitiveJsonValue).collect::<Vec<_>>()
+            }
+            mut other => {
+                zeroize_json_strings(&mut other);
+                return Err(TurnCredentialError::InvalidJson);
+            }
+        };
         if values.len() != expected_count || !(2..=10).contains(&values.len()) {
             return Err(TurnCredentialError::InvalidCredentialSetCount);
         }
-        values.iter()
-            .map(|value| Self::from_vk_response_json(&value.to_string()))
+        values
+            .into_iter()
+            .map(Self::from_vk_response_value)
             .collect()
     }
 
@@ -117,26 +165,28 @@ impl TurnCredentials {
         }
         let root: serde_json::Value =
             serde_json::from_str(input).map_err(|_| TurnCredentialError::InvalidJson)?;
-        let turn = root
-            .get("turn_server")
-            .or_else(|| root.get("response").and_then(|response| response.get("turn_server")))
-            .or_else(|| {
-                (root.get("username").is_some()
-                    && root.get("credential").is_some()
-                    && root.get("urls").is_some())
-                    .then_some(&root)
-            })
-            .ok_or(TurnCredentialError::MissingTurnServer)?;
-        let username = turn
-            .get("username")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TurnCredentialError::MissingUsername)?;
-        let password = turn
-            .get("credential")
-            .and_then(serde_json::Value::as_str)
-            .ok_or(TurnCredentialError::MissingCredential)?;
-        validate_secret(username, TurnCredentialError::MissingUsername)?;
-        validate_secret(password, TurnCredentialError::MissingCredential)?;
+        Self::from_vk_response_value(SensitiveJsonValue(root))
+    }
+
+    fn from_vk_response_value(
+        mut root: SensitiveJsonValue,
+    ) -> Result<Self, TurnCredentialError> {
+        let turn = if root.0.get("turn_server").is_some() {
+            root.0.get_mut("turn_server")
+        } else if root.0.get("response").and_then(|response| response.get("turn_server")).is_some() {
+            root.0.get_mut("response").and_then(|response| response.get_mut("turn_server"))
+        } else if root.0.get("username").is_some()
+            && root.0.get("credential").is_some()
+            && root.0.get("urls").is_some()
+        {
+            Some(&mut root.0)
+        } else {
+            None
+        }
+        .ok_or(TurnCredentialError::MissingTurnServer)?;
+
+        let username = take_secret(turn, "username", TurnCredentialError::MissingUsername)?;
+        let password = take_secret(turn, "credential", TurnCredentialError::MissingCredential)?;
 
         let urls = turn
             .get("urls")
@@ -160,8 +210,8 @@ impl TurnCredentials {
         }
 
         Ok(Self {
-            username: Zeroizing::new(username.to_owned()),
-            password: Zeroizing::new(password.to_owned()),
+            username,
+            password,
             endpoints,
         })
     }
