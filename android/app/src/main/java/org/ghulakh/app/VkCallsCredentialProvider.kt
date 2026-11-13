@@ -10,14 +10,20 @@ import java.net.URLEncoder
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
-data class VkCallsSession(
-    val turnCredentialsJson: String,
+class VkCallsSession(
+    turnCredentialsJson: String,
     internal val apiUrl: String,
     internal val sessionKey: String,
     internal val conversationId: String,
     private val finishAction: (() -> Unit)? = null,
 ) {
+    private var pendingTurnCredentialsJson: String? = turnCredentialsJson
     private val finished = AtomicBoolean(false)
+
+    internal fun takeTurnCredentialsJson(): String = synchronized(this) {
+        pendingTurnCredentialsJson.also { pendingTurnCredentialsJson = null }
+            ?: error("TURN credentials have already been consumed")
+    }
 
     fun finish() {
         finishOnce {
@@ -37,11 +43,20 @@ data class VkCallsSession(
         "VkCallsSession(turnCredentialsJson=<redacted>, apiUrl=<redacted>, sessionKey=<redacted>, conversationId=<redacted>)"
 }
 
-internal data class VkCallsCredentialGroup(
-    val turnCredentialsJson: String,
+internal class VkCallsCredentialGroup(
+    turnCredentialsJson: String,
     val ownerSession: VkCallsSession,
     internal val credentialBroker: VkCallsCredentialProvider.CredentialBroker,
 ) {
+    private var pendingTurnCredentialsJson: String? = turnCredentialsJson
+    internal val credentialFingerprints: List<String> =
+        TurnQuotaRetryPolicy.credentialFingerprints(turnCredentialsJson)
+
+    internal fun takeTurnCredentialsJson(): String = synchronized(this) {
+        pendingTurnCredentialsJson.also { pendingTurnCredentialsJson = null }
+            ?: error("TURN credential group has already been consumed")
+    }
+
     fun finish() {
         credentialBroker.finish()
         ownerSession.finish()
@@ -63,6 +78,7 @@ object VkCallsCredentialProvider {
     private const val MAX_RESPONSE_BYTES = 512 * 1024
     private const val CONNECT_TIMEOUT_MS = 8_000
     private const val READ_TIMEOUT_MS = 8_000
+    private const val MAX_TRACKED_CREDENTIAL_SETS = 128
 
     fun obtain(accessToken: String): VkCallsSession {
         require(accessToken.isNotBlank()) { "VK access token is empty" }
@@ -178,7 +194,7 @@ object VkCallsCredentialProvider {
         private val sessionFetcher: (() -> VkCallsSession)? = null,
     ) {
         private val lock = Any()
-        private val issuedFingerprints = mutableSetOf(
+        private val issuedFingerprints = linkedSetOf(
             TurnQuotaRetryPolicy.fingerprint(initialCredentialsJson),
         )
         private val sessions = mutableListOf<VkCallsSession>()
@@ -188,15 +204,19 @@ object VkCallsCredentialProvider {
             val session = sessionFetcher?.invoke()
                 ?: VkCallsCredentialProvider.obtainConversationSession(accessToken, conversationId)
             try {
-                val fingerprint = TurnQuotaRetryPolicy.fingerprint(session.turnCredentialsJson)
+                val credentialsJson = session.takeTurnCredentialsJson()
+                val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
                 synchronized(lock) {
                     check(!finished) { "VK Calls credential broker is already finished" }
+                    check(sessions.size < MAX_TRACKED_CREDENTIAL_SETS) {
+                        "VK Calls credential session limit reached"
+                    }
                     require(issuedFingerprints.add(fingerprint)) {
                         "VK Calls returned a repeated TURN credential set"
                     }
                     sessions.add(session)
                 }
-                return session.turnCredentialsJson
+                return credentialsJson
             } catch (error: Throwable) {
                 runCatching { session.finish() }
                 throw error
@@ -207,6 +227,7 @@ object VkCallsCredentialProvider {
             val pending = synchronized(lock) {
                 if (finished) return
                 finished = true
+                issuedFingerprints.clear()
                 sessions.toList().also { sessions.clear() }
             }
             pending.forEach { session ->
@@ -222,13 +243,11 @@ object VkCallsCredentialProvider {
     internal fun obtainGroup(accessToken: String, pathCount: Int): VkCallsCredentialGroup {
         require(pathCount in 2..10) { "TURN path count must be between 2 and 10" }
         val owner = obtain(accessToken)
-        val broker = CredentialBroker(accessToken, owner.conversationId, owner.turnCredentialsJson)
+        val initialCredentialsJson = owner.takeTurnCredentialsJson()
+        val broker = CredentialBroker(accessToken, owner.conversationId, initialCredentialsJson)
         try {
-            val credentials = ArrayList<String>(pathCount)
-            credentials += owner.turnCredentialsJson
-            repeat(pathCount - 1) { credentials += broker.obtainCredentials() }
-            val array = JSONArray()
-            credentials.forEach { array.put(JSONObject(it)) }
+            val array = JSONArray().put(JSONObject(initialCredentialsJson))
+            repeat(pathCount - 1) { array.put(JSONObject(broker.obtainCredentials())) }
             return VkCallsCredentialGroup(array.toString(), owner, broker)
         } catch (error: Throwable) {
             broker.finish()
