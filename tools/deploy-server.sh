@@ -287,13 +287,25 @@ deploy() {
   check_platform
   parse_args "$@"
   assert_managed_layout
-  # The managed egress unit is the persisted source of the original network parameters.
-  # Reject a topology change before creating accounts, directories, releases or credentials.
+  # Refuse incomplete managed layouts before creating accounts, directories, releases or credentials.
+  if [[ -e "$CURRENT" && ! -L "$CURRENT" ]]; then
+    die "Current release path is not a symlink; refusing an incomplete managed installation."
+  fi
   if [[ -L "$CURRENT" ]]; then
     [[ -s "$MARKER" ]] || die "Active release exists without a populated ownership marker; refusing an ambiguous update."
-    safe_file "$EGRESS_UNIT" || die "Existing deployment has no regular managed egress unit; refusing an ambiguous update."
+    safe_file "$EGRESS_UNIT" && safe_file "$SERVER_UNIT" || die "Active release exists without both regular managed systemd units; refusing an incomplete installation."
+    local verified_current
+    verified_current="$(readlink -f "$CURRENT")"
+    [[ -n "$verified_current" && -d "$verified_current" && ! -L "$verified_current" ]] ||
+      die "Current release symlink is dangling or does not resolve to a real directory."
+    case "$verified_current" in "$RELEASES"/*) ;; *) die "Current release points outside managed releases." ;; esac
+    # The managed egress unit is the persisted source of the original network parameters.
     grep -Fqx "ExecStart=/bin/bash $CURRENT/$EGRESS_SCRIPT_NAME ghulakh0 $WAN $IPV6_MODE" "$EGRESS_UNIT" ||
       die "WAN interface and IPv6 mode are immutable for an installed deployment; requested values differ from the recorded deployment."
+  else
+    # An empty marker alone is the intentional first-install retry reservation.
+    [[ ! -s "$MARKER" && ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
+      die "Managed marker or systemd units exist without an active release; refusing an incomplete installation."
   fi
   local egress_tool credential_tool release_id release_dir old_target link
   egress_tool="$(cd "$(dirname "$0")" && pwd)/$EGRESS_SCRIPT_NAME"
