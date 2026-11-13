@@ -42,7 +42,7 @@ TUN-подсистема пока экспериментальная. Испол
 - очередь пакетов от клиентов к TUN: 512;
 - адреса сессий не переиспользуются до перезапуска процесса;
 - IPv4 и IPv6 маршрутизируются через dual-stack TUN; публичный IPv6 egress требует отдельно настроенного upstream route или NAT66;
-- egress ACL по умолчанию блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, IETF protocol-assignment, documentation и benchmarking диапазоны.
+- gateway проверяет назначенный source IPv4/IPv6 адрес; фильтрация непубличных destination ranges на уровне ядра включается только после установки отдельной nftables-политики ниже.
 
 Включайте TUN только после настройки forwarding, маршрутов и firewall. Не устанавливайте глобальную политику `FORWARD DROP` поверх действующего firewall без отдельного аудита: это может нарушить работу других сервисов.
 
@@ -120,7 +120,7 @@ cargo run --release -p ghulakh-server
 sudo bash tools/test-network-namespaces.sh
 ```
 
-Скрипт создаёт три network namespaces и два veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
+Скрипт создаёт четыре network namespaces и три veth-сегмента. Он проверяет IPv4 MASQUERADE по адресу источника, наблюдаемому upstream namespace; IPv6 NAT66 по аналогичному признаку; IPv6 без NAT66 при явно заданном upstream route; обратный трафик established-соединений; а также счётчики явных DROP-правил для новых входящих соединений. Дополнительно проверяется наследование IPv6 router mode новым интерфейсом.
 
 Все тестовые адреса существуют только внутри изолированных namespaces; трафик не отправляется во внешнюю сеть. Проверка относится к Linux routing/NAT/firewall и не заменяет отдельные тесты egress ACL в серверном коде или испытание на реальном upstream.
 
