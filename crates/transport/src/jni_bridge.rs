@@ -31,6 +31,22 @@ struct NativeTurnSession {
     runtime: Runtime,
 }
 
+static TURN_SESSIONS: OnceLock<Mutex<HashMap<jlong, Arc<NativeTurnSession>>>> = OnceLock::new();
+
+fn turn_sessions() -> &'static Mutex<HashMap<jlong, Arc<NativeTurnSession>>> {
+    TURN_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn turn_session(handle: jlong) -> Result<Arc<NativeTurnSession>> {
+    let registry = turn_sessions()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("native TURN session registry is unavailable"))?;
+    registry
+        .get(&handle)
+        .cloned()
+        .context("unknown native TURN session handle")
+}
+
 
 #[cfg(target_os = "android")]
 fn make_protected_socket(env: &mut JNIEnv, service: &JObject) -> Result<Option<UdpSocket>> {
