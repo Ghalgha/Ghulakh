@@ -1,0 +1,104 @@
+name: One-time CI history cleanup
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    name: Remove older failed and cancelled runs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Clean history and disable this workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const workflowPath = ".github/workflows/cleanup-old-ci.yml";
+            const removableConclusions = new Set([
+              "failure",
+              "cancelled",
+              "timed_out",
+              "startup_failure",
+            ]);
+
+            let deleted = 0;
+            let eligible = 0;
+            let cleanupError;
+
+            try {
+              const runs = [];
+              for (let page = 1; page <= 10; page += 1) {
+                const response = await github.rest.actions.listWorkflowRunsForRepo({
+                  owner,
+                  repo,
+                  per_page: 100,
+                  page,
+                });
+                const pageRuns = response.data.workflow_runs;
+                runs.push(...pageRuns);
+                if (pageRuns.length < 100) break;
+              }
+
+              const byWorkflow = new Map();
+              for (const run of runs) {
+                if (
+                  run.status !== "completed" ||
+                  !removableConclusions.has(run.conclusion) ||
+                  run.workflow_id == null
+                ) continue;
+
+                const group = byWorkflow.get(run.workflow_id) ?? [];
+                group.push(run);
+                byWorkflow.set(run.workflow_id, group);
+              }
+
+              for (const [workflowId, workflowRuns] of byWorkflow) {
+                workflowRuns.sort((a, b) =>
+                  Date.parse(b.created_at) - Date.parse(a.created_at)
+                );
+
+                const obsolete = workflowRuns.slice(2);
+                eligible += obsolete.length;
+
+                for (const run of obsolete) {
+                  await github.rest.actions.deleteWorkflowRun({
+                    owner,
+                    repo,
+                    run_id: run.id,
+                  });
+                  deleted += 1;
+                  core.info(
+                    `Deleted run ${run.id} (workflow ${workflowId}, ${run.conclusion}, ${run.created_at})`
+                  );
+                }
+              }
+
+              core.notice(
+                `Cleanup complete: deleted ${deleted} of ${eligible} older failed/cancelled runs. Kept the two newest eligible runs per workflow.`
+              );
+            } catch (error) {
+              cleanupError = error;
+            } finally {
+              try {
+                const workflow = await github.rest.actions.getWorkflow({
+                  owner,
+                  repo,
+                  workflow_id: workflowPath,
+                });
+                await github.rest.actions.disableWorkflow({
+                  owner,
+                  repo,
+                  workflow_id: workflow.data.id,
+                });
+                core.notice("This one-time cleanup workflow has been disabled.");
+              } catch (disableError) {
+                core.error(`Could not disable cleanup workflow: ${disableError.message}`);
+                if (!cleanupError) cleanupError = disableError;
+              }
+            }
+
+            if (cleanupError) throw cleanupError;
