@@ -23,6 +23,7 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, RwLock};
 use tun_rs::DeviceBuilder;
+use zeroize::Zeroizing;
 
 #[allow(dead_code)]
 const ALPN: &[u8] = b"ghulakh/1";
@@ -545,7 +546,7 @@ fn ensure_keygen_args(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn read_noise_private_key(path: &str) -> Result<Vec<u8>> {
+fn read_noise_private_key(path: &str) -> Result<Zeroizing<Vec<u8>>> {
     let mut file = File::open(path)
         .with_context(|| format!("open Noise private key file {path}"))?;
     let metadata = file.metadata()
@@ -561,10 +562,15 @@ fn read_noise_private_key(path: &str) -> Result<Vec<u8>> {
             mode & 0o777
         );
     }
-    let mut encoded = String::new();
+    let mut encoded = Zeroizing::new(String::new());
     file.read_to_string(&mut encoded)
         .with_context(|| format!("read Noise private key file {path}"))?;
-    hex::decode(encoded.trim()).context("decode persistent Noise private key")
+    let encoded = encoded.trim();
+    anyhow::ensure!(encoded.len() == 64, "persistent Noise private key must contain exactly 32 bytes");
+    let mut decoded = Zeroizing::new([0u8; 32]);
+    hex::decode_to_slice(encoded, &mut decoded[..])
+        .context("decode persistent Noise private key")?;
+    Ok(Zeroizing::new(decoded.to_vec()))
 }
 
 fn write_noise_key_file(path: &str, bytes: &[u8], private: bool) -> Result<()> {
@@ -626,12 +632,11 @@ async fn main() -> Result<()> {
             .context("set GHULAKH_NOISE_PRIVATE_KEY to a hex-encoded private key file")?;
         let public_path = env::var("GHULAKH_NOISE_PUBLIC_KEY")
             .context("set GHULAKH_NOISE_PUBLIC_KEY to a hex-encoded public key file")?;
-        let private_key = read_noise_private_key(&private_path)?;
         let public_key = hex::decode(fs::read_to_string(&public_path)?.trim())
             .context("decode persistent Noise public key")?;
         let keypair = Arc::new(
             ghulakh_protocol::session_handshake::NoiseServerKeyPair::from_bytes(
-                private_key,
+                read_noise_private_key(&private_path)?,
                 public_key,
             ).context("validate persistent Noise server keypair")?
         );
@@ -827,7 +832,20 @@ mod tests {
         let path = directory.path().join("noise-private.key");
         std::fs::write(&path, "00112233").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(read_noise_private_key(path.to_str().unwrap()).unwrap(), [0, 0x11, 0x22, 0x33]);
+        assert_eq!(read_noise_private_key(path.to_str().unwrap()).unwrap().as_slice(), [0, 0x11, 0x22, 0x33]);
+    }
+
+    #[test]
+    fn noise_private_key_loader_rejects_malformed_hex() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("noise-private.key");
+        std::fs::write(&path, "not-a-private-key").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        assert!(read_noise_private_key(path.to_str().unwrap()).is_err());
     }
 
     #[cfg(unix)]
