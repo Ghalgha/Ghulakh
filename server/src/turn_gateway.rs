@@ -2718,6 +2718,44 @@ mod egress_policy_tests {
         assert!(destination_allowed("3eff::1".parse().unwrap()));
     }
     #[test]
+    fn ipv4_egress_policy_checks_reserved_prefix_boundaries() {
+        for address in [
+            "0.0.0.1",
+            "100.64.0.0",
+            "100.127.255.255",
+            "192.0.0.0",
+            "192.0.0.255",
+            "192.0.2.0",
+            "192.0.2.255",
+            "198.18.0.0",
+            "198.19.255.255",
+            "198.51.100.0",
+            "198.51.100.255",
+            "203.0.113.0",
+            "203.0.113.255",
+            "224.0.0.1",
+            "240.0.0.1",
+            "255.255.255.255",
+        ] {
+            assert!(!destination_allowed(address.parse().unwrap()), "{address}");
+        }
+
+        for address in [
+            "1.1.1.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "198.17.255.255",
+            "198.20.0.1",
+            "198.51.99.255",
+            "198.51.101.1",
+            "203.0.112.255",
+            "203.0.114.1",
+        ] {
+            assert!(destination_allowed(address.parse().unwrap()), "{address}");
+        }
+    }
+
+    #[test]
     fn rejects_truncated_or_wrong_version_packets() {
         assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv4, packet: vec![0;19] }).is_none());
         assert!(packet_endpoints(&DataDatagram { kind: IpPacketKind::Ipv6, packet: vec![0;40] }).is_none());
