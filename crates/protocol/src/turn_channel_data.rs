@@ -115,4 +115,28 @@ mod tests {
             Err(ChannelDataError::PayloadTooLarge)
         );
     }
+
+    proptest::proptest! {
+        #[test]
+        fn channel_data_round_trips_arbitrary_valid_channels_and_payloads(
+            channel_offset in 0u16..=0x0fff,
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=2048),
+        ) {
+            let channel = CHANNEL_NUMBER_MIN + channel_offset;
+            let encoded = encode_channel_data(channel, &payload).unwrap();
+            let decoded = decode_channel_data(&encoded).unwrap();
+            proptest::prop_assert_eq!(decoded.channel_number, channel);
+            proptest::prop_assert_eq!(decoded.data, payload.as_slice());
+        }
+    }
+
+    #[test]
+    fn maximum_udp_channel_payload_round_trips() {
+        let payload = vec![0xa5; MAX_UDP_CHANNEL_DATA_PAYLOAD];
+        let encoded = encode_channel_data(CHANNEL_NUMBER_MAX, &payload).unwrap();
+        let decoded = decode_channel_data(&encoded).unwrap();
+        assert_eq!(decoded.channel_number, CHANNEL_NUMBER_MAX);
+        assert_eq!(decoded.data, payload);
+    }
+
 }
