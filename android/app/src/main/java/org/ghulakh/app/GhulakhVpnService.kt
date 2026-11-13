@@ -130,6 +130,9 @@ class GhulakhVpnService : VpnService() {
                     }
                     handle = connectedHandle
                     callsSession = candidate
+                    // The active credential broker now owns the token needed for
+                    // future TURN path recovery; release the service-local reference.
+                    vkAccessToken = null
                     break
                 } catch (error: Throwable) {
                     candidate.finish()
