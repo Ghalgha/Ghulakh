@@ -282,19 +282,28 @@ impl TurnClientRuntime {
                             Ok(())
                         }
                         Err(error) => {
-                            let cleanup = tokio::time::timeout(
-                                std::time::Duration::from_secs(3),
-                                supervisor.deallocate(),
-                            ).await;
-                            supervisor.close();
-                            match cleanup {
-                                Ok(Ok(())) => Err(error.context("TURN maintenance stopped; allocation deallocated")),
-                                Ok(Err(cleanup_error)) => Err(error.context(format!(
-                                    "TURN maintenance stopped; allocation cleanup failed: {cleanup_error:#}"
-                                ))),
-                                Err(_) => Err(error.context(
-                                    "TURN maintenance stopped; allocation cleanup timed out after 3 seconds"
-                                )),
+                            if is_turn_credentials_rejected(&error) {
+                                // A verified 401 means the active credential set is no
+                                // longer accepted. Do not send Refresh(0) with the same
+                                // rejected credentials; closing this path lets the Android
+                                // path supervisor obtain a fresh VK Calls credential set.
+                                supervisor.close();
+                                Err(error.context("TURN credentials rejected; path requires fresh credentials"))
+                            } else {
+                                let cleanup = tokio::time::timeout(
+                                    std::time::Duration::from_secs(3),
+                                    supervisor.deallocate(),
+                                ).await;
+                                supervisor.close();
+                                match cleanup {
+                                    Ok(Ok(())) => Err(error.context("TURN maintenance stopped; allocation deallocated")),
+                                    Ok(Err(cleanup_error)) => Err(error.context(format!(
+                                        "TURN maintenance stopped; allocation cleanup failed: {cleanup_error:#}"
+                                    ))),
+                                    Err(_) => Err(error.context(
+                                        "TURN maintenance stopped; allocation cleanup timed out after 3 seconds"
+                                    )),
+                                }
                             }
                         }
                     }
@@ -378,6 +387,15 @@ impl Drop for TurnClientRuntime {
     }
 }
 
+
+fn is_turn_credentials_rejected(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<crate::turn_driver::TurnDriverError>(),
+            Some(crate::turn_driver::TurnDriverError::CredentialsRejected)
+        )
+    })
+}
 
 /// Release an allocation when path setup fails after Allocate succeeded.
 async fn release_failed_turn_setup(
