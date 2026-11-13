@@ -596,6 +596,48 @@ mod server_error_state_tests {
     }
 
     #[tokio::test]
+    async fn authenticated_refresh_401_is_reported_as_credential_rejection() {
+        let relay = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = relay.local_addr().unwrap();
+        let socket = crate::turn_udp::TurnUdpSocket::bind(
+            "127.0.0.1:0".parse().unwrap(), relay_addr,
+        ).await.unwrap();
+
+        let relay_task = tokio::spawn(async move {
+            let mut buffer = [0u8; 2048];
+            let (initial, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&challenge(&initial, 401).encode().unwrap(), client).await.unwrap();
+
+            let (allocate, client) = receive(&relay, &mut buffer).await;
+            relay.send_to(&allocate_success(&allocate), client).await.unwrap();
+
+            let (refresh, client) = receive(&relay, &mut buffer).await;
+            assert_eq!(refresh.method, METHOD_REFRESH);
+            let denied = challenge(&refresh, 401);
+            let signed = append_message_integrity(&denied, &[0x44; 32]).unwrap();
+            relay.send_to(&signed, client).await.unwrap();
+        });
+
+        let provider = Provider { calls: 0 };
+        let mut supervisor = TurnSessionSupervisor::new(
+            crate::turn_driver::TurnClientDriver::new(socket),
+            provider,
+        );
+        let before = supervisor.allocate().await.unwrap();
+        let error = supervisor.refresh(600).await.unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<TurnDriverError>(),
+            Some(TurnDriverError::CredentialsRejected)
+        ));
+        let after = supervisor.allocation().expect("failed refresh retains the last confirmed lease");
+        assert_eq!(after.relayed_address, before.relayed_address);
+        assert_eq!(after.lifetime_seconds, before.lifetime_seconds);
+        assert_eq!(supervisor.provider.calls, 1, "Refresh 401 must not trigger an Allocate credential challenge");
+        relay_task.await.unwrap();
+        supervisor.close();
+    }
+
+    #[tokio::test]
     async fn authenticated_create_permission_error_does_not_install_local_permission() {
         use ghulakh_protocol::stun::METHOD_CREATE_PERMISSION;
 
