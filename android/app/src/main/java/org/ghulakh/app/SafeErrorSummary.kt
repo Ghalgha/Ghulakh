@@ -9,13 +9,13 @@ import java.net.UnknownHostException
  * credentials, tokens, or server-controlled response text.
  */
 internal fun safeErrorSummary(error: Throwable): String = when (error) {
-    is VkCallsHttpException -> "VK Calls HTTP request failed (status ${error.statusCode})"
-    is CredentialStoreException.KeyUnavailable -> "Android Keystore key is unavailable"
-    is CredentialStoreException.Corrupted -> "Stored connection profile is corrupted"
-    is CredentialStoreException.PersistenceFailure -> "Connection profile persistence failed"
-    is SocketTimeoutException -> "Network operation timed out"
-    is UnknownHostException -> "Network host lookup failed"
-    is IOException -> "Network I/O operation failed"
-    is InterruptedException -> "Operation was interrupted"
-    else -> "Operation failed (${error.javaClass.simpleName.take(64)})"
+    is VkCallsHttpException -> "Ошибка запроса VK Calls (HTTP ${error.statusCode})"
+    is CredentialStoreException.KeyUnavailable -> "Ключ Android Keystore недоступен"
+    is CredentialStoreException.Corrupted -> "Сохранённый профиль повреждён"
+    is CredentialStoreException.PersistenceFailure -> "Не удалось сохранить профиль"
+    is SocketTimeoutException -> "Сетевой запрос превысил время ожидания"
+    is UnknownHostException -> "Не удалось определить адрес сервера"
+    is IOException -> "Ошибка сетевого обмена"
+    is InterruptedException -> "Операция прервана"
+    else -> "Операция завершилась ошибкой (${error.javaClass.simpleName.take(64)})"
 }
