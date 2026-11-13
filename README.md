@@ -8,9 +8,9 @@ Ghulakh — исследовательская система защищённо
 
 ## Состояние на 2026-11-13
 
-Текущий main: 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
+Базовый main для текущей серии проверок: `d62e9b45cde0f5ee6502196128eb5d60041304f2`. В открытом PR №12 дополнительно проверяется устойчивость egress-политики к IPv4/IPv6 fwmark policy routing. Основной программный вертикальный срез реализован: TURN control plane, VK Calls credential provider, Noise XX handshake, двусторонний защищённый dataplane, multipath с восстановлением отказавших путей, Android VpnService/JNI и серверный TUN gateway. Android Keystore сохраняет полный профиль единым AES-GCM payload. IPv4/IPv6 обработка и изолированные Linux-тесты сетевой политики присутствуют.
 
-Последний CI для вошедшего в merge содержимого завершился успешно: Rust checks, Android debug build и Linux network namespace integration. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
+Для базового main успешно завершались Rust checks, Android debug build и Linux network namespace integration. В PR №12 те же три CI jobs успешно проверили дополнительный fwmark policy-routing сценарий; PR ещё не слит. CI не проверяет живой VK relay и не заменяет испытания на реальном устройстве.
 
 **Проект пока не готов к production или повседневному использованию.** Не подтверждены live VK Calls API/TURN auth profile, реальная relay allocation и сквозной маршрут Android → VK TURN → VPS → интернет → Android. Не проверены публичный IPv6 egress на VPS, внешние квоты и длительная стабильность. VK access token вводится вручную; in-app OAuth отсутствует. Подробности — [текущий статус](docs/STATUS.md).
 
@@ -20,7 +20,7 @@ Ghulakh — исследовательская система защищённо
 - server/ — UDP TURN gateway, аутентификация сессий, TUN и маршрутизация.
 - crates/protocol/ — wire formats, STUN/TURN, handshake и защищённые кадры.
 - crates/transport/ — TURN driver/supervisor, socket actor, Noise handshake и dataplane.
-- tools/ — ограниченная nftables egress policy и изолированный network namespace test.
+- tools/ — ограниченная nftables egress policy и изолированные network namespace tests, включая обходные policy-routing сценарии.
 - docs/ — архитектура, протокол, безопасность и эксплуатация.
 
 ## Основные ограничения

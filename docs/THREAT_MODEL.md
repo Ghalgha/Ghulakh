@@ -1,6 +1,6 @@
 # Модель угроз
 
-**Сверено с main на commit 611b4788c9b40dba29a82ed3011e8d6f0f5ae4f3 (2026-11-13).** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
+**Сверено с базовым main `d62e9b45cde0f5ee6502196128eb5d60041304f2` (2026-11-13); PR №12 содержит дополнительный непрошедший merge fwmark regression test.** Актуальный статус реализации и границы подтверждения — в [STATUS.md](STATUS.md).
 
 ## Защищаемые активы
 
@@ -44,7 +44,11 @@ TURN relay считается недоверенным посредником д
 - Rust TURN username/password хранятся в `Zeroizing` и redacted `Debug`; временные Rust JSON/JNI-буферы очищаются при освобождении. Android передаёт TURN JSON в native один раз и снимает ссылки после handoff; JVM не гарантирует физическое стирание immutable `String`. VK access token и device credential шифруются с помощью Android Keystore;
 - Android вызывает `VpnService.protect(fd)` для каждого TURN UDP socket до использования его внутри VPN;
 - IPv4 и IPv6 маршруты захватываются Android; оба семейства передаются в dual-stack server TUN, где проверяются source addresses. Публичный IPv6 egress зависит от серверного upstream route/NAT66;
-- отдельный host nftables egress policy script (его должен явно установить администратор) блокирует spoofed TUN source, частные/служебные IPv4 и IPv6 назначения, unsolicited traffic к TUN и исходящий forwarding в другие интерфейсы. Без установки этого ruleset защита egress на уровне ядра не активна.
+- отдельный host nftables egress policy script (его должен явно установить администратор) блокирует spoofed TUN source, частные/служебные IPv4 и IPv6 назначения, unsolicited traffic к TUN и исходящий forwarding в другие интерфейсы. Без установки этого ruleset защита egress на уровне ядра не активна. Установка и удаление ограничены собственными nftables tables с ownership marker `ghulakh-egress-v1`; удаление заранее проверяет маркер всех затрагиваемых таблиц и не должно удалять таблицы без подтверждённого владения.
+
+## Проверка policy-routing обхода
+
+В PR №12 изолированный network namespace test помечает IPv4 и IPv6 пакеты, поступающие с TUN, через `fwmark`, а policy rules намеренно направляют их к постороннему интерфейсу. Проверяется, что оба пакета не достигают rogue peer, а egress firewall отбрасывает forwarding с TUN. Это регрессионная проверка конкретной топологии Linux namespaces; она не заменяет аудит произвольных host rules, реального VPS и фактической конфигурации провайдера.
 
 ## Остаточные риски и ограничения
 
