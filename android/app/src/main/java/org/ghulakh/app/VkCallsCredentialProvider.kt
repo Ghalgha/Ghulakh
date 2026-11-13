@@ -492,7 +492,7 @@ internal object VkCallsRetryPolicy {
 
 
 /** ByteArrayOutputStream whose mutable backing storage can be explicitly cleared. */
-private class VkCallsWipingByteArrayOutputStream : ByteArrayOutputStream() {
+internal open class VkCallsWipingByteArrayOutputStream : ByteArrayOutputStream() {
     fun wipe() {
         buf.fill(0)
         reset()
