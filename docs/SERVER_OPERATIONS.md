@@ -44,47 +44,73 @@ TUN-подсистема пока экспериментальная. Испол
 - IPv4 и IPv6 маршрутизируются через dual-stack TUN; публичный IPv6 egress требует отдельно настроенного upstream route или NAT66;
 - egress ACL по умолчанию блокирует RFC1918, loopback, link-local, multicast, broadcast, unspecified, CGNAT, IETF protocol-assignment, documentation и benchmarking диапазоны.
 
-Включать TUN следует только после настройки IP forwarding и firewall. Пример ниже предназначен для отдельного хоста, где этот процесс может управлять всей цепочкой FORWARD. Не вставляйте политику DROP в существующий firewall без проверки его текущих правил.
+Включайте TUN только после настройки forwarding, маршрутов и firewall. Не устанавливайте глобальную политику `FORWARD DROP` поверх действующего firewall без отдельного аудита: это может нарушить работу других сервисов.
+
+### Sysctl и WAN
+
+Сначала определите реальный внешний интерфейс:
 
 ```sh
-# Включить IPv4 и IPv6 forwarding до запуска сервера.
-sudo sysctl -w net.ipv4.ip_forward=1
-sudo sysctl -w net.ipv6.conf.all.forwarding=1
-# Значение по умолчанию для интерфейсов, создаваемых после настройки forwarding.
-sudo sysctl -w net.ipv6.conf.default.forwarding=1
+ip -4 route show default
+ip -6 route show default
+```
 
-# Замените eth0 на внешний интерфейс сервера.
+Для примера ниже используется `eth0`; замените его на фактический WAN. Включите forwarding:
+
+```sh
+sudo tee /etc/sysctl.d/90-ghulakh-forwarding.conf >/dev/null <<'SYSCTL'
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+net.ipv6.conf.default.forwarding = 1
+SYSCTL
+sudo sysctl --system
+```
+
+Если IPv6 default route на WAN получается через Router Advertisements, forwarding переводит интерфейс в режим router, где RA по умолчанию игнорируются. Включите приём RA только на WAN-интерфейсе:
+
+```sh
 WAN_IF=eth0
+sudo sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=2"
+```
 
-# Только если IPv6 default route на WAN получается через Router Advertisements:
-# forwarding переводит интерфейс в режим router, в котором RA по умолчанию игнорируются.
-# Включайте приём RA только на WAN-интерфейсе, не глобально.
-# sudo sysctl -w "net.ipv6.conf.${WAN_IF}.accept_ra=2"
+При необходимости сохраните этот параметр в отдельном sysctl-файле после проверки, что WAN действительно использует RA.
 
-sudo nft add table inet ghulakh
-sudo nft 'add chain inet ghulakh forward { type filter hook forward priority filter; policy drop; }'
-sudo nft add rule inet ghulakh forward iifname "ghulakh0" oifname "$WAN_IF" ip saddr 10.77.0.0/16 accept
-sudo nft add rule inet ghulakh forward iifname "$WAN_IF" oifname "ghulakh0" ip daddr 10.77.0.0/16 ct state established,related accept
-sudo nft add rule inet ghulakh forward iifname "ghulakh0" oifname "$WAN_IF" ip6 saddr fd77:77::/64 accept
-sudo nft add rule inet ghulakh forward iifname "$WAN_IF" oifname "ghulakh0" ip6 daddr fd77:77::/64 ct state established,related accept
+### Установка ограниченной egress-политики
 
-sudo nft add table ip ghulakh_nat
-sudo nft 'add chain ip ghulakh_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip ghulakh_nat postrouting ip saddr 10.77.0.0/16 oifname "$WAN_IF" masquerade
+Используйте поставляемый скрипт вместо ручного добавления широких правил `FORWARD ACCEPT`:
 
-# Необязательно: NAT66, если upstream не маршрутизирует fd77:77::/64.
-sudo nft add table ip6 ghulakh_nat
-sudo nft 'add chain ip6 ghulakh_nat postrouting { type nat hook postrouting priority srcnat; policy accept; }'
-sudo nft add rule ip6 ghulakh_nat postrouting ip6 saddr fd77:77::/64 oifname "$WAN_IF" masquerade
+```sh
+WAN_IF=eth0
+sudo bash tools/configure-egress-nftables.sh ghulakh0 "$WAN_IF" nat66
+```
 
+Скрипт устанавливает только собственные таблицы nftables:
+
+- разрешает IPv4 из `10.77.0.0/16` и IPv6 из `fd77:77::/64` с TUN-интерфейса только в заданный WAN;
+- блокирует подмену исходного адреса, непубличные IPv4/IPv6 назначения и передачу пакетов с TUN в другие интерфейсы;
+- разрешает обратный трафик к TUN только для `established,related` соединений и блокирует новые входящие соединения;
+- выполняет IPv4 masquerade; режим `nat66` (по умолчанию) также выполняет NAT66;
+- режим `routed` не создаёт NAT66 и предназначен только для сети, где upstream действительно маршрутизирует клиентский IPv6-префикс.
+
+Таблицы и цепочка имеют отдельные имена; скрипт не меняет глобальную политику FORWARD, INPUT, sysctl, маршруты или чужие таблицы. Он отказывается перезаписывать уже существующие таблицы. Для удаления только созданных им правил выполните:
+
+```sh
+sudo bash tools/configure-egress-nftables.sh --remove
+```
+
+**Важно:** `accept` в отдельной nftables base chain не отменяет `drop` в другой base chain. Действующий firewall хоста должен независимо разрешать нужный forwarding и не должен иметь конфликтующих правил. Скрипт намеренно не открывает forwarding для прочих интерфейсов: их изоляция остаётся ответственностью общей политики хоста. До включения сервера проверьте итоговый ruleset через `sudo nft list ruleset`.
+
+После проверки правил запустите сервер:
+
+```sh
 export GHULAKH_TUN_ENABLED=true
 export GHULAKH_TUN_NAME=ghulakh0
-# Установить true только после проверки sysctl и всех firewall/NAT правил.
+# Подтверждение администратора после проверки sysctl, маршрутов и firewall.
 export GHULAKH_FORWARDING_ENABLED=true
 cargo run --release -p ghulakh-server
 ```
 
-Команды nftables приведены как минимальный пример для выделенного хоста. Для существующей системы объедините правила с действующей политикой firewall, сохраните их в постоянной конфигурации и проверьте обратный трафик. Сервер не включает IP forwarding и не меняет firewall автоматически. Даже при созданном TUN Android-клиент откажется активировать маршруты, пока администратор явно не установит `GHULAKH_FORWARDING_ENABLED=true`. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности firewall.
+Не включайте `GHULAKH_FORWARDING_ENABLED` до проверки действующего firewall. Этот флаг является подтверждением администратора, а не автоматической проверкой корректности сетевой конфигурации.
 
 ## Изолированная проверка сетевой конфигурации
 
