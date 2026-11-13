@@ -152,6 +152,7 @@ write_units() {
   local transaction_active=0
   rollback_units() {
     local rollback_failed=0
+    trap - EXIT HUP INT TERM
     if (( had_egress )); then
       mv -f "$tmpdir/old-egress" "$EGRESS_UNIT" || rollback_failed=1
     else
@@ -169,7 +170,7 @@ write_units() {
     fi
     if (( rollback_failed )); then
       trap - EXIT HUP INT TERM
-      printf 'CRITICAL: unit rollback was incomplete; recovery files retained in %s\\n' "$tmpdir" >&2
+      printf 'CRITICAL: unit rollback was incomplete; unit backups: %s; marker backup: %s\\n' "$tmpdir" "$marker_backup" >&2
       return 1
     fi
     transaction_active=0
