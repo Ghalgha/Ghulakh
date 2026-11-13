@@ -84,6 +84,73 @@ class VkCallsCredentialProviderTest {
         assertFalse(diagnostics.contains("turn-user"))
     }
 
+    @Test
+    fun credentialSessionReleasesJsonAfterSingleHandoff() {
+        val json = credentialsJson("session-user", "session-password")
+        val session = VkCallsSession(
+            turnCredentialsJson = json,
+            apiUrl = "https://calls.example.invalid/",
+            sessionKey = "session-key",
+            conversationId = "conversation",
+            finishAction = {},
+        )
+
+        assertEquals(json, session.takeTurnCredentialsJson())
+        assertFalse(runCatching { session.takeTurnCredentialsJson() }.isSuccess)
+    }
+
+    @Test
+    fun credentialGroupReleasesJsonAfterSingleNativeHandoff() {
+        val initial = credentialsJson("initial-user", "initial-secret")
+        val replacement = credentialsJson("replacement-user", "replacement-secret")
+        val groupJson = "[$initial,$replacement]"
+        val owner = VkCallsSession(
+            turnCredentialsJson = initial,
+            apiUrl = "https://calls.example.invalid/",
+            sessionKey = "owner-session",
+            conversationId = "conversation",
+            finishAction = {},
+        )
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "access-token",
+            conversationId = "conversation",
+            initialCredentialsJson = initial,
+            sessionFetcher = { error("not used") },
+        )
+        val group = VkCallsCredentialGroup(groupJson, owner, broker)
+
+        assertEquals(groupJson, group.takeTurnCredentialsJson())
+        assertFalse(runCatching { group.takeTurnCredentialsJson() }.isSuccess)
+    }
+
+    @Test
+    fun credentialBrokerBoundsRetainedAuxiliarySessions() {
+        val initial = credentialsJson("initial-user", "initial-secret")
+        var fetched = 0
+        var finished = 0
+        val broker = VkCallsCredentialProvider.CredentialBroker(
+            accessToken = "access-token",
+            conversationId = "conversation",
+            initialCredentialsJson = initial,
+            sessionFetcher = {
+                fetched += 1
+                VkCallsSession(
+                    turnCredentialsJson = credentialsJson("user-$fetched", "secret-$fetched"),
+                    apiUrl = "https://calls.example.invalid/",
+                    sessionKey = "session-$fetched",
+                    conversationId = "conversation",
+                    finishAction = { finished += 1 },
+                )
+            },
+        )
+
+        repeat(128) { broker.obtainCredentials() }
+        assertFalse(runCatching { broker.obtainCredentials() }.isSuccess)
+        broker.finish()
+        assertEquals(129, fetched)
+        assertEquals(129, finished)
+    }
+
     private fun credentialsJson(username: String, password: String): String =
         """{"turn_server":{"username":"$username","credential":"$password","urls":["turn:relay.example.invalid:3478?transport=udp"]}}"""
 }
