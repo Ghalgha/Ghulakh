@@ -125,11 +125,16 @@ object VkCallsCredentialProvider {
                 "access_token" to accessToken,
             ),
         )
-        val tokenData = tokenResponse.getJSONObject("response")
-        val callToken = tokenData.getString("token")
-        require(callToken.isNotBlank()) { "VK did not return a Calls token" }
-        val apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
-        clearJsonStringReferences(tokenResponse)
+        val callToken: String
+        val apiUrl: String
+        try {
+            val tokenData = tokenResponse.getJSONObject("response")
+            callToken = tokenData.getString("token")
+            require(callToken.isNotBlank()) { "VK did not return a Calls token" }
+            apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
+        } finally {
+            clearJsonStringReferences(tokenResponse)
+        }
 
         val sessionData = JSONObject()
             .put("auth_token", callToken)
@@ -184,9 +189,13 @@ object VkCallsCredentialProvider {
                     "session_key" to sessionKey,
                 ),
             )
-            checkApiError(started)
-            require(started.optString("join_link").isNotBlank()) {
-                "Calls backend did not return a join link"
+            try {
+                checkApiError(started)
+                require(started.optString("join_link").isNotBlank()) {
+                    "Calls backend did not return a join link"
+                }
+            } finally {
+                clearJsonStringReferences(started)
             }
 
             val parameters = postFormWithRetry(
@@ -199,27 +208,30 @@ object VkCallsCredentialProvider {
                     "session_key" to sessionKey,
                 ),
             )
-            checkApiError(parameters)
-            val turnServer = parameters.optJSONObject("turn_server")
-                ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
-                ?: throw IllegalStateException("Calls backend response has no turn_server object")
-            require(turnServer.optString("username").isNotBlank()) {
-                "VK Calls returned an empty TURN username"
+            try {
+                checkApiError(parameters)
+                val turnServer = parameters.optJSONObject("turn_server")
+                    ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
+                    ?: throw IllegalStateException("Calls backend response has no turn_server object")
+                require(turnServer.optString("username").isNotBlank()) {
+                    "VK Calls returned an empty TURN username"
+                }
+                require(turnServer.optString("credential").isNotBlank()) {
+                    "VK Calls returned an empty TURN credential"
+                }
+                val urls = turnServer.optJSONArray("urls")
+                    ?: throw IllegalStateException("VK Calls returned no TURN URLs")
+                require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
+                val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+                return VkCallsSession(
+                    turnCredentialsJson = credentialsJson,
+                    apiUrl = apiUrl,
+                    sessionKey = sessionKey,
+                    conversationId = conversationId,
+                )
+            } finally {
+                clearJsonStringReferences(parameters)
             }
-            require(turnServer.optString("credential").isNotBlank()) {
-                "VK Calls returned an empty TURN credential"
-            }
-            val urls = turnServer.optJSONArray("urls")
-                ?: throw IllegalStateException("VK Calls returned no TURN URLs")
-            require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
-            val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
-            clearJsonStringReferences(parameters)
-            return VkCallsSession(
-                turnCredentialsJson = credentialsJson,
-                apiUrl = apiUrl,
-                sessionKey = sessionKey,
-                conversationId = conversationId,
-            )
         } catch (error: Throwable) {
             runCatching { finishConversation(apiUrl, sessionKey, conversationId) }
             throw error
@@ -313,11 +325,16 @@ object VkCallsCredentialProvider {
             "https://api.vk.ru/method/messages.getCallToken?v=$VK_API_VERSION&client_id=$VK_APP_ID",
             mapOf("env" to "production", "access_token" to accessToken),
         )
-        val tokenData = tokenResponse.getJSONObject("response")
-        val callToken = tokenData.getString("token")
-        require(callToken.isNotBlank()) { "VK did not return a Calls token" }
-        val apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
-        clearJsonStringReferences(tokenResponse)
+        val callToken: String
+        val apiUrl: String
+        try {
+            val tokenData = tokenResponse.getJSONObject("response")
+            callToken = tokenData.getString("token")
+            require(callToken.isNotBlank()) { "VK did not return a Calls token" }
+            apiUrl = validateApiUrl(tokenData.optString("api_base_url").ifBlank { DEFAULT_OK_API })
+        } finally {
+            clearJsonStringReferences(tokenResponse)
+        }
         val sessionData = JSONObject()
             .put("auth_token", callToken)
             .put("version", 3)
@@ -355,31 +372,34 @@ object VkCallsCredentialProvider {
                 "session_key" to sessionKey,
             ),
         )
-        checkApiError(parameters)
-        val turnServer = parameters.optJSONObject("turn_server")
-            ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
-            ?: throw IllegalStateException("Calls backend response has no turn_server object")
-        require(turnServer.optString("username").isNotBlank()) {
-            "VK Calls returned an empty TURN username"
+        try {
+            checkApiError(parameters)
+            val turnServer = parameters.optJSONObject("turn_server")
+                ?: parameters.optJSONObject("response")?.optJSONObject("turn_server")
+                ?: throw IllegalStateException("Calls backend response has no turn_server object")
+            require(turnServer.optString("username").isNotBlank()) {
+                "VK Calls returned an empty TURN username"
+            }
+            require(turnServer.optString("credential").isNotBlank()) {
+                "VK Calls returned an empty TURN credential"
+            }
+            val urls = turnServer.optJSONArray("urls")
+                ?: throw IllegalStateException("VK Calls returned no TURN URLs")
+            require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
+            val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
+            // This is an auxiliary account session, not the call owner.
+            // The source broker leaves these sessions alone; only the owner
+            // session performs hangupConversation for the shared conversation.
+            return VkCallsSession(
+                turnCredentialsJson = credentialsJson,
+                apiUrl = apiUrl,
+                sessionKey = sessionKey,
+                conversationId = conversationId,
+                finishAction = {},
+            )
+        } finally {
+            clearJsonStringReferences(parameters)
         }
-        require(turnServer.optString("credential").isNotBlank()) {
-            "VK Calls returned an empty TURN credential"
-        }
-        val urls = turnServer.optJSONArray("urls")
-            ?: throw IllegalStateException("VK Calls returned no TURN URLs")
-        require(urls.length() in 1..16) { "VK Calls returned an invalid TURN URL count" }
-        val credentialsJson = JSONObject().put("turn_server", turnServer).toString()
-        clearJsonStringReferences(parameters)
-        // This is an auxiliary account session, not the call owner.
-        // The source broker leaves these sessions alone; only the owner
-        // session performs hangupConversation for the shared conversation.
-        return VkCallsSession(
-            turnCredentialsJson = credentialsJson,
-            apiUrl = apiUrl,
-            sessionKey = sessionKey,
-            conversationId = conversationId,
-            finishAction = {},
-        )
     }
 
     internal fun finishConversation(
