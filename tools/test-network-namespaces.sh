@@ -218,15 +218,15 @@ if ip netns exec "$C" ping -6 -c 1 -W 1 2001:4860:4860::8888; then
   exit 1
 fi
 # The rogue peer must never see either packet; both must hit the TUN catch-all drop.
-ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
+ip netns exec "$X" nft list chain inet policy_route_probe prerouting \
   | grep -F 'ip daddr 8.8.8.8 counter packets' | grep -Eq 'counter packets 0'
-ip netns exec "$X" nft list chain inet policy_route_probe prerouting \\
+ip netns exec "$X" nft list chain inet policy_route_probe prerouting \
   | grep -F 'ip6 daddr 2001:4860:4860::8888 counter packets' | grep -Eq 'counter packets 0'
-ip netns exec "$R" nft list chain inet policy_route_probe prerouting \\
+ip netns exec "$R" nft list chain inet policy_route_probe prerouting \
   | grep -F 'ip daddr 8.8.8.8 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet policy_route_probe prerouting \\
+ip netns exec "$R" nft list chain inet policy_route_probe prerouting \
   | grep -F 'ip6 daddr 2001:4860:4860::8888 counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
-ip netns exec "$R" nft list chain inet ghulakh_egress forward \\
+ip netns exec "$R" nft list chain inet ghulakh_egress forward \
   | grep -F 'iifname "rc0" counter packets' | grep -Eq 'counter packets [1-9][0-9]*'
 ip netns exec "$R" ip rule del priority 100 fwmark 0x42/0xff table 100
 ip netns exec "$R" ip -6 rule del priority 100 fwmark 0x42/0xff table 100
