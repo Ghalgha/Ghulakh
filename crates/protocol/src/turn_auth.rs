@@ -7,6 +7,7 @@ use crate::stun::{
     StunAttribute, StunClass, StunMessage, ATTR_ERROR_CODE, ATTR_NONCE, ATTR_PASSWORD_ALGORITHMS, ATTR_REALM,
 };
 use crate::turn_password::parse_password_algorithms;
+use zeroize::{Zeroize, Zeroizing};
 
 const MAX_CHALLENGE_TEXT: usize = 763;
 
@@ -18,6 +19,16 @@ pub struct TurnChallenge {
     /// Raw server offer retained for the authenticated follow-up request.
     /// RFC 8489 requires echoing this attribute to prevent algorithm downgrade.
     pub password_algorithms: Option<Vec<u8>>,
+}
+
+impl Drop for TurnChallenge {
+    fn drop(&mut self) {
+        self.realm.zeroize();
+        self.nonce.zeroize();
+        if let Some(algorithms) = &mut self.password_algorithms {
+            algorithms.zeroize();
+        }
+    }
 }
 
 impl TurnChallenge {
@@ -56,7 +67,7 @@ fn unique_attribute(message: &StunMessage, kind: u16) -> Result<&[u8], TurnAuthE
     Ok(&first.value)
 }
 
-fn challenge_text(bytes: &[u8]) -> Result<String, TurnAuthError> {
+fn challenge_text(bytes: &[u8]) -> Result<Zeroizing<String>, TurnAuthError> {
     if bytes.is_empty() || bytes.len() > MAX_CHALLENGE_TEXT {
         return Err(TurnAuthError::InvalidChallengeText);
     }
@@ -64,7 +75,7 @@ fn challenge_text(bytes: &[u8]) -> Result<String, TurnAuthError> {
     if text.chars().any(char::is_control) {
         return Err(TurnAuthError::InvalidChallengeText);
     }
-    Ok(text.to_owned())
+    Ok(Zeroizing::new(text.to_owned()))
 }
 
 /// Parse a TURN 401 (initial authentication) or 438 (stale nonce) response.
@@ -90,8 +101,8 @@ pub fn parse_turn_challenge(
     if code != 401 && code != 438 {
         return Err(TurnAuthError::UnsupportedChallengeCode);
     }
-    let realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
-    let nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
+    let mut realm = challenge_text(unique_attribute(message, ATTR_REALM)?)?;
+    let mut nonce = challenge_text(unique_attribute(message, ATTR_NONCE)?)?;
     let mut offers = message.attributes.iter()
         .filter(|attribute| attribute.kind == ATTR_PASSWORD_ALGORITHMS);
     let password_algorithms = match (offers.next(), offers.next()) {
@@ -99,11 +110,16 @@ pub fn parse_turn_challenge(
         (Some(attribute), None) => {
             parse_password_algorithms(&attribute.value)
                 .map_err(|_| TurnAuthError::InvalidPasswordAlgorithms)?;
-            Some(attribute.value.clone())
+            Some(Zeroizing::new(attribute.value.clone()))
         }
         _ => return Err(TurnAuthError::InvalidPasswordAlgorithms),
     };
-    Ok(TurnChallenge { code, realm, nonce, password_algorithms })
+    Ok(TurnChallenge {
+        code,
+        realm: std::mem::take(&mut *realm),
+        nonce: std::mem::take(&mut *nonce),
+        password_algorithms: password_algorithms.map(|mut value| std::mem::take(&mut *value)),
+    })
 }
 
 #[cfg(test)]
