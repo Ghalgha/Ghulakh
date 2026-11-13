@@ -45,6 +45,19 @@ def main():
         assert lines == [hashlib.sha256(secret.encode("ascii")).hexdigest()]
         assert secret not in regular.read_text(encoding="ascii")
 
+        full_device = pathlib.Path("/dev/full")
+        if full_device.exists():
+            before_delivery_failure = regular.read_bytes()
+            command = [
+                sys.executable, str(TOOL), "--digest-file", str(regular),
+                "--mode", "0640", "--expected-uid", str(os.geteuid()),
+                "--expected-gid", str(os.getegid()),
+            ]
+            with full_device.open("wb") as sink:
+                failed_delivery = subprocess.run(command, stdout=sink, stderr=subprocess.PIPE, check=False)
+            assert failed_delivery.returncode != 0
+            assert regular.read_bytes() == before_delivery_failure, "failed secret delivery left an unusable digest"
+
         target = root / "target"
         target.write_text("untouched\n", encoding="ascii")
         target.chmod(0o640)
