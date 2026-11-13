@@ -199,7 +199,10 @@ impl TurnClientRuntime {
             .context("initialize VK Calls TURN authentication provider")?;
         let mut supervisor = TurnSessionSupervisor::new(driver, provider);
 
-        supervisor.allocate().await.context("create VK Calls TURN allocation")?;
+        let (mut supervisor, _lease) = supervisor
+            .allocate_owned()
+            .await
+            .context("create VK Calls TURN allocation")?;
         if let Err(error) = supervisor.create_permission(&[gateway_peer]).await {
             return Err(release_failed_turn_setup(
                 &mut supervisor, error, "create TURN permission for VPN gateway",
