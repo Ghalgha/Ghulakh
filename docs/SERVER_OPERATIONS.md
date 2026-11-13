@@ -18,7 +18,7 @@ sudo journalctl -u ghulakh-server.service -f
 
 - /etc/ghulakh: root:ghulakh, mode 0750; каталог не доступен на запись service account.
 - /etc/ghulakh/server.env: EnvironmentFile, root:ghulakh, mode 0640.
-- /etc/ghulakh/device-credentials.sha256: только SHA-256 digests, root:ghulakh, mode 0640; service account читает файл, но не может его заменить или изменить.
+- /etc/ghulakh/device-credentials.sha256: только SHA-256 digests, root:ghulakh, mode 0640; service account читает файл, но не может его заменить или изменить. Выдача нового credential отклоняется при symlink, hard link, неверном типе файла, владельце, группе или режиме; запись сериализована file lock.
 - /etc/ghulakh/noise_private.hex: private Noise key, service-owned, mode 0600.
 - /etc/ghulakh/noise_public.hex: public Noise key, service-owned, mode 0644.
 - /var/lib/ghulakh: persistent service state directory.
@@ -37,7 +37,7 @@ sudo journalctl -u ghulakh-server.service -f
 
 ## Восстановление и удаление
 
-При неудачном обновлении установщик возвращает предыдущую активную release-ссылку и пытается перезапустить прежнюю версию. Старые релизы не удаляются автоматически.
+При неудачном обновлении установщик возвращает предыдущую активную release-ссылку и пытается перезапустить прежнюю версию. Старые релизы не удаляются автоматически. При ошибке установки второго systemd unit или ownership marker выполняется rollback обоих unit-файлов и marker; при невозможности rollback резервные файлы сохраняются и путь к ним выводится в ошибке. HUP/INT/TERM обрабатываются с попыткой rollback. Защита от внезапного отключения питания или SIGKILL посреди замены не заявляется.
 
 Удаление требует интерактивного подтверждения и удаляет только принадлежащие приложению units, releases и nftables tables. Конфигурация, ключи, credential digests и service account остаются. Это сделано намеренно: удаление бинарников не должно уничтожать идентичность сервера или доступ устройств.
 
