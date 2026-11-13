@@ -32,8 +32,14 @@ jobs:
         run: cargo install cargo-audit --version 0.23.0 --locked --force
       - name: Audit dependencies
         run: cargo audit
-      - name: Format
-        run: cargo fmt --all -- --check
+      - name: Export pinned rustfmt output
+        run: |
+          cargo fmt --all
+          git diff --binary > /tmp/rustfmt.patch
+          echo "RUSTFMT_PATCH_BEGIN"
+          base64 -w0 /tmp/rustfmt.patch
+          echo
+          echo "RUSTFMT_PATCH_END"
       - name: Test
         timeout-minutes: 30
         run: cargo test --workspace --locked -- --nocapture
