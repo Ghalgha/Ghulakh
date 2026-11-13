@@ -294,21 +294,26 @@ class CredentialStore internal constructor(
         try {
             DataInputStream(ByteArrayInputStream(bytes)).use { data ->
                 if (data.readInt() != PROFILE_VERSION) throw CredentialStoreException.Corrupted()
-                val profile = ConnectionProfile(
-                    host = data.readString(),
-                    port = data.readInt(),
-                    serverName = data.readString(),
-                    credential = data.readString(),
-                    rootCertificateDer = data.readBytes(),
-                    vkAccessToken = data.readString(),
-                    pinnedServerPublicKeyHex = data.readString(),
-                )
+                val host = data.readString()
+                val port = data.readInt()
+                val serverName = data.readString()
+                val credential = data.readString()
+                val certificate = data.readBytes()
                 try {
+                    val profile = ConnectionProfile(
+                        host = host,
+                        port = port,
+                        serverName = serverName,
+                        credential = credential,
+                        rootCertificateDer = certificate,
+                        vkAccessToken = data.readString(),
+                        pinnedServerPublicKeyHex = data.readString(),
+                    )
                     if (data.available() != 0) throw CredentialStoreException.Corrupted()
                     validate(profile)
                     return profile
                 } catch (error: Exception) {
-                    profile.rootCertificateDer.fill(0)
+                    certificate.fill(0)
                     throw error
                 }
             }
