@@ -208,8 +208,8 @@ object VkCallsCredentialProvider {
                 val fingerprint = TurnQuotaRetryPolicy.fingerprint(credentialsJson)
                 synchronized(lock) {
                     check(!finished) { "VK Calls credential broker is already finished" }
-                    check(sessions.size < MAX_TRACKED_CREDENTIAL_SETS) {
-                        "VK Calls credential session limit reached"
+                    check(issuedFingerprints.size < MAX_TRACKED_CREDENTIAL_SETS) {
+                        "VK Calls credential set limit reached"
                     }
                     require(issuedFingerprints.add(fingerprint)) {
                         "VK Calls returned a repeated TURN credential set"
