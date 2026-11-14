@@ -73,7 +73,8 @@ grep -Fq 'systemctl --no-pager --full status ghulakh-server.service || failed=1'
 grep -Fq 'systemctl --no-pager --full status ghulakh-egress.service || failed=1' "$DEPLOY"
 grep -Fq 'find "$RELEASES" -xdev' "$DEPLOY"
 grep -Fq '"$CURRENT/$EGRESS_SCRIPT_NAME" --check-owned' "$DEPLOY"
-grep -Fq 'item["table"].get("comment")=="ghulakh-egress-v1"' "$EGRESS"
+grep -Fq 'nft -j list tables' "$EGRESS"
+grep -Fq 'table.get("comment") != "ghulakh-egress-v1"' "$EGRESS"
 
 # Deployment must not edit host-global network state or broad firewall chains.
 if grep -Eq 'sysctl[[:space:]]+-w|iptables|ip[[:space:]]+route[[:space:]]+(add|del)|nft[[:space:]]+(add|delete)[[:space:]]+table' "$DEPLOY"; then
