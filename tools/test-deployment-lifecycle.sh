@@ -188,6 +188,7 @@ ln -s "$PROC_FIXTURE/release" "$CURRENT"
 ln -s "$PROC_FIXTURE/release/ghulakh-server" "$GHULAKH_PROC_ROOT/4242/exe"
 printf '0::/system.slice/ghulakh-server.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
 ln -s /dev/net/tun "$GHULAKH_PROC_ROOT/4242/fd/3"
+SYSTEMD_QUERY_FAILED=0
 SYSTEMD_MAIN_PID=4242
 [[ "$(ghulakh_server_main_pid)" == 4242 ]]
 ghulakh_server_process_is_current 4242
