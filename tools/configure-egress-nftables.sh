@@ -28,6 +28,8 @@ try:
     payload = json.load(sys.stdin)
 except (ValueError, TypeError):
     raise SystemExit("Could not parse nftables table inventory")
+if not isinstance(payload, dict) or not isinstance(payload.get("nftables"), list):
+    raise SystemExit("Unexpected nftables table inventory format")
 found = {}
 for item in payload.get("nftables", []):
     if not isinstance(item, dict) or not isinstance(item.get("table"), dict):
