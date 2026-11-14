@@ -57,8 +57,9 @@ systemctl() {
       if [[ "$unit" == ghulakh-server.service ]]; then ACTIVE_SERVER=inactive; else ACTIVE_EGRESS=inactive; fi
       ;;
     daemon-reload)
-      [[ -f "$SERVER_UNIT" ]] && LOAD_SERVER=loaded || LOAD_SERVER=not-found
-      [[ -f "$EGRESS_UNIT" ]] && LOAD_EGRESS=loaded || LOAD_EGRESS=not-found
+      if [[ -f "$SERVER_UNIT" ]]; then LOAD_SERVER=loaded; else LOAD_SERVER=not-found; fi
+      if [[ -f "$EGRESS_UNIT" ]]; then LOAD_EGRESS=loaded; else LOAD_EGRESS=not-found; fi
+      return 0
       ;;
     *) return 2 ;;
   esac
