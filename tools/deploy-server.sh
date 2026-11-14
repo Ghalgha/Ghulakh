@@ -190,7 +190,6 @@ write_units() {
   marker_tmp="$BASE/.managed-by-ghulakh.tmp.$BASHPID"
   marker_backup="$BASE/.managed-by-ghulakh.backup.$BASHPID"
 
-  local transaction_active=0
   rollback_units() {
     local rollback_failed=0
     if (( had_egress )); then
@@ -212,8 +211,7 @@ write_units() {
       printf 'CRITICAL: unit rollback was incomplete; unit backups: %s; marker backup: %s\\n' "$tmpdir" "$marker_backup" >&2
       return 1
     fi
-    transaction_active=0
-    rm -f "$marker_tmp" "$marker_backup"
+    rm -f "$marker_tmp" "$marker_backup" || return 1
     rm -rf -- "$tmpdir" || return 1
     unit_stage_dir=""
     return 0
@@ -296,7 +294,6 @@ EOF
       rm -rf -- "$tmpdir"
       return 1
     }
-  transaction_active=1
   if ! mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"; then
     rollback_units || true
     return 1
@@ -313,8 +310,7 @@ EOF
     return 1
   fi
 
-  transaction_active=0
-  rm -f "$marker_backup"
+  rm -f "$marker_backup" || return 1
   rm -rf -- "$tmpdir" || return 1
   unit_stage_dir=""
   return 0
