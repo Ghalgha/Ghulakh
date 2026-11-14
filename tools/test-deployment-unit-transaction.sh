@@ -23,7 +23,7 @@ unit_stage_dir=""
 # Keep the production function intact while redirecting its temporary unit
 # directory into this isolated fixture.
 mktemp() {
-  if [[ "${*: -1}" == /etc/systemd/system/.ghulakh-units.XXXXXX ]]; then
+  if [[ "${@: -1}" == /etc/systemd/system/.ghulakh-units.XXXXXX ]]; then
     command mktemp -d "$TMP/systemd-units.XXXXXX"
   else
     command mktemp "$@"
@@ -79,7 +79,7 @@ assert_previous_state() {
   [[ "$(cat "$SERVER_UNIT")" == 'previous server unit' ]]
   [[ "$(cat "$EGRESS_UNIT")" == 'previous egress unit' ]]
   [[ "$(cat "$MARKER")" == 'previous ownership marker' ]]
-  [[ -z "$(find "$TMP/systemd-units" -maxdepth 1 -type d -name '.ghulakh-units.*' -print -quit 2>/dev/null || true)" ]]
+  [[ -z "$unit_stage_dir" || ! -e "$unit_stage_dir" ]]
 }
 
 # A failure while taking the marker snapshot must not leave a partial backup.
@@ -120,5 +120,17 @@ write_units eth0 routed
 grep -Fq 'ExecStart=/bin/bash '"$CURRENT"'/configure-egress-nftables.sh ghulakh0 eth0 routed' "$EGRESS_UNIT"
 grep -Fq 'ExecStart='"$CURRENT"'/ghulakh-server' "$SERVER_UNIT"
 sha256sum -c "$MARKER" >/dev/null
+
+# First-install failure must remove both newly created unit files and preserve the empty reservation marker.
+prepare_fixture first-install
+rm -f "$SERVER_UNIT" "$EGRESS_UNIT"
+: >"$MARKER"
+FAIL_MV_DEST="$SERVER_UNIT"
+if write_units eth0 nat66; then
+  echo "write_units accepted a failed first-install unit rename." >&2
+  exit 1
+fi
+[[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && -f "$MARKER" && ! -s "$MARKER" ]]
+[[ -z "$unit_stage_dir" ]]
 
 echo "Deployment unit transaction tests passed."

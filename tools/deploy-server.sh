@@ -274,24 +274,26 @@ EOF
 
   systemd-analyze verify "$tmpdir/ghulakh-egress.service" "$tmpdir/ghulakh-server.service" || {
     rm -rf -- "$tmpdir"
+    unit_stage_dir=""
     return 1
   }
   if [[ -e "$EGRESS_UNIT" ]]; then
-    cp -a -- "$EGRESS_UNIT" "$tmpdir/old-egress" || { rm -rf -- "$tmpdir"; return 1; }
+    cp -a -- "$EGRESS_UNIT" "$tmpdir/old-egress" || { rm -rf -- "$tmpdir"; unit_stage_dir=""; return 1; }
     had_egress=1
   fi
   if [[ -e "$SERVER_UNIT" ]]; then
-    cp -a -- "$SERVER_UNIT" "$tmpdir/old-server" || { rm -rf -- "$tmpdir"; return 1; }
+    cp -a -- "$SERVER_UNIT" "$tmpdir/old-server" || { rm -rf -- "$tmpdir"; unit_stage_dir=""; return 1; }
     had_server=1
   fi
   if [[ -e "$MARKER" ]]; then
-    cp -a -- "$MARKER" "$marker_backup" || { rm -rf -- "$tmpdir"; return 1; }
+    cp -a -- "$MARKER" "$marker_backup" || { rm -f -- "$marker_backup"; rm -rf -- "$tmpdir"; unit_stage_dir=""; return 1; }
     had_marker=1
   fi
 
   install -o root -g root -m 0644 "$tmpdir/ghulakh-egress.service" "$tmpdir/new-egress" &&
     install -o root -g root -m 0644 "$tmpdir/ghulakh-server.service" "$tmpdir/new-server" || {
       rm -rf -- "$tmpdir"
+      unit_stage_dir=""
       return 1
     }
   if ! mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"; then
