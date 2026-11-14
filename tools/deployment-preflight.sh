@@ -10,7 +10,7 @@ ghulakh_server_process_is_current() {
   [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
   [[ -r "$proc_root/$pid/cgroup" && -e "$proc_root/$pid/exe" ]] || return 1
   cgroup="$(cat "$proc_root/$pid/cgroup" 2>/dev/null)" || return 1
-  grep -Eq '(^|:)/system\\.slice/ghulakh-server\\.service
+  grep -Eq '(^|:)/system[.]slice/ghulakh-server[.]service$' <<<"$cgroup" || return 1
   expected="$(readlink -f "$CURRENT/ghulakh-server" 2>/dev/null)" || return 1
   actual="$(readlink "$proc_root/$pid/exe" 2>/dev/null)" || return 1
   [[ "$actual" == "$expected" || "$actual" == "$expected (deleted)" ]]
