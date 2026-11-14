@@ -73,6 +73,8 @@ prepare_fixture() {
   mkdir -p "$RELEASES/old" "$RELEASES/new" "$(dirname "$SERVER_UNIT")" "$BASE/transaction"
   TRANSACTION_DIR="$BASE/transaction"
   transaction_dir="$TRANSACTION_DIR"
+  unit_stage_dir="$1/unit-stage"
+  mkdir -p "$unit_stage_dir"
   printf 'old server unit\n' >"$TRANSACTION_DIR/old-server"
   printf 'old egress unit\n' >"$TRANSACTION_DIR/old-egress"
   printf 'old marker\n' >"$TRANSACTION_DIR/old-marker"
@@ -98,7 +100,7 @@ cmp -s "$TRANSACTION_DIR/old-egress" "$EGRESS_UNIT"
 cmp -s "$TRANSACTION_DIR/old-marker" "$MARKER"
 [[ "$ACTIVE_EGRESS" == active && "$ENABLED_EGRESS" == enabled-runtime ]]
 [[ "$ACTIVE_SERVER" == inactive && "$ENABLED_SERVER" == disabled ]]
-[[ ! -e "$TRANSACTION_DIR" ]]
+[[ ! -e "$TRANSACTION_DIR" && -z "$unit_stage_dir" ]]
 
 # First-install rollback: stop newly loaded units before deleting their unit files.
 prepare_fixture "$TMP/first-install"
@@ -111,6 +113,6 @@ rollback_activation
 [[ ! -e "$CURRENT" && ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -e "$MARKER" ]]
 [[ "$LOAD_SERVER" == not-found && "$LOAD_EGRESS" == not-found ]]
 [[ "$ACTIVE_SERVER" == inactive && "$ACTIVE_EGRESS" == inactive ]]
-[[ -d "$RELEASES/old" && -d "$RELEASES/new" ]]
+[[ -d "$RELEASES/old" && -d "$RELEASES/new" && -z "$unit_stage_dir" ]]
 
 echo "Deployment rollback behavioral tests passed."
