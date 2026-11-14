@@ -7,6 +7,8 @@ CREDENTIAL="$ROOT/tools/create_credential.py"
 
 bash -n "$DEPLOY"
 bash -n "$EGRESS"
+bash -n "$ROOT/tools/test-deployment-rollback.sh"
+bash "$ROOT/tools/test-deployment-rollback.sh"
 python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$CREDENTIAL"
 python3 "$ROOT/tools/test_credential_file_safety.py"
 
