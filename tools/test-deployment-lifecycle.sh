@@ -24,7 +24,7 @@ systemctl() {
   case "$1 $2 $3" in
     "show --property=LoadState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_LOAD" ;;
     "show --property=ActiveState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
-    "is-enabled "*) printf '%s\n' "$SYSTEMD_ENABLED" ;;
+    "is-enabled "*) case "$SYSTEMD_LOAD:$SYSTEMD_ACTIVE" in loaded:active) printf 'enabled\n' ;; loaded:inactive) printf 'disabled\n' ;; masked:inactive) printf 'masked-runtime\n' ;; not-found:*) printf 'not-found\n' ;; *) return 2 ;; esac ;;
     disable\ --now\ *) SYSTEMD_STOP_CALLS=$((SYSTEMD_STOP_CALLS + 1)); return "$SYSTEMD_STOP_STATUS" ;;
     *) return 2 ;;
   esac
