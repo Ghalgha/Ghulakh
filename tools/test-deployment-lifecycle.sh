@@ -67,6 +67,8 @@ grep -Fq 'ProtectSystem=strict' "$DEPLOY"
 grep -Fq 'systemctl disable --now ghulakh-server.service' "$DEPLOY"
 grep -Fq 'rm -rf -- "$RELEASES"' "$DEPLOY"
 grep -Fq 'Persistent configuration and service account remain' "$DEPLOY"
+grep -Fq 'ghulakh_preflight_udp_port 4434' "$DEPLOY"
+grep -Fq 'ghulakh_preflight_tun_interface' "$DEPLOY"
 
 # Deployment must not edit host-global network state or broad firewall chains.
 if grep -Eq 'sysctl[[:space:]]+-w|iptables|ip[[:space:]]+route[[:space:]]+(add|del)|nft[[:space:]]+(add|delete)[[:space:]]+table' "$DEPLOY"; then
@@ -77,4 +79,5 @@ if grep -Eq 'rm[[:space:]]+-rf[[:space:]]+/(etc|usr|var)([[:space:]]|$)' "$DEPLO
   echo "Deployment script contains an unsafe absolute recursive removal." >&2
   exit 1
 fi
+bash "$ROOT/tools/test-deployment-preflight.sh"
 echo "Deployment lifecycle static checks passed."

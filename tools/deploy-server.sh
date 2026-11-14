@@ -11,6 +11,8 @@ readonly SERVER_UNIT="/etc/systemd/system/ghulakh-server.service"
 readonly EGRESS_UNIT="/etc/systemd/system/ghulakh-egress.service"
 readonly EGRESS_SCRIPT_NAME="configure-egress-nftables.sh"
 readonly CREDENTIAL_TOOL_NAME="create_credential.py"
+readonly TUN_INTERFACE="ghulakh0"
+source "$(cd "$(dirname "$0")" && pwd)/deployment-preflight.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
@@ -37,7 +39,7 @@ check_platform() {
   [[ -c /dev/net/tun ]] || die "/dev/net/tun is unavailable."
   [[ -r /proc/sys/net/ipv4/ip_forward && $(< /proc/sys/net/ipv4/ip_forward) == 1 ]] || die "Enable net.ipv4.ip_forward=1 administratively."
   [[ -r /proc/sys/net/ipv6/conf/all/forwarding && $(< /proc/sys/net/ipv6/conf/all/forwarding) == 1 ]] || die "Enable net.ipv6.conf.all.forwarding=1 administratively."
-  for cmd in systemctl systemd-analyze install ip nft runuser useradd getent python3 sha256sum readlink stat; do require_command "$cmd"; done
+  for cmd in systemctl systemd-analyze install ip nft ss runuser useradd getent python3 sha256sum readlink stat; do require_command "$cmd"; done
 }
 parse_args() {
   ACTION="$1"; shift
@@ -74,6 +76,14 @@ assert_managed_layout() {
     [[ $(stat -c "%U:%G:%a" "$MARKER") == root:root:600 ]] || die "Managed marker permissions are invalid."
   fi
   if [[ -s "$MARKER" ]]; then sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum mismatch; refusing to overwrite or remove modified units."; fi
+  local unit_load_state unit_name unit_path
+  for unit_name in ghulakh-egress.service ghulakh-server.service; do
+    if [[ "$unit_name" == ghulakh-egress.service ]]; then unit_path="$EGRESS_UNIT"; else unit_path="$SERVER_UNIT"; fi
+    if [[ ! -e "$unit_path" && ! -L "$unit_path" ]]; then
+      unit_load_state="$(systemctl show --property=LoadState --value "$unit_name" 2>/dev/null || true)"
+      [[ "$unit_load_state" == not-found ]] || die "Refusing unmanaged systemd unit outside $unit_path (LoadState=${unit_load_state:-unknown})."
+    fi
+  done
 }
 ensure_account() {
   if ! id "$NAME" >/dev/null 2>&1; then
@@ -307,6 +317,8 @@ deploy() {
     [[ ! -s "$MARKER" && ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
       die "Managed marker or systemd units exist without an active release; refusing an incomplete installation."
   fi
+  ghulakh_preflight_udp_port 4434 || die "UDP/4434 preflight failed; no existing process was changed."
+  ghulakh_preflight_tun_interface "$TUN_INTERFACE" || die "TUN interface preflight failed; no existing interface or process was changed."
   local egress_tool credential_tool release_id release_dir old_target link
   egress_tool="$(cd "$(dirname "$0")" && pwd)/$EGRESS_SCRIPT_NAME"
   credential_tool="$(cd "$(dirname "$0")" && pwd)/$CREDENTIAL_TOOL_NAME"
@@ -379,17 +391,6 @@ deploy() {
   old_server_enabled="$(systemctl is-enabled ghulakh-server.service 2>/dev/null || true)"
   old_egress_active="$(systemctl is-active ghulakh-egress.service 2>/dev/null || true)"
   old_server_active="$(systemctl is-active ghulakh-server.service 2>/dev/null || true)"
-
-  # Do not shadow a vendor, generated or transient unit outside our managed /etc paths.
-  local unit_load_state
-  if (( ! had_old_egress )); then
-    unit_load_state="$(systemctl show --property=LoadState --value ghulakh-egress.service 2>/dev/null || true)"
-    [[ "$unit_load_state" == not-found ]] || die "Refusing unmanaged egress unit outside $EGRESS_UNIT (LoadState=${unit_load_state:-unknown})."
-  fi
-  if (( ! had_old_server )); then
-    unit_load_state="$(systemctl show --property=LoadState --value ghulakh-server.service 2>/dev/null || true)"
-    [[ "$unit_load_state" == not-found ]] || die "Refusing unmanaged server unit outside $SERVER_UNIT (LoadState=${unit_load_state:-unknown})."
-  fi
 
   validate_previous_unit_state() {
     local unit="$1" enabled_state="$2" active_state="$3"
