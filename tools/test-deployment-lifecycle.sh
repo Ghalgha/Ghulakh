@@ -45,7 +45,7 @@ if stop_uncommitted_unit ghulakh-server.service 2>/dev/null; then
   exit 1
 fi
 SYSTEMD_STOP_STATUS=0
-SYSTEMD_LOAD=loaded
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled
 verify_rollback_unit_state ghulakh-server.service loaded active enabled
 SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
 verify_rollback_unit_state ghulakh-server.service loaded inactive disabled
