@@ -30,6 +30,7 @@ cargo build --release --locked -p ghulakh-server
 
 Скопируйте бинарник и каталог tools/ на сервер, сохранив рядом файлы:
 - deploy-server.sh
+- deployment-preflight.sh
 - configure-egress-nftables.sh
 - create_credential.py
 
