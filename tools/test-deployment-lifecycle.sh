@@ -274,4 +274,6 @@ sudo bash "$ROOT/tools/test-release-ownership.sh"
 sudo bash "$ROOT/tools/test-release-integrity.sh"
 sudo bash "$ROOT/tools/test-uninstall-recovery.sh"
 sudo bash "$ROOT/tools/test-uninstall-transaction.sh"
-echo "Deployment lifecycle static checks passed."
+bash "$ROOT/tools/test-deployment-unit-transaction.sh"
+
+echo "Deployment lifecycle checks passed."
