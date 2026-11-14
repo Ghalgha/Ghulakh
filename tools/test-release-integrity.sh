@@ -35,11 +35,14 @@ if verify_release_integrity "$RELEASES" "$TMP/mountinfo"; then
   exit 1
 fi
 printf 'server executable fixture\n' >"$RELEASES/$ID/ghulakh-server"
+WRONG_ID="0000000000000000000000000000000000000000000000000000000000000000"
+[[ "$ID" != "$WRONG_ID" ]]
+mv "$RELEASES/$ID" "$RELEASES/$WRONG_ID"
 if verify_release_integrity "$RELEASES" "$TMP/mountinfo"; then
   echo "A release with a non-matching directory identifier passed validation." >&2
   exit 1
 fi
-mv "$RELEASES/$ID" "$RELEASES/placeholder"
+mv "$RELEASES/$WRONG_ID" "$RELEASES/placeholder"
 if verify_release_integrity "$RELEASES" "$TMP/mountinfo"; then
   echo "A release with a malformed identifier passed validation." >&2
   exit 1
