@@ -159,7 +159,7 @@ run_activation_failure_case() {
   LOAD_SERVER=loaded LOAD_EGRESS=loaded
   ACTIVE_SERVER=active ACTIVE_EGRESS=active
   ENABLED_SERVER=enabled ENABLED_EGRESS=enabled
-  FAIL_DAEMON_RELOAD_ONCE=0 FAIL_ENABLE_UNIT_ONCE="" FAIL_RESTART_UNIT_ONCE=""
+  FAIL_DAEMON_RELOAD_ONCE=0 FAIL_ENABLE_UNIT_ONCE="" FAIL_RESTART_UNIT_ONCE="" FAIL_RESTART_UNIT=""
   case "$failure_kind" in
     daemon-reload) FAIL_DAEMON_RELOAD_ONCE=1 ;;
     enable) FAIL_ENABLE_UNIT_ONCE="$failure_unit" ;;
