@@ -551,15 +551,15 @@ status() {
 uninstall() {
   require_root
   [[ -f "$MARKER" && ! -L "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
-  [[ $(stat -c '%U:%G:%a:%h' "$BASE") == root:root:755:1 ]] || die "Managed release root ownership, mode or link count is invalid."
+  [[ $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership, mode or link count is invalid."
   [[ $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
-  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a:%h' "$RELEASES") == root:root:755:1 ]] || die "Managed releases directory ownership, mode or link count is invalid."
+  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership, mode or link count is invalid."
   [[ -L "$CURRENT" ]] || die "Active release link is missing or is not a symlink."
   local active_release
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases; refusing uninstall." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release is not a root-owned directory."
-  find "$RELEASES" -xdev \( -type l -o -links +1 -o ! -user root -o ! -group root \) -print -quit | grep -q . && die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
+  find "$RELEASES" -xdev \( -type l -o \( -type f -links +1 \) -o ! -user root -o ! -group root \) -print -quit | grep -q . && die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
