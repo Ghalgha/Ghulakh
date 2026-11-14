@@ -46,6 +46,8 @@ SYSTEMD_LOAD=loaded
 verify_rollback_unit_state ghulakh-server.service loaded active enabled
 SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
 verify_rollback_unit_state ghulakh-server.service loaded inactive disabled
+SYSTEMD_LOAD=masked SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=masked-runtime
+verify_rollback_unit_state ghulakh-server.service masked inactive masked-runtime
 SYSTEMD_LOAD=not-found
 verify_rollback_unit_state ghulakh-server.service not-found "" ""
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=failed
