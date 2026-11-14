@@ -84,6 +84,8 @@ sudo bash tools/deploy-server.sh update \
 
 ## Проверка состояния
 
+Команда status возвращает ненулевой код, если установка неполная, active release не принадлежит управляемому каталогу или хотя бы одна служба не находится в active-состоянии.
+
 ~~~
 sudo bash tools/deploy-server.sh status
 sudo systemctl status ghulakh-server.service ghulakh-egress.service
@@ -96,7 +98,7 @@ sudo journalctl -u ghulakh-server.service -u ghulakh-egress.service
 sudo bash tools/deploy-server.sh uninstall
 ~~~
 
-Требуется точный ввод REMOVE GHULAKH. Удаляются только проверенные собственные systemd units, release directories, активная ссылка и принадлежащие приложению nftables tables. Сохраняются /etc/ghulakh (EnvironmentFile, Noise keys, credential digests), /var/lib/ghulakh и системная учётная запись. Они оставлены намеренно, чтобы удаление runtime не уничтожало ключи и учётные данные. Удалять их можно отдельно после резервного копирования и ручной проверки.
+До подтверждения удаление проверяет владельца, тип, режим и link count release root, ownership marker и releases directory; проверяет, что current указывает внутрь releases; запрещает symlink и объекты с чужим UID/GID внутри удаляемого release tree; повторно сверяет checksum systemd units и структурно проверяет ownership comment каждой существующей nftables table. Маркер должен находиться непосредственно в JSON-объекте нужной таблицы. При любой неоднозначности удаление прекращается. Требуется точный ввод REMOVE GHULAKH. Удаляются только проверенные собственные systemd units, release directories, активная ссылка и принадлежащие приложению nftables tables. Сохраняются /etc/ghulakh (EnvironmentFile, Noise keys, credential digests), /var/lib/ghulakh и системная учётная запись. Они оставлены намеренно, чтобы удаление runtime не уничтожало ключи и учётные данные. Удалять их можно отдельно после резервного копирования и ручной проверки.
 
 Если unit-файл изменён администратором, не является обычным файлом (включая битую символическую ссылку) или не содержит маркер установщика, установка и обновление останавливаются вместо замены неизвестного пути.
 

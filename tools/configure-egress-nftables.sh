@@ -25,11 +25,33 @@ table_is_present() {
 }
 
 table_is_owned() {
-  nft -j list table "$1" "$2" 2>/dev/null | grep -Eq '"comment"[[:space:]]*:[[:space:]]*"ghulakh-egress-v1"'
+  nft -j list table "$1" "$2" 2>/dev/null | python3 -c '
+import json,sys
+family,name=sys.argv[1:3]
+try: data=json.load(sys.stdin)
+except (ValueError,TypeError): raise SystemExit(1)
+tables=[x["table"] for x in data.get("nftables",[]) if isinstance(x,dict) and isinstance(x.get("table"),dict) and x["table"].get("family")==family and x["table"].get("name")==name]
+raise SystemExit(0 if len(tables)==1 and tables[0].get("comment")=="ghulakh-egress-v1" else 1)
+' "$1" "$2"
+}
+check_owned_tables() {
+  for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
+    read -r family name <<<"$table"
+    if table_is_present "$family" "$name" && ! table_is_owned "$family" "$name"; then
+      echo "Refusing operation: ownership marker is not on nftables table $family $name" >&2
+      return 1
+    fi
+  done
 }
 
+if [[ ${1:-} == "--check-owned" ]]; then
+  [[ $# -eq 1 ]] || usage
+  check_owned_tables
+  exit $?
+fi
 if [[ ${1:-} == "--remove" ]]; then
   [[ $# -eq 1 ]] || usage
+  check_owned_tables || exit 2
   remove_commands=()
   for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
     read -r family name <<<"$table"
