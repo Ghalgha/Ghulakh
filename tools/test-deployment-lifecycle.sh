@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-set -x
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY="$ROOT/tools/deploy-server.sh"
 EGRESS="$ROOT/tools/configure-egress-nftables.sh"
@@ -21,11 +20,24 @@ sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >>"$ROLLBACK_HELP
 source "$ROLLBACK_HELPER"
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0 SYSTEMD_STOP_STATUS=0 SYSTEMD_STOP_CALLS=0
 systemctl() {
-  case "$1 $2 $3" in
-    "show --property=LoadState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_LOAD" ;;
-    "show --property=ActiveState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
-    "is-enabled "*) case "$SYSTEMD_LOAD:$SYSTEMD_ACTIVE" in loaded:active) printf 'enabled\n' ;; loaded:inactive) printf 'disabled\n' ;; masked:inactive) printf 'masked-runtime\n' ;; not-found:*) printf 'not-found\n' ;; *) return 2 ;; esac ;;
-    disable\ --now\ *) SYSTEMD_STOP_CALLS=$((SYSTEMD_STOP_CALLS + 1)); return "$SYSTEMD_STOP_STATUS" ;;
+  case "${1:-}" in
+    show)
+      [[ "${SYSTEMD_QUERY_FAILED:-0}" == 0 ]] || return 1
+      case "${2:-}" in
+        --property=LoadState) [[ "${3:-}" == --value ]] || return 2; printf '%s\\n' "$SYSTEMD_LOAD" ;;
+        --property=ActiveState) [[ "${3:-}" == --value ]] || return 2; printf '%s\\n' "$SYSTEMD_ACTIVE" ;;
+        *) return 2 ;;
+      esac
+      ;;
+    is-enabled)
+      [[ "$#" -eq 2 ]] || return 2
+      printf '%s\\n' "$SYSTEMD_ENABLED"
+      ;;
+    disable)
+      [[ "${2:-}" == --now && "$#" -eq 3 ]] || return 2
+      SYSTEMD_STOP_CALLS=$((SYSTEMD_STOP_CALLS + 1))
+      return "$SYSTEMD_STOP_STATUS"
+      ;;
     *) return 2 ;;
   esac
 }
@@ -45,13 +57,18 @@ if stop_uncommitted_unit ghulakh-server.service 2>/dev/null; then
   exit 1
 fi
 SYSTEMD_STOP_STATUS=0
+# Model systemctl is-enabled independently from LoadState and ActiveState.
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled
+[[ "$(systemctl is-enabled ghulakh-server.service)" == enabled ]]
 verify_rollback_unit_state ghulakh-server.service loaded active enabled
-SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
+[[ "$(systemctl is-enabled ghulakh-server.service)" == disabled ]]
 verify_rollback_unit_state ghulakh-server.service loaded inactive disabled
 SYSTEMD_LOAD=masked SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=masked-runtime
+[[ "$(systemctl is-enabled ghulakh-server.service)" == masked-runtime ]]
 verify_rollback_unit_state ghulakh-server.service masked inactive masked-runtime
-SYSTEMD_LOAD=not-found
+SYSTEMD_LOAD=not-found SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=not-found
+[[ "$(systemctl is-enabled ghulakh-server.service)" == not-found ]]
 verify_rollback_unit_state ghulakh-server.service not-found "" ""
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=failed
 if verify_rollback_unit_state ghulakh-server.service loaded active enabled 2>/dev/null; then
