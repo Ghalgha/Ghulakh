@@ -149,5 +149,5 @@ new_case successful-uninstall
 printf 'REMOVE GHULAKH\n' | uninstall >/dev/null
 [[ ! -e "$BASE" && ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]]
 [[ -f "$CASE/persistent/credentials" ]]
-grep -Fxq -- '--remove' "$EGRESS_REMOVAL_LOG"
+grep -Fxq removed "$EGRESS_REMOVAL_LOG"
 echo "Uninstall transaction behavioral tests passed."
