@@ -542,12 +542,12 @@ status() {
   [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 && -L "$CURRENT" ]] || die "Managed release layout ownership or mode is invalid."
   safe_file "$SERVER_UNIT" && safe_file "$EGRESS_UNIT" || die "Managed systemd unit files are missing or unsafe."
   sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum verification failed."
-  safe_file "$CURRENT/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
-  "$CURRENT/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned."
   local active_release failed=0
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release directory is not a root-owned directory."
+  safe_file "$active_release/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
+  "$active_release/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned."
   systemctl --no-pager --full status ghulakh-server.service || failed=1
   systemctl --no-pager --full status ghulakh-egress.service || failed=1
   return "$failed"
@@ -563,7 +563,10 @@ uninstall() {
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases; refusing uninstall." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release is not a root-owned directory."
-  find "$RELEASES" -xdev \( -type l -o \( -type f -links +1 \) -o ! -user root -o ! -group root \) -print -quit | grep -q . && die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
+  local unsafe_release_entry
+  unsafe_release_entry="$(find "$RELEASES" -xdev \( -type l -o \( -type f -links +1 \) -o ! -user root -o ! -group root \) -print -quit)" ||
+    die "Could not completely inspect the release tree; refusing uninstall."
+  [[ -z "$unsafe_release_entry" ]] || die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
@@ -580,13 +583,42 @@ uninstall() {
   local answer
   IFS= read -r answer
   [[ "$answer" == "REMOVE GHULAKH" ]] || die "Uninstall cancelled."
-  systemctl disable --now ghulakh-server.service
-  systemctl disable --now ghulakh-egress.service
-  rm -f "$SERVER_UNIT" "$EGRESS_UNIT" "$CURRENT"
-  systemctl daemon-reload
-  rm -rf -- "$RELEASES"
-  rm -f "$MARKER"
+  if ! systemctl disable --now ghulakh-server.service; then
+    die "Could not stop/disable ghulakh-server.service. No managed files were removed; inspect systemctl status and retry."
+  fi
+  if ! systemctl disable --now ghulakh-egress.service; then
+    printf 'ERROR: egress service could not be stopped/disabled. Release files and units remain; the server service may now be stopped.\n' >&2
+    printf 'Recovery: inspect both units, then run systemctl enable --now ghulakh-server.service and retry uninstall.\n' >&2
+    return 1
+  fi
+  local backup_dir
+  backup_dir="$(mktemp -d /run/ghulakh-uninstall.XXXXXX)" || die "Could not create uninstall rollback snapshot."
+  cp -a -- "$SERVER_UNIT" "$backup_dir/ghulakh-server.service" &&
+    cp -a -- "$EGRESS_UNIT" "$backup_dir/ghulakh-egress.service" || {
+      rm -rf -- "$backup_dir"
+      die "Could not snapshot systemd units; no managed files were removed."
+    }
+  if ! rm -f -- "$SERVER_UNIT" "$EGRESS_UNIT" "$CURRENT" || ! systemctl daemon-reload; then
+    local restore_failed=0
+    install -o root -g root -m 0644 "$backup_dir/ghulakh-server.service" "$SERVER_UNIT" || restore_failed=1
+    install -o root -g root -m 0644 "$backup_dir/ghulakh-egress.service" "$EGRESS_UNIT" || restore_failed=1
+    ln -s "$active_release" "$CURRENT" || restore_failed=1
+    systemctl daemon-reload || restore_failed=1
+    if (( restore_failed )); then
+      printf 'CRITICAL: uninstall rollback incomplete; unit backups retained at %s. Restore current -> %s and run systemctl daemon-reload.\n' "$backup_dir" "$active_release" >&2
+      return 1
+    fi
+    rm -rf -- "$backup_dir"
+    printf 'Uninstall aborted; managed units and active release link were restored. Services remain stopped; inspect and restart them if required.\n' >&2
+    return 1
+  fi
+  if ! rm -rf -- "$RELEASES"; then
+    printf 'ERROR: systemd units were removed, but release cleanup failed. Remaining data is under %s; persistent configuration is untouched.\n' "$RELEASES" >&2
+    return 1
+  fi
+  rm -f -- "$MARKER" || die "Runtime was stopped and removed, but the ownership marker remains; inspect $BASE before retrying."
   rmdir "$BASE" 2>/dev/null || true
+  rm -rf -- "$backup_dir"
   printf 'Runtime removed. Persistent configuration and service account remain in place.\n'
 }
 (($#)) || usage
