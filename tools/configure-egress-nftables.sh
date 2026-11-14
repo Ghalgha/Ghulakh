@@ -49,25 +49,20 @@ for family, name in sorted(found):
 
 if [[ ${1:-} == "--check-owned" ]]; then
   [[ $# -eq 1 ]] || usage
-  check_owned_tables
-  exit $?
+  owned_tables >/dev/null || exit 2
+  exit 0
 fi
 if [[ ${1:-} == "--remove" ]]; then
   [[ $# -eq 1 ]] || usage
-  check_owned_tables || exit 2
+  inventory="$(owned_tables)" || exit 2
   remove_commands=()
-  for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
-    read -r family name <<<"$table"
-    if table_is_present "$family" "$name"; then
-      if ! table_is_owned "$family" "$name"; then
-        echo "Refusing to remove table without Ghulakh ownership marker: $family $name" >&2
-        exit 2
-      fi
-      remove_commands+=("delete table $family $name")
-    fi
-  done
+  if [[ -n "$inventory" ]]; then
+    while IFS= read -r table; do
+      [[ -n "$table" ]] && remove_commands+=("delete table $table")
+    done <<<"$inventory"
+  fi
   if (( ${#remove_commands[@]} > 0 )); then
-    printf '%s\n' "${remove_commands[@]}" | nft -f -
+    printf '%s\\n' "${remove_commands[@]}" | nft -f -
   fi
   echo "Removed Ghulakh-owned egress/NAT tables."
   exit 0
