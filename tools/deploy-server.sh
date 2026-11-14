@@ -315,6 +315,46 @@ EOF
   unit_stage_dir=""
   return 0
 }
+stage_release() (
+  local binary="$1" egress_tool="$2" credential_tool="$3" release_root="$4" release_id="$5"
+  local release_dir="$release_root/$release_id" staging existing_id
+
+  if [[ -e "$release_dir" || -L "$release_dir" ]]; then
+    [[ -d "$release_dir" && ! -L "$release_dir" && $(stat -c "%U:%G" "$release_dir") == root:root ]] || {
+      printf 'Release directory is not a root-owned real directory.\\n' >&2
+      return 1
+    }
+    safe_file "$release_dir/ghulakh-server" &&
+      safe_file "$release_dir/$EGRESS_SCRIPT_NAME" &&
+      safe_file "$release_dir/$CREDENTIAL_TOOL_NAME" || {
+        printf 'Release contains a missing file or symlink.\\n' >&2
+        return 1
+      }
+    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)" || return 1
+    [[ "$existing_id" == "$release_id" ]] || {
+      printf 'Existing release content does not match its release identifier.\\n' >&2
+      return 1
+    }
+    printf '%s\\n' "$release_dir"
+    return 0
+  fi
+
+  # Stage on the releases filesystem and publish only a complete, verified directory.
+  staging="$(mktemp -d "$release_root/.staging.XXXXXX")" || return 1
+  trap 'rm -rf -- "$staging"' EXIT
+  install -d -o root -g root -m 0755 "$staging"
+  install -o root -g root -m 0755 "$binary" "$staging/ghulakh-server"
+  install -o root -g root -m 0755 "$egress_tool" "$staging/$EGRESS_SCRIPT_NAME"
+  install -o root -g root -m 0644 "$credential_tool" "$staging/$CREDENTIAL_TOOL_NAME"
+  existing_id="$(sha256sum "$staging/ghulakh-server" "$staging/$EGRESS_SCRIPT_NAME" "$staging/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)" || return 1
+  [[ "$existing_id" == "$release_id" ]] || {
+    printf 'Staged release content does not match its release identifier.\\n' >&2
+    return 1
+  }
+  mv -T -- "$staging" "$release_dir" || return 1
+  trap - EXIT
+  printf '%s\\n' "$release_dir"
+)
 deploy() {
   require_root
   check_platform
@@ -354,19 +394,8 @@ deploy() {
   # Reserve the new managed root before staging; rollback keeps this empty marker so retries remain verifiable.
   if [[ ! -e "$MARKER" ]]; then install -o root -g root -m 0600 /dev/null "$MARKER"; fi
   release_id="$(sha256sum "$BINARY" "$egress_tool" "$credential_tool" | cut -c1-64 | sha256sum | cut -c1-64)"
-  release_dir="$RELEASES/$release_id"
-  if [[ -e "$release_dir" || -L "$release_dir" ]]; then
-    [[ -d "$release_dir" && ! -L "$release_dir" && $(stat -c "%U:%G" "$release_dir") == root:root ]] || die "Release directory is not a root-owned real directory."
-    safe_file "$release_dir/ghulakh-server" && safe_file "$release_dir/$EGRESS_SCRIPT_NAME" && safe_file "$release_dir/$CREDENTIAL_TOOL_NAME" || die "Release contains a missing file or symlink."
-    local existing_id
-    existing_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)"
-    [[ "$existing_id" == "$release_id" ]] || die "Existing release content does not match its release identifier."
-  else
-    install -d -o root -g root -m 0755 "$release_dir"
-    install -o root -g root -m 0755 "$BINARY" "$release_dir/ghulakh-server"
-    install -o root -g root -m 0755 "$egress_tool" "$release_dir/$EGRESS_SCRIPT_NAME"
-    install -o root -g root -m 0644 "$credential_tool" "$release_dir/$CREDENTIAL_TOOL_NAME"
-  fi
+  release_dir="$(stage_release "$BINARY" "$egress_tool" "$credential_tool" "$RELEASES" "$release_id")" ||
+    die "Release staging failed; incomplete staging content was removed."
   STAGED_BINARY="$release_dir/ghulakh-server"
   [[ -x "$STAGED_BINARY" ]] || die "Staged binary is missing."
   ensure_config
