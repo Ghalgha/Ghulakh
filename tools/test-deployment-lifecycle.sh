@@ -185,6 +185,11 @@ SYSTEMD_MAIN_PID=4242
 [[ "$(ghulakh_server_main_pid)" == 4242 ]]
 ghulakh_server_process_is_current 4242
 ghulakh_server_has_tun_fd 4242
+printf '0::/system.slice/foreign-ghulakh-server.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
+if ghulakh_server_process_is_current 4242; then
+  echo "Status accepted a similarly named but foreign service cgroup." >&2
+  exit 1
+fi
 printf '0::/system.slice/foreign.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
 if ghulakh_server_process_is_current 4242; then
   echo "Status accepted a PID outside the managed service cgroup." >&2
