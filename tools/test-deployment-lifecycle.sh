@@ -81,7 +81,11 @@ grep -Fq 'systemctl --no-pager --full status ghulakh-egress.service || failed=1'
 grep -Fq 'find "$RELEASES" -xdev' "$DEPLOY"
 grep -Fq 'existing_tables="$(owned_tables)"' "$EGRESS"
 grep -Fq 'command -v python3' "$EGRESS"
-grep -Fq '"$CURRENT/$EGRESS_SCRIPT_NAME" --check-owned' "$DEPLOY"
+grep -Fq '"$active_release/$EGRESS_SCRIPT_NAME" --check-active "$ipv6_mode"' "$DEPLOY"
+grep -Fq 'ipv6_mode="$(awk' "$DEPLOY"
+grep -Fq -- '--check-active' "$EGRESS"
+grep -Fq 'verify_release_integrity "$RELEASES"' "$DEPLOY"
+grep -Fq 'expected_id="$(sha256sum "$release_dir/ghulakh-server"' "$DEPLOY"
 grep -Fq 'nft -j list tables' "$EGRESS"
 grep -Fq 'table.get("comment") != "ghulakh-egress-v1"' "$EGRESS"
 
