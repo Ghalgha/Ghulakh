@@ -40,6 +40,7 @@ systemctl() {
       esac
       ;;
     enable)
+      if [[ "${FAIL_ENABLE_UNIT_ONCE:-}" == "$unit" ]]; then FAIL_ENABLE_UNIT_ONCE=""; return 1; fi
       if [[ "$2" == --runtime ]]; then unit="$3"; ENABLE_STATE=enabled-runtime; else unit="$2"; ENABLE_STATE=enabled; fi
       if [[ "$unit" == ghulakh-server.service ]]; then ENABLED_SERVER="$ENABLE_STATE"; else ENABLED_EGRESS="$ENABLE_STATE"; fi
       ;;
@@ -49,6 +50,7 @@ systemctl() {
       ;;
     restart)
       unit="$2"
+      if [[ "${FAIL_RESTART_UNIT_ONCE:-}" == "$unit" ]]; then FAIL_RESTART_UNIT_ONCE=""; return 1; fi
       if [[ "${FAIL_RESTART_UNIT:-}" == "$unit" ]]; then return 1; fi
       if [[ "$unit" == ghulakh-server.service ]]; then ACTIVE_SERVER=active; else ACTIVE_EGRESS=active; fi
       ;;
@@ -57,6 +59,7 @@ systemctl() {
       if [[ "$unit" == ghulakh-server.service ]]; then ACTIVE_SERVER=inactive; else ACTIVE_EGRESS=inactive; fi
       ;;
     daemon-reload)
+      if [[ "${FAIL_DAEMON_RELOAD_ONCE:-0}" == 1 ]]; then FAIL_DAEMON_RELOAD_ONCE=0; return 1; fi
       if [[ -f "$SERVER_UNIT" ]]; then LOAD_SERVER=loaded; else LOAD_SERVER=not-found; fi
       if [[ -f "$EGRESS_UNIT" ]]; then LOAD_EGRESS=loaded; else LOAD_EGRESS=not-found; fi
       return 0
@@ -137,5 +140,55 @@ fi
 cmp -s "$TRANSACTION_DIR/old-server" "$SERVER_UNIT"
 cmp -s "$TRANSACTION_DIR/old-egress" "$EGRESS_UNIT"
 cmp -s "$TRANSACTION_DIR/old-marker" "$MARKER"
+
+
+# Every activation boundary must restore the complete previous deployment.
+run_activation_failure_case() {
+  local case_name="$1" failure_kind="$2" failure_unit="${3:-}"
+  prepare_fixture "$TMP/activation-$case_name"
+  had_old_egress=1 had_old_server=1 had_old_marker=1
+  old_egress_enabled=enabled-runtime old_server_enabled=disabled
+  old_egress_active=active old_server_active=inactive
+  LOAD_SERVER=loaded LOAD_EGRESS=loaded
+  ACTIVE_SERVER=active ACTIVE_EGRESS=active
+  ENABLED_SERVER=enabled ENABLED_EGRESS=enabled
+  FAIL_DAEMON_RELOAD_ONCE=0 FAIL_ENABLE_UNIT_ONCE="" FAIL_RESTART_UNIT_ONCE=""
+  case "$failure_kind" in
+    daemon-reload) FAIL_DAEMON_RELOAD_ONCE=1 ;;
+    enable) FAIL_ENABLE_UNIT_ONCE="$failure_unit" ;;
+    restart) FAIL_RESTART_UNIT_ONCE="$failure_unit" ;;
+    *) echo "Unknown activation failure fixture: $failure_kind" >&2; return 1 ;;
+  esac
+
+  local activation_failed=0
+  if ! systemctl daemon-reload; then
+    activation_failed=1
+  elif ! systemctl enable ghulakh-egress.service ghulakh-server.service; then
+    activation_failed=1
+  elif ! systemctl restart ghulakh-egress.service; then
+    activation_failed=1
+  elif ! systemctl restart ghulakh-server.service; then
+    activation_failed=1
+  fi
+  [[ "$activation_failed" == 1 ]] || {
+    echo "Activation unexpectedly succeeded in $case_name." >&2
+    return 1
+  }
+
+  rollback_activation
+  [[ "$(readlink "$CURRENT")" == "$old_target" ]]
+  cmp -s "$BASE/expected-server" "$SERVER_UNIT"
+  cmp -s "$BASE/expected-egress" "$EGRESS_UNIT"
+  cmp -s "$BASE/expected-marker" "$MARKER"
+  [[ "$ACTIVE_EGRESS" == active && "$ENABLED_EGRESS" == enabled-runtime ]]
+  [[ "$ACTIVE_SERVER" == inactive && "$ENABLED_SERVER" == disabled ]]
+  [[ ! -e "$TRANSACTION_DIR" && -z "$unit_stage_dir" ]]
+}
+
+run_activation_failure_case daemon-reload daemon-reload
+run_activation_failure_case enable-egress enable ghulakh-egress.service
+run_activation_failure_case enable-server enable ghulakh-server.service
+run_activation_failure_case restart-egress restart ghulakh-egress.service
+run_activation_failure_case restart-server restart ghulakh-server.service
 
 echo "Deployment rollback behavioral tests passed."
