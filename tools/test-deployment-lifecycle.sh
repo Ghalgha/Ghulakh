@@ -9,6 +9,41 @@ bash -n "$DEPLOY"
 bash -n "$EGRESS"
 python3 -c 'import ast, pathlib, sys; ast.parse(pathlib.Path(sys.argv[1]).read_text())' "$CREDENTIAL"
 python3 "$ROOT/tools/test_credential_file_safety.py"
+
+# Exercise rollback verification against controlled systemd state responses.
+ROLLBACK_HELPER="$(mktemp)"
+trap 'rm -f -- "$ROLLBACK_HELPER"' EXIT
+sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >"$ROLLBACK_HELPER"
+source "$ROLLBACK_HELPER"
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0
+systemctl() {
+  case "$1 $2 $3" in
+    "show --property=LoadState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\\n' "$SYSTEMD_LOAD" ;;
+    "show --property=ActiveState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\\n' "$SYSTEMD_ACTIVE" ;;
+    "is-enabled ") printf '%s\\n' "$SYSTEMD_ENABLED" ;;
+    *) return 2 ;;
+  esac
+}
+verify_rollback_unit_state ghulakh-server.service loaded active enabled
+SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
+verify_rollback_unit_state ghulakh-server.service loaded inactive disabled
+SYSTEMD_LOAD=not-found
+verify_rollback_unit_state ghulakh-server.service not-found "" ""
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=failed
+if verify_rollback_unit_state ghulakh-server.service loaded active enabled 2>/dev/null; then
+  echo "Rollback accepted an incorrect service activity state." >&2
+  exit 1
+fi
+SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=masked
+if verify_rollback_unit_state ghulakh-server.service loaded active enabled 2>/dev/null; then
+  echo "Rollback accepted an incorrect service enablement state." >&2
+  exit 1
+fi
+SYSTEMD_LOAD=not-found SYSTEMD_QUERY_FAILED=1
+if verify_rollback_unit_state ghulakh-server.service not-found "" "" 2>/dev/null; then
+  echo "Rollback accepted an unreadable systemd state." >&2
+  exit 1
+fi
 grep -Fq 'mv -Tf "$link" "$CURRENT"' "$DEPLOY"
 grep -Fq 'Previous deployment state was restored; persistent configuration was preserved.' "$DEPLOY"
 grep -Fq 'Managed by Ghulakh deployment tool' "$DEPLOY"
@@ -29,6 +64,8 @@ grep -Fq 'O_NOFOLLOW' "$CREDENTIAL"
 grep -Fq '[[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]' "$DEPLOY"
 grep -Fq 'os.fstat(fd)' "$CREDENTIAL"
 grep -Fq 'rollback_units' "$DEPLOY"
+grep -Fq 'verify_rollback_unit_state ghulakh-server.service' "$DEPLOY"
+grep -Fq 'cmp -s "$transaction_dir/old-marker" "$MARKER"' "$DEPLOY"
 grep -Fq 'trap - EXIT HUP INT TERM' "$DEPLOY"
 grep -Fq 'old-egress' "$DEPLOY"
 grep -Fq 'old-server' "$DEPLOY"
