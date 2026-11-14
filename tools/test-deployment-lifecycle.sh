@@ -97,4 +97,5 @@ fi
 bash "$ROOT/tools/test-deployment-preflight.sh"
 sudo bash "$ROOT/tools/test-egress-ownership.sh"
 sudo bash "$ROOT/tools/test-release-ownership.sh"
+sudo bash "$ROOT/tools/test-release-integrity.sh"
 echo "Deployment lifecycle static checks passed."
