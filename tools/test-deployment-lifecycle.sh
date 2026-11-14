@@ -13,17 +13,36 @@ python3 "$ROOT/tools/test_credential_file_safety.py"
 # Exercise rollback verification against controlled systemd state responses.
 ROLLBACK_HELPER="$(mktemp)"
 trap 'rm -f -- "$ROLLBACK_HELPER"' EXIT
-sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >"$ROLLBACK_HELPER"
+sed -n '/^  stop_uncommitted_unit() {/,/^  }/p' "$DEPLOY" >"$ROLLBACK_HELPER"
+sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >>"$ROLLBACK_HELPER"
 source "$ROLLBACK_HELPER"
-SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0 SYSTEMD_STOP_STATUS=0 SYSTEMD_STOP_CALLS=0
 systemctl() {
   case "$1 $2 $3" in
     "show --property=LoadState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_LOAD" ;;
     "show --property=ActiveState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
     "is-enabled "*) printf '%s\n' "$SYSTEMD_ENABLED" ;;
+    disable\ --now\ *) SYSTEMD_STOP_CALLS=$((SYSTEMD_STOP_CALLS + 1)); return "$SYSTEMD_STOP_STATUS" ;;
     *) return 2 ;;
   esac
 }
+stop_uncommitted_unit ghulakh-server.service
+[[ "$SYSTEMD_STOP_CALLS" -eq 1 ]]
+SYSTEMD_LOAD=not-found
+stop_uncommitted_unit ghulakh-egress.service
+[[ "$SYSTEMD_STOP_CALLS" -eq 1 ]]
+SYSTEMD_LOAD=activating
+if stop_uncommitted_unit ghulakh-server.service 2>/dev/null; then
+  echo "Rollback accepted an unrecognized unit load state." >&2
+  exit 1
+fi
+SYSTEMD_LOAD=loaded SYSTEMD_STOP_STATUS=1
+if stop_uncommitted_unit ghulakh-server.service 2>/dev/null; then
+  echo "Rollback accepted a failed stop/disable operation." >&2
+  exit 1
+fi
+SYSTEMD_STOP_STATUS=0
+SYSTEMD_LOAD=loaded
 verify_rollback_unit_state ghulakh-server.service loaded active enabled
 SYSTEMD_ACTIVE=inactive SYSTEMD_ENABLED=disabled
 verify_rollback_unit_state ghulakh-server.service loaded inactive disabled
@@ -65,6 +84,7 @@ grep -Fq '[[ ! -e "$ENV_FILE" && ! -L "$ENV_FILE" ]]' "$DEPLOY"
 grep -Fq 'os.fstat(fd)' "$CREDENTIAL"
 grep -Fq 'rollback_units' "$DEPLOY"
 grep -Fq 'verify_rollback_unit_state ghulakh-server.service' "$DEPLOY"
+grep -Fq 'stop_uncommitted_unit ghulakh-server.service' "$DEPLOY"
 grep -Fq 'cmp -s "$transaction_dir/old-marker" "$MARKER"' "$DEPLOY"
 grep -Fq 'trap - EXIT HUP INT TERM' "$DEPLOY"
 grep -Fq 'old-egress' "$DEPLOY"
