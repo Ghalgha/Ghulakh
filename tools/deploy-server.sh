@@ -186,13 +186,13 @@ write_units() {
   local wan="$1" mode="$2" tmpdir marker_tmp marker_backup
   local had_egress=0 had_server=0 had_marker=0
   tmpdir="$(mktemp -d /etc/systemd/system/.ghulakh-units.XXXXXX)"
+  unit_stage_dir="$tmpdir"
   marker_tmp="$BASE/.managed-by-ghulakh.tmp.$BASHPID"
   marker_backup="$BASE/.managed-by-ghulakh.backup.$BASHPID"
 
   local transaction_active=0
   rollback_units() {
     local rollback_failed=0
-    trap - EXIT HUP INT TERM
     if (( had_egress )); then
       mv -f "$tmpdir/old-egress" "$EGRESS_UNIT" || rollback_failed=1
     else
@@ -209,14 +209,13 @@ write_units() {
       rm -f "$MARKER" || rollback_failed=1
     fi
     if (( rollback_failed )); then
-      trap - EXIT HUP INT TERM
       printf 'CRITICAL: unit rollback was incomplete; unit backups: %s; marker backup: %s\\n' "$tmpdir" "$marker_backup" >&2
       return 1
     fi
     transaction_active=0
-    trap - EXIT HUP INT TERM
     rm -f "$marker_tmp" "$marker_backup"
-    rm -rf -- "$tmpdir"
+    rm -rf -- "$tmpdir" || return 1
+    unit_stage_dir=""
     return 0
   }
 
@@ -298,8 +297,6 @@ EOF
       return 1
     }
   transaction_active=1
-  trap 'if (( transaction_active )); then rollback_units || true; fi' EXIT
-  trap 'if (( transaction_active )); then rollback_units || true; fi; exit 1' HUP INT TERM
   if ! mv -f "$tmpdir/new-egress" "$EGRESS_UNIT"; then
     rollback_units || true
     return 1
@@ -317,9 +314,9 @@ EOF
   fi
 
   transaction_active=0
-  trap - EXIT HUP INT TERM
   rm -f "$marker_backup"
-  rm -rf -- "$tmpdir"
+  rm -rf -- "$tmpdir" || return 1
+  unit_stage_dir=""
   return 0
 }
 deploy() {
@@ -403,7 +400,7 @@ deploy() {
   printf "Pinned Noise server public key (hex):\n"
   cat "$NOISE_PUBLIC"
   # Snapshot every mutable deployment component until systemd activation succeeds.
-  local transaction_dir had_old_egress=0 had_old_server=0 had_old_marker=0
+  local transaction_dir unit_stage_dir="" had_old_egress=0 had_old_server=0 had_old_marker=0
   local old_egress_enabled old_server_enabled old_egress_active old_server_active
   local rollback_failed=0
   transaction_dir="$(mktemp -d "$BASE/.deploy-transaction.XXXXXX")" || die "Could not create deployment transaction snapshot."
@@ -575,6 +572,10 @@ deploy() {
       cmp -s "$transaction_dir/old-marker" "$MARKER" || failed=1
     else
       [[ ! -e "$MARKER" && ! -L "$MARKER" ]] || failed=1
+    fi
+    if [[ -n "$unit_stage_dir" ]]; then
+      rm -rf -- "$unit_stage_dir" || failed=1
+      if [[ ! -e "$unit_stage_dir" && ! -L "$unit_stage_dir" ]]; then unit_stage_dir=""; fi
     fi
 
     if (( failed )); then
