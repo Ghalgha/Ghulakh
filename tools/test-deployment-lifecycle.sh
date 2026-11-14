@@ -24,14 +24,14 @@ systemctl() {
     show)
       [[ "${SYSTEMD_QUERY_FAILED:-0}" == 0 ]] || return 1
       case "${2:-}" in
-        --property=LoadState) [[ "${3:-}" == --value ]] || return 2; printf '%s\\n' "$SYSTEMD_LOAD" ;;
-        --property=ActiveState) [[ "${3:-}" == --value ]] || return 2; printf '%s\\n' "$SYSTEMD_ACTIVE" ;;
+        --property=LoadState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_LOAD" ;;
+        --property=ActiveState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
         *) return 2 ;;
       esac
       ;;
     is-enabled)
       [[ "$#" -eq 2 ]] || return 2
-      printf '%s\\n' "$SYSTEMD_ENABLED"
+      printf '%s\n' "$SYSTEMD_ENABLED"
       ;;
     disable)
       [[ "${2:-}" == --now && "$#" -eq 3 ]] || return 2
