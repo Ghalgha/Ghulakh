@@ -41,7 +41,7 @@ verify_release_tree() {
   unsafe_entry="$(find "$release_root" -xdev \\( -type l -o \\( -type f -links +1 \\) -o ! -user root -o ! -group root \\) -print -quit)" || return 1
   [[ -z "$unsafe_entry" ]]
 }
-verify_release_integrity() {
+verify_release_integrity() (
   local release_root="$1" release_dir release_name expected_id extra_entry
   verify_release_tree "$release_root" "${2:-/proc/self/mountinfo}" || return 1
   shopt -s nullglob dotglob
@@ -58,7 +58,7 @@ verify_release_integrity() {
     expected_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)" || return 1
     [[ "$expected_id" == "$release_name" ]] || return 1
   done
-}
+)
 PREFLIGHT_TOOL="$(cd "$(dirname "$0")" && pwd)/$PREFLIGHT_TOOL_NAME"
 safe_file "$PREFLIGHT_TOOL" || die "Deployment preflight helper is missing or is not a regular file."
 source "$PREFLIGHT_TOOL"
