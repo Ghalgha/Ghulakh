@@ -84,7 +84,7 @@ sudo bash tools/deploy-server.sh update \
 
 ## Проверка состояния
 
-Команда status возвращает ненулевой код, если установка неполная, active release не принадлежит управляемому каталогу или хотя бы одна служба не находится в active-состоянии.
+Команда status проверяет владельца и права каталогов и ownership marker, checksum обоих systemd units, структурную принадлежность nftables tables и расположение active release; она возвращает ненулевой код при нарушении любого из этих условий или если хотя бы одна служба не находится в active-состоянии.
 
 ~~~
 sudo bash tools/deploy-server.sh status
