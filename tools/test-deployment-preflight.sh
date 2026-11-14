@@ -84,7 +84,7 @@ if (assert_managed_layout) 2>/dev/null; then
   exit 1
 fi
 rm -f "$SERVER_UNIT"
-TEST_LOAD_STATE=loaded
+export TEST_LOAD_STATE=loaded
 TEST_FRAGMENT_PATH=/usr/lib/systemd/system/ghulakh-server.service
 if (assert_managed_layout) 2>/dev/null; then
   echo "Managed-layout preflight accepted a systemd unit loaded outside the managed path." >&2
