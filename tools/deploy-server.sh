@@ -680,6 +680,14 @@ uninstall() {
       rm -rf -- "$backup_dir"
       die "Could not snapshot systemd units; no managed files were removed."
     }
+  local journal_tmp="$BASE/.uninstall-in-progress.tmp.$BASHPID"
+  if ! printf 'runtime-removed\n' >"$journal_tmp" ||
+     ! chmod 0600 "$journal_tmp" ||
+     ! mv -f -- "$journal_tmp" "$UNINSTALL_JOURNAL"; then
+    rm -f -- "$journal_tmp"
+    rm -rf -- "$backup_dir"
+    die "Could not commit the uninstall recovery journal; no managed files were removed."
+  fi
   if ! rm -f -- "$SERVER_UNIT" "$EGRESS_UNIT" "$CURRENT" || ! systemctl daemon-reload; then
     local restore_failed=0
     install -o root -g root -m 0644 "$backup_dir/ghulakh-server.service" "$SERVER_UNIT" || restore_failed=1
@@ -690,16 +698,9 @@ uninstall() {
       printf 'CRITICAL: uninstall rollback incomplete; unit backups retained at %s. Restore current -> %s and run systemctl daemon-reload.\n' "$backup_dir" "$active_release" >&2
       return 1
     fi
+    rm -f -- "$UNINSTALL_JOURNAL"
     rm -rf -- "$backup_dir"
     printf 'Uninstall aborted; managed units and active release link were restored. Services remain stopped; inspect and restart them if required.\n' >&2
-    return 1
-  fi
-  local journal_tmp="$BASE/.uninstall-in-progress.tmp.$BASHPID"
-  if ! printf 'runtime-removed\n' >"$journal_tmp" ||
-     ! chmod 0600 "$journal_tmp" ||
-     ! mv -f -- "$journal_tmp" "$UNINSTALL_JOURNAL"; then
-    rm -f -- "$journal_tmp"
-    printf 'ERROR: runtime units were removed, but the recovery journal could not be committed. Inspect %s; do not rerun install/update.\n' "$BASE" >&2
     return 1
   fi
   if ! rm -rf --one-file-system "$RELEASES"; then
