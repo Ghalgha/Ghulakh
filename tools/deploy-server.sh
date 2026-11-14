@@ -704,7 +704,7 @@ status() {
     die "The active server process does not hold an open /dev/net/tun descriptor."
   safe_file "$active_release/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
   local ipv6_mode
-  ipv6_mode="$(awk '/^ExecStart=\\/bin\\/bash .* ghulakh0 / { print $NF }' "$EGRESS_UNIT")"
+  ipv6_mode="$(awk '$0 ~ /^ExecStart=/ && index($0, " ghulakh0 ") { print $NF }' "$EGRESS_UNIT")"
   [[ "$ipv6_mode" == nat66 || "$ipv6_mode" == routed ]] || die "Could not determine the managed IPv6 mode from the verified egress unit."
   "$active_release/$EGRESS_SCRIPT_NAME" --check-active "$ipv6_mode" || die "The active egress tables are missing or do not match the managed IPv6 mode."
   printf 'Managed systemd units: active and persistently enabled.\n'

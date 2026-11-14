@@ -170,6 +170,13 @@ grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" true
 grep -Fq 'verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" false' "$DEPLOY"
 grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" false' "$DEPLOY"
 
+# IPv6 mode extraction must handle the literal /bin/bash path without an invalid awk regexp.
+test_ipv6_mode="$(printf '%s\n' 'ExecStart=/bin/bash /usr/local/lib/ghulakh/current/configure-egress-nftables.sh ghulakh0 eth0 nat66' | awk '$0 ~ /^ExecStart=/ && index($0, " ghulakh0 ") { print $NF }')"
+[[ "$test_ipv6_mode" == nat66 ]]
+test_ipv6_mode="$(printf '%s\n' 'ExecStart=/bin/bash /usr/local/lib/ghulakh/current/configure-egress-nftables.sh ghulakh0 eth0 routed' | awk '$0 ~ /^ExecStart=/ && index($0, " ghulakh0 ") { print $NF }')"
+[[ "$test_ipv6_mode" == routed ]]
+grep -Fq 'index($0, " ghulakh0 ")' "$DEPLOY"
+
 # Status process identity must match the active release and retain the TUN fd.
 PROC_FIXTURE="$(mktemp -d)"
 trap 'rm -f -- "$ROLLBACK_HELPER"; rm -rf -- "$PROC_FIXTURE"' EXIT
