@@ -574,7 +574,10 @@ status() {
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release directory is not a root-owned directory."
   verify_release_integrity "$RELEASES" || die "Managed release integrity verification failed."
   safe_file "$active_release/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
-  "$active_release/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned."
+  local ipv6_mode
+  ipv6_mode="$(awk '/^ExecStart=\\/bin\\/bash .* ghulakh0 / { print $NF }' "$EGRESS_UNIT")"
+  [[ "$ipv6_mode" == nat66 || "$ipv6_mode" == routed ]] || die "Could not determine the managed IPv6 mode from the verified egress unit."
+  "$active_release/$EGRESS_SCRIPT_NAME" --check-active "$ipv6_mode" || die "The active egress tables are missing or do not match the managed IPv6 mode."
   systemctl --no-pager --full status ghulakh-server.service || failed=1
   systemctl --no-pager --full status ghulakh-egress.service || failed=1
   return "$failed"
