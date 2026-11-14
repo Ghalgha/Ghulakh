@@ -537,9 +537,13 @@ credential() {
 }
 status() {
   require_root
-  [[ -f "$MARKER" && ! -L "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
-  [[ -d "$RELEASES" && ! -L "$RELEASES" && -L "$CURRENT" ]] || die "Managed release layout is incomplete."
+  [[ -f "$MARKER" && ! -L "$MARKER" && $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
+  [[ -d "$BASE" && ! -L "$BASE" && $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership or mode is invalid."
+  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 && -L "$CURRENT" ]] || die "Managed release layout ownership or mode is invalid."
+  safe_file "$SERVER_UNIT" && safe_file "$EGRESS_UNIT" || die "Managed systemd unit files are missing or unsafe."
   sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum verification failed."
+  safe_file "$CURRENT/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
+  "$CURRENT/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned."
   local active_release failed=0
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases." ;; esac
