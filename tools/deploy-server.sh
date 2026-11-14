@@ -614,6 +614,7 @@ uninstall() {
       verify_release_tree "$RELEASES" ||
         die "Remaining release tree contains unsafe entries or mount points; refusing uninstall recovery."
     fi
+    systemctl daemon-reload || die "systemd daemon-reload failed during uninstall recovery; journal retained for retry."
     printf 'This resumes removal of the remaining managed runtime files. Persistent configuration and credentials remain.\n'
     printf 'Type REMOVE GHULAKH: '
     local recovery_answer
