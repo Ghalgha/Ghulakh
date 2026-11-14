@@ -337,7 +337,7 @@ stage_release() (
       printf 'Existing release content does not match its release identifier.\\n' >&2
       return 1
     }
-    printf '%s\\n' "$release_dir"
+    printf '%s\n' "$release_dir"
     return 0
   fi
 
@@ -355,7 +355,7 @@ stage_release() (
   }
   mv -T -- "$staging" "$release_dir" || return 1
   trap - EXIT
-  printf '%s\\n' "$release_dir"
+  printf '%s\n' "$release_dir"
 )
 deploy() {
   require_root
