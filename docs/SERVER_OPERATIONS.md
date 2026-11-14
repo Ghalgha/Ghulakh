@@ -4,7 +4,7 @@
 
 Сервер устанавливается и обновляется через tools/deploy-server.sh. Полная процедура, требования, поведение rollback и границы очистки описаны в [DEPLOYMENT.md](DEPLOYMENT.md).
 
-Команда status проверяет integrity marker и активную release-ссылку, затем возвращает ненулевой код, если любая из двух служб не active. Для диагностики используйте systemctl и journalctl отдельно.
+Команда status проверяет владельца и режим managed directories и marker, checksum обоих systemd units, расположение active release и table-level ownership nftables; она возвращает ненулевой код при нарушении этих проверок или если любая из двух служб не active. Для диагностики используйте systemctl и journalctl отдельно.
 
 Основные команды:
 
