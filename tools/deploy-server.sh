@@ -12,6 +12,7 @@ readonly EGRESS_UNIT="/etc/systemd/system/ghulakh-egress.service"
 readonly EGRESS_SCRIPT_NAME="configure-egress-nftables.sh"
 readonly CREDENTIAL_TOOL_NAME="create_credential.py"
 readonly TUN_INTERFACE="ghulakh0"
+readonly UNINSTALL_JOURNAL="/usr/local/lib/ghulakh/.uninstall-in-progress"
 readonly PREFLIGHT_TOOL_NAME="deployment-preflight.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -588,6 +589,37 @@ uninstall() {
   [[ $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership or mode is invalid."
   [[ $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
   [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership or mode is invalid."
+  # Resume only the final, journaled release-tree cleanup after units/current were removed.
+  if [[ -e "$UNINSTALL_JOURNAL" || -L "$UNINSTALL_JOURNAL" ]]; then
+    [[ -f "$UNINSTALL_JOURNAL" && ! -L "$UNINSTALL_JOURNAL" &&
+       $(stat -c '%U:%G:%a:%h' "$UNINSTALL_JOURNAL") == root:root:600:1 &&
+       $(cat "$UNINSTALL_JOURNAL") == runtime-removed ]] ||
+      die "Uninstall recovery journal is invalid; inspect $BASE manually."
+    [[ -s "$MARKER" && ! -e "$CURRENT" && ! -L "$CURRENT" &&
+       ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" &&
+       ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
+      die "Uninstall recovery state is ambiguous; refusing automatic cleanup."
+    if [[ -e "$RELEASES" || -L "$RELEASES" ]]; then
+      [[ -d "$RELEASES" && ! -L "$RELEASES" &&
+         $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] ||
+        die "Remaining release path is unsafe; refusing uninstall recovery."
+      verify_release_tree "$RELEASES" ||
+        die "Remaining release tree contains unsafe entries or mount points; refusing uninstall recovery."
+    fi
+    printf 'This resumes removal of the remaining managed runtime files. Persistent configuration and credentials remain.\n'
+    printf 'Type REMOVE GHULAKH: '
+    local recovery_answer
+    IFS= read -r recovery_answer
+    [[ "$recovery_answer" == "REMOVE GHULAKH" ]] || die "Uninstall recovery cancelled."
+    if [[ -d "$RELEASES" ]]; then
+      rm -rf --one-file-system "$RELEASES" || die "Release cleanup remains incomplete; recovery journal retained for retry."
+    fi
+    rm -f -- "$MARKER" || die "Release cleanup completed, but ownership marker remains; inspect $BASE."
+    rm -f -- "$UNINSTALL_JOURNAL" || die "Runtime cleanup completed, but recovery journal remains; inspect $BASE."
+    rmdir "$BASE" 2>/dev/null || true
+    printf 'Runtime cleanup completed. Persistent configuration and credentials remain.\n'
+    return 0
+  fi
   if [[ ! -s "$MARKER" ]]; then
     [[ ! -e "$CURRENT" && ! -L "$CURRENT" && ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
       die "Empty ownership marker is not an unambiguous incomplete-install reservation."
@@ -654,11 +686,20 @@ uninstall() {
     printf 'Uninstall aborted; managed units and active release link were restored. Services remain stopped; inspect and restart them if required.\n' >&2
     return 1
   fi
+  local journal_tmp="$BASE/.uninstall-in-progress.tmp.$BASHPID"
+  if ! printf 'runtime-removed\n' >"$journal_tmp" ||
+     ! chmod 0600 "$journal_tmp" ||
+     ! mv -f -- "$journal_tmp" "$UNINSTALL_JOURNAL"; then
+    rm -f -- "$journal_tmp"
+    printf 'ERROR: runtime units were removed, but the recovery journal could not be committed. Inspect %s; do not rerun install/update.\n' "$BASE" >&2
+    return 1
+  fi
   if ! rm -rf --one-file-system "$RELEASES"; then
-    printf 'ERROR: systemd units were removed, but release cleanup failed. Remaining data is under %s; persistent configuration is untouched.\n' "$RELEASES" >&2
+    printf 'ERROR: release cleanup is incomplete. The recovery journal is retained; rerun uninstall to safely resume.\n' >&2
     return 1
   fi
   rm -f -- "$MARKER" || die "Runtime was stopped and removed, but the ownership marker remains; inspect $BASE before retrying."
+  rm -f -- "$UNINSTALL_JOURNAL" || die "Runtime was removed, but the uninstall recovery journal remains; inspect $BASE."
   rmdir "$BASE" 2>/dev/null || true
   rm -rf -- "$backup_dir"
   printf 'Runtime removed. Persistent configuration and service account remain in place.\n'
