@@ -99,7 +99,7 @@ rm() {
 # Server stop failure: no managed files or release data may be removed.
 new_case server-stop-failure
 FAIL_SERVER_STOP=1
-if ( uninstall </dev/null >/dev/null 2>&1 ); then
+if ( uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1 ); then
   echo "Uninstall continued after server stop failure." >&2
   exit 1
 fi
@@ -109,7 +109,7 @@ fi
 # Egress stop failure: files remain; server may already be stopped.
 new_case egress-stop-failure
 FAIL_EGRESS_STOP=1
-if ( uninstall </dev/null >/dev/null 2>&1 ); then
+if ( uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1 ); then
   echo "Uninstall continued after egress stop failure." >&2
   exit 1
 fi
