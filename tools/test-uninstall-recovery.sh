@@ -30,6 +30,13 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 systemctl() { printf '%s\n' "$*" >>"$TMP/systemctl-calls"; [[ "$*" == daemon-reload ]]; }
 source "$TMP/functions.sh"
 
+if printf 'CANCEL\n' | uninstall >/dev/null 2>&1; then
+  echo "Uninstall recovery accepted a missing confirmation." >&2
+  exit 1
+fi
+[[ -f "$UNINSTALL_JOURNAL" && -f "$RELEASES/partial/remnant" ]]
+[[ ! -s "$TMP/systemctl-calls" ]] || { echo "Uninstall recovery changed systemd before confirmation." >&2; exit 1; }
+
 printf 'REMOVE GHULAKH\n' | uninstall
 [[ ! -e "$RELEASES" && ! -e "$MARKER" && ! -e "$UNINSTALL_JOURNAL" ]]
 [[ -f "$TMP/persistent-config" ]]

@@ -636,14 +636,62 @@ credential() {
   [[ $(stat -c '%U:%G:%a:%h' "$CREDENTIALS") == "root:$NAME:640:1" ]] || die "Credential digest file ownership, mode or link count is invalid; left unchanged."
   python3 "$CURRENT/$CREDENTIAL_TOOL_NAME" --digest-file "$CREDENTIALS" --mode 0640 --expected-uid 0 --expected-gid "$(id -g "$NAME")"
 }
+verify_managed_unit_runtime() {
+  local unit="$1" expected_path="$2" require_active="$3"
+  local load_state fragment_path active_state unit_file_state
+
+  load_state="$(systemctl show --property=LoadState --value "$unit")" || {
+    printf 'Could not query LoadState for %s.\n' "$unit" >&2
+    return 1
+  }
+  [[ "$load_state" == loaded ]] || {
+    printf 'Refusing unverified systemd unit %s (LoadState=%s).\n' "$unit" "${load_state:-unknown}" >&2
+    return 1
+  }
+
+  fragment_path="$(systemctl show --property=FragmentPath --value "$unit")" || {
+    printf 'Could not query FragmentPath for %s.\n' "$unit" >&2
+    return 1
+  }
+  [[ "$fragment_path" == "$expected_path" ]] || {
+    printf 'Refusing systemd unit %s loaded from %s (expected %s).\n' "$unit" "${fragment_path:-unknown}" "$expected_path" >&2
+    return 1
+  }
+
+  if [[ "$require_active" == true ]]; then
+    active_state="$(systemctl show --property=ActiveState --value "$unit")" || {
+      printf 'Could not query ActiveState for %s.\n' "$unit" >&2
+      return 1
+    }
+    [[ "$active_state" == active ]] || {
+      printf 'Managed systemd unit %s is not active (ActiveState=%s).\n' "$unit" "${active_state:-unknown}" >&2
+      return 1
+    }
+
+    unit_file_state="$(systemctl show --property=UnitFileState --value "$unit")" || {
+      printf 'Could not query UnitFileState for %s.\n' "$unit" >&2
+      return 1
+    }
+    [[ "$unit_file_state" == enabled ]] || {
+      printf 'Managed systemd unit %s is not persistently enabled (UnitFileState=%s).\n' "$unit" "${unit_file_state:-unknown}" >&2
+      return 1
+    }
+  fi
+}
+
 status() {
   require_root
   [[ -f "$MARKER" && ! -L "$MARKER" && $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
   [[ -d "$BASE" && ! -L "$BASE" && $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership or mode is invalid."
   [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 && -L "$CURRENT" ]] || die "Managed release layout ownership or mode is invalid."
   safe_file "$SERVER_UNIT" && safe_file "$EGRESS_UNIT" || die "Managed systemd unit files are missing or unsafe."
+  [[ $(stat -c '%U:%G:%a:%h' "$SERVER_UNIT") == root:root:644:1 &&
+     $(stat -c '%U:%G:%a:%h' "$EGRESS_UNIT") == root:root:644:1 ]] ||
+    die "Managed systemd unit ownership, mode or link count is invalid."
   sha256sum -c "$MARKER" >/dev/null || die "Managed systemd unit checksum verification failed."
-  local active_release failed=0
+  verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" true || die "Server unit runtime does not match the verified managed unit."
+  verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" true || die "Egress unit runtime does not match the verified managed unit."
+  local active_release
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release directory is not a root-owned directory."
@@ -653,9 +701,10 @@ status() {
   ipv6_mode="$(awk '/^ExecStart=\\/bin\\/bash .* ghulakh0 / { print $NF }' "$EGRESS_UNIT")"
   [[ "$ipv6_mode" == nat66 || "$ipv6_mode" == routed ]] || die "Could not determine the managed IPv6 mode from the verified egress unit."
   "$active_release/$EGRESS_SCRIPT_NAME" --check-active "$ipv6_mode" || die "The active egress tables are missing or do not match the managed IPv6 mode."
-  systemctl --no-pager --full status ghulakh-server.service || failed=1
-  systemctl --no-pager --full status ghulakh-egress.service || failed=1
-  return "$failed"
+  printf 'Managed systemd units: active and persistently enabled.\n'
+  printf 'Server release: %s\n' "$active_release"
+  printf 'Egress policy: verified (%s).\n' "$ipv6_mode"
+  return 0
 }
 uninstall() {
   require_root
@@ -688,12 +737,12 @@ uninstall() {
       verify_release_tree "$RELEASES" ||
         die "Remaining release tree contains unsafe entries or mount points; refusing uninstall recovery."
     fi
-    systemctl daemon-reload || die "systemd daemon-reload failed during uninstall recovery; journal retained for retry."
     printf 'This resumes removal of the remaining managed runtime files. Persistent configuration and credentials remain.\n'
     printf 'Type REMOVE GHULAKH: '
     local recovery_answer
     IFS= read -r recovery_answer
     [[ "$recovery_answer" == "REMOVE GHULAKH" ]] || die "Uninstall recovery cancelled."
+    systemctl daemon-reload || die "systemd daemon-reload failed during uninstall recovery; journal retained for retry."
     if [[ -d "$RELEASES" ]]; then
       rm -rf --one-file-system "$RELEASES" || die "Release cleanup remains incomplete; recovery journal retained for retry."
     fi
@@ -727,8 +776,12 @@ uninstall() {
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
-      safe_file "$unit" && grep -Fq 'Managed by Ghulakh deployment tool' "$unit" || die "Refusing to remove unmanaged or modified unit: $unit"
+      safe_file "$unit" && [[ $(stat -c '%U:%G:%a:%h' "$unit") == root:root:644:1 ]] &&
+        grep -Fq 'Managed by Ghulakh deployment tool' "$unit" ||
+        die "Refusing to remove an unsafe, unmanaged or modified unit: $unit"
     done
+    verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" false || die "Server unit is not loaded from the verified managed unit file; refusing uninstall."
+    verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" false || die "Egress unit is not loaded from the verified managed unit file; refusing uninstall."
     safe_file "$CURRENT/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
     "$CURRENT/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned; refusing uninstall."
   else

@@ -17,6 +17,7 @@ ROLLBACK_HELPER="$(mktemp)"
 trap 'rm -f -- "$ROLLBACK_HELPER"' EXIT
 sed -n '/^  stop_uncommitted_unit() {/,/^  }/p' "$DEPLOY" >"$ROLLBACK_HELPER"
 sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >>"$ROLLBACK_HELPER"
+sed -n '/^verify_managed_unit_runtime() {/,/^}/p' "$DEPLOY" >>"$ROLLBACK_HELPER"
 source "$ROLLBACK_HELPER"
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0 SYSTEMD_STOP_STATUS=0 SYSTEMD_STOP_CALLS=0
 systemctl() {
@@ -26,6 +27,8 @@ systemctl() {
       case "${2:-}" in
         --property=LoadState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_LOAD" ;;
         --property=ActiveState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
+        --property=FragmentPath) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_FRAGMENT_PATH" ;;
+        --property=UnitFileState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_UNIT_FILE_STATE" ;;
         *) return 2 ;;
       esac
       ;;
@@ -156,8 +159,45 @@ grep -Fq 'rm -rf --one-file-system "$RELEASES"' "$DEPLOY"
 grep -Fq 'Persistent configuration and service account remain' "$DEPLOY"
 grep -Fq 'ghulakh_preflight_udp_port 4434' "$DEPLOY"
 grep -Fq 'ghulakh_preflight_tun_interface' "$DEPLOY"
-grep -Fq 'systemctl --no-pager --full status ghulakh-server.service || failed=1' "$DEPLOY"
-grep -Fq 'systemctl --no-pager --full status ghulakh-egress.service || failed=1' "$DEPLOY"
+grep -Fq "stat -c '%U:%G:%a:%h' \"\$SERVER_UNIT\"" "$DEPLOY"
+grep -Fq "stat -c '%U:%G:%a:%h' \"\$EGRESS_UNIT\"" "$DEPLOY"
+grep -Fq 'verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" true' "$DEPLOY"
+grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" true' "$DEPLOY"
+grep -Fq 'verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" false' "$DEPLOY"
+grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" false' "$DEPLOY"
+SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0
+SYSTEMD_FRAGMENT_PATH=/etc/systemd/system/ghulakh-server.service
+SYSTEMD_UNIT_FILE_STATE=enabled
+verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service true
+SYSTEMD_FRAGMENT_PATH=/run/systemd/transient/ghulakh-server.service
+if verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service true 2>/dev/null; then
+  echo "Status accepted a systemd unit loaded from an unmanaged fragment." >&2
+  exit 1
+fi
+SYSTEMD_FRAGMENT_PATH=/etc/systemd/system/ghulakh-server.service
+SYSTEMD_ACTIVE=inactive
+if verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service true 2>/dev/null; then
+  echo "Status accepted an inactive managed service." >&2
+  exit 1
+fi
+SYSTEMD_ACTIVE=active SYSTEMD_UNIT_FILE_STATE=disabled
+if verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service true 2>/dev/null; then
+  echo "Status accepted a non-persistently-enabled service." >&2
+  exit 1
+fi
+SYSTEMD_UNIT_FILE_STATE=enabled SYSTEMD_QUERY_FAILED=1
+if verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service false 2>/dev/null; then
+  echo "Uninstall preflight accepted an unreadable systemd unit state." >&2
+  exit 1
+fi
+SYSTEMD_QUERY_FAILED=0 SYSTEMD_LOAD=not-found
+if verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service false 2>/dev/null; then
+  echo "Uninstall preflight accepted a missing systemd unit." >&2
+  exit 1
+fi
+SYSTEMD_LOAD=loaded SYSTEMD_FRAGMENT_PATH=/etc/systemd/system/ghulakh-server.service
+verify_managed_unit_runtime ghulakh-server.service /etc/systemd/system/ghulakh-server.service false
+
 grep -Fq 'find "$release_root" -xdev' "$DEPLOY"
 grep -Fq 'existing_tables="$(owned_tables)"' "$EGRESS"
 grep -Fq 'command -v python3' "$EGRESS"
