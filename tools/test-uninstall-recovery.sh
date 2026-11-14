@@ -37,8 +37,8 @@ grep -Fxq daemon-reload "$TMP/systemctl-calls"
 
 # Invalid journals must fail closed without deleting release content.
 mkdir -p "$RELEASES/partial"
-chmod 0755 "$RELEASES" "$RELEASES/partial"
-chown root:root "$RELEASES" "$RELEASES/partial"
+chmod 0755 "$BASE" "$RELEASES" "$RELEASES/partial"
+chown root:root "$BASE" "$RELEASES" "$RELEASES/partial"
 printf 'unexpected\n' >"$UNINSTALL_JOURNAL"
 chmod 0600 "$UNINSTALL_JOURNAL"
 chown root:root "$UNINSTALL_JOURNAL"
