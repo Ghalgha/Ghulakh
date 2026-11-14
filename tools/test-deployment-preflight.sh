@@ -16,6 +16,7 @@ cat > "$TMP/bin/systemctl" <<'SH'
 case "$*" in
   *MainPID*) printf '%s\n' "${TEST_MAIN_PID:-0}" ;;
   *LoadState*) printf '%s\n' "${TEST_LOAD_STATE:-not-found}" ;;
+  *FragmentPath*) printf '%s\n' "${TEST_FRAGMENT_PATH:-/usr/lib/systemd/system/ghulakh-server.service}" ;;
   *) exit 1 ;;
 esac
 SH
@@ -60,27 +61,32 @@ if ghulakh_preflight_tun_interface ghulakh0 2>/dev/null; then echo "non-TUN inte
 sed -n '/^assert_managed_layout() {/,/^}/p' "$ROOT/tools/deploy-server.sh" >"$TMP/assert-managed-layout.sh"
 source "$TMP/assert-managed-layout.sh"
 BASE="$TMP/managed-root"
+RELEASES="$BASE/releases"
 MARKER="$BASE/.managed-by-ghulakh"
 SERVER_UNIT="$TMP/systemd/ghulakh-server.service"
 EGRESS_UNIT="$TMP/systemd/ghulakh-egress.service"
+safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
+die() { printf 'ERROR: %s\\n' "$*" >&2; exit 1; }
 mkdir -p "$TMP/systemd"
 TEST_LOAD_STATE=not-found
+TEST_FRAGMENT_PATH=/usr/lib/systemd/system/ghulakh-server.service
 assert_managed_layout
 
 printf 'administrator-owned unit\n' >"$SERVER_UNIT"
-if assert_managed_layout 2>/dev/null; then
+if (assert_managed_layout) 2>/dev/null; then
   echo "Managed-layout preflight accepted a foreign server unit file." >&2
   exit 1
 fi
 rm -f "$SERVER_UNIT"
 ln -s "$TMP/foreign-unit" "$SERVER_UNIT"
-if assert_managed_layout 2>/dev/null; then
+if (assert_managed_layout) 2>/dev/null; then
   echo "Managed-layout preflight accepted a symlink at the server unit path." >&2
   exit 1
 fi
 rm -f "$SERVER_UNIT"
 TEST_LOAD_STATE=loaded
-if assert_managed_layout 2>/dev/null; then
+TEST_FRAGMENT_PATH=/usr/lib/systemd/system/ghulakh-server.service
+if (assert_managed_layout) 2>/dev/null; then
   echo "Managed-layout preflight accepted a systemd unit loaded outside the managed path." >&2
   exit 1
 fi
