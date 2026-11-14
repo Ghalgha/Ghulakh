@@ -40,9 +40,16 @@ systemctl() {
       esac
       ;;
     enable)
-      if [[ "${FAIL_ENABLE_UNIT_ONCE:-}" == "$unit" ]]; then FAIL_ENABLE_UNIT_ONCE=""; return 1; fi
-      if [[ "$2" == --runtime ]]; then unit="$3"; ENABLE_STATE=enabled-runtime; else unit="$2"; ENABLE_STATE=enabled; fi
-      if [[ "$unit" == ghulakh-server.service ]]; then ENABLED_SERVER="$ENABLE_STATE"; else ENABLED_EGRESS="$ENABLE_STATE"; fi
+      if [[ "$2" == --runtime ]]; then
+        unit="$3"; ENABLE_STATE=enabled-runtime
+        if [[ "${FAIL_ENABLE_UNIT_ONCE:-}" == "$unit" ]]; then FAIL_ENABLE_UNIT_ONCE=""; return 1; fi
+        if [[ "$unit" == ghulakh-server.service ]]; then ENABLED_SERVER="$ENABLE_STATE"; else ENABLED_EGRESS="$ENABLE_STATE"; fi
+      else
+        for unit in "${@:2}"; do
+          if [[ "${FAIL_ENABLE_UNIT_ONCE:-}" == "$unit" ]]; then FAIL_ENABLE_UNIT_ONCE=""; return 1; fi
+          if [[ "$unit" == ghulakh-server.service ]]; then ENABLED_SERVER=enabled; else ENABLED_EGRESS=enabled; fi
+        done
+      fi
       ;;
     mask)
       unit="$3"
