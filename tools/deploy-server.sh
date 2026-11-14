@@ -442,6 +442,19 @@ deploy() {
     validate_previous_unit_state ghulakh-server.service "$old_server_enabled" "$old_server_active"
   fi
 
+  stop_uncommitted_unit() {
+    local unit="$1" load_state
+    load_state="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
+    case "$load_state" in
+      not-found) return 0 ;;
+      loaded) systemctl disable --now "$unit" ;;
+      *)
+        printf 'Cannot safely stop newly installed %s during rollback (LoadState=%s).\\n' "$unit" "${load_state:-unknown}" >&2
+        return 1
+        ;;
+    esac
+  }
+
   verify_rollback_unit_state() {
     local unit="$1" expected_load="$2" expected_active="$3" expected_enabled="$4"
     local actual_load actual_active actual_enabled
@@ -463,6 +476,9 @@ deploy() {
 
   rollback_activation() {
     local failed=0 restore_link
+    # Stop newly introduced units while systemd still knows their unit files.
+    if (( ! had_old_server )); then stop_uncommitted_unit ghulakh-server.service || failed=1; fi
+    if (( ! had_old_egress )); then stop_uncommitted_unit ghulakh-egress.service || failed=1; fi
     restore_link="$BASE/.rollback-current.$BASHPID.$RANDOM"
     if [[ -n "$old_target" ]]; then
       if ln -s "$old_target" "$restore_link" && mv -Tf "$restore_link" "$CURRENT"; then :; else failed=1; fi
@@ -503,7 +519,7 @@ deploy() {
         systemctl stop ghulakh-egress.service || failed=1
       fi
     else
-      systemctl disable --now ghulakh-egress.service >/dev/null 2>&1 || failed=1
+      : # Newly introduced unit was stopped before its unit file was removed.
     fi
     if (( had_old_server )); then
       case "$old_server_enabled" in
@@ -518,7 +534,7 @@ deploy() {
         systemctl stop ghulakh-server.service || failed=1
       fi
     else
-      systemctl disable --now ghulakh-server.service >/dev/null 2>&1 || failed=1
+      : # Newly introduced unit was stopped before its unit file was removed.
     fi
 
     if (( had_old_egress )); then
