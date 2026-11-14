@@ -585,17 +585,25 @@ status() {
 }
 uninstall() {
   require_root
-  [[ -f "$MARKER" && ! -L "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
+  [[ -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
   [[ $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership or mode is invalid."
-  [[ $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
-  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership or mode is invalid."
+  if [[ -e "$MARKER" || -L "$MARKER" ]]; then
+    [[ -f "$MARKER" && ! -L "$MARKER" && $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
+  elif [[ ! -f "$UNINSTALL_JOURNAL" || -L "$UNINSTALL_JOURNAL" ]]; then
+    die "No verified managed installation found."
+  fi
+  if [[ -e "$RELEASES" || -L "$RELEASES" ]]; then
+    [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership or mode is invalid."
+  elif [[ ! -f "$UNINSTALL_JOURNAL" || -L "$UNINSTALL_JOURNAL" ]]; then
+    die "Managed releases directory is missing outside uninstall recovery."
+  fi
   # Resume only the final, journaled release-tree cleanup after units/current were removed.
   if [[ -e "$UNINSTALL_JOURNAL" || -L "$UNINSTALL_JOURNAL" ]]; then
     [[ -f "$UNINSTALL_JOURNAL" && ! -L "$UNINSTALL_JOURNAL" &&
        $(stat -c '%U:%G:%a:%h' "$UNINSTALL_JOURNAL") == root:root:600:1 &&
        $(cat "$UNINSTALL_JOURNAL") == runtime-removed ]] ||
       die "Uninstall recovery journal is invalid; inspect $BASE manually."
-    [[ -s "$MARKER" && ! -e "$CURRENT" && ! -L "$CURRENT" &&
+    [[ ( -s "$MARKER" || ! -e "$MARKER" ) && ! -e "$CURRENT" && ! -L "$CURRENT" &&
        ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" &&
        ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
       die "Uninstall recovery state is ambiguous; refusing automatic cleanup."
