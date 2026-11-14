@@ -463,7 +463,7 @@ deploy() {
       printf 'Rollback verification failed for %s: LoadState=%s, expected %s\n' "$unit" "${actual_load:-unknown}" "$expected_load" >&2
       return 1
     fi
-    if [[ "$expected_load" == loaded ]]; then
+    if [[ "$expected_load" == loaded || "$expected_load" == masked ]]; then
       actual_active="$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)"
       actual_enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
       if [[ "$actual_active" != "$expected_active" || "$actual_enabled" != "$expected_enabled" ]]; then
@@ -540,14 +540,18 @@ deploy() {
     if (( had_old_egress )); then
       local expected_egress_active=inactive
       if [[ "$old_egress_active" == active ]]; then expected_egress_active=active; fi
-      verify_rollback_unit_state ghulakh-egress.service loaded "$expected_egress_active" "$old_egress_enabled" || failed=1
+      local expected_egress_load=loaded
+      if [[ "$old_egress_enabled" == masked-runtime ]]; then expected_egress_load=masked; fi
+      verify_rollback_unit_state ghulakh-egress.service "$expected_egress_load" "$expected_egress_active" "$old_egress_enabled" || failed=1
     else
       verify_rollback_unit_state ghulakh-egress.service not-found "" "" || failed=1
     fi
     if (( had_old_server )); then
       local expected_server_active=inactive
       if [[ "$old_server_active" == active ]]; then expected_server_active=active; fi
-      verify_rollback_unit_state ghulakh-server.service loaded "$expected_server_active" "$old_server_enabled" || failed=1
+      local expected_server_load=loaded
+      if [[ "$old_server_enabled" == masked-runtime ]]; then expected_server_load=masked; fi
+      verify_rollback_unit_state ghulakh-server.service "$expected_server_load" "$expected_server_active" "$old_server_enabled" || failed=1
     else
       verify_rollback_unit_state ghulakh-server.service not-found "" "" || failed=1
     fi
