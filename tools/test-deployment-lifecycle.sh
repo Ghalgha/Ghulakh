@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+set -x
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEPLOY="$ROOT/tools/deploy-server.sh"
 EGRESS="$ROOT/tools/configure-egress-nftables.sh"
