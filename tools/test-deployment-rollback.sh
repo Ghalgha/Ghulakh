@@ -49,6 +49,7 @@ systemctl() {
       ;;
     restart)
       unit="$2"
+      if [[ "${FAIL_RESTART_UNIT:-}" == "$unit" ]]; then return 1; fi
       if [[ "$unit" == ghulakh-server.service ]]; then ACTIVE_SERVER=active; else ACTIVE_EGRESS=active; fi
       ;;
     stop)
@@ -114,5 +115,23 @@ rollback_activation
 [[ "$LOAD_SERVER" == not-found && "$LOAD_EGRESS" == not-found ]]
 [[ "$ACTIVE_SERVER" == inactive && "$ACTIVE_EGRESS" == inactive ]]
 [[ -d "$RELEASES/old" && -d "$RELEASES/new" && -z "$unit_stage_dir" ]]
+
+# If restoration commands fail and the resulting state is wrong, retain snapshots.
+prepare_fixture "$TMP/failed-rollback"
+had_old_egress=1 had_old_server=1 had_old_marker=1
+old_egress_enabled=enabled old_server_enabled=enabled
+old_egress_active=active old_server_active=active
+LOAD_SERVER=loaded LOAD_EGRESS=loaded
+ACTIVE_SERVER=inactive ACTIVE_EGRESS=inactive
+ENABLED_SERVER=enabled ENABLED_EGRESS=enabled
+FAIL_RESTART_UNIT=ghulakh-egress.service
+if rollback_activation; then
+  echo "Rollback reported success after the previous egress service failed to restart." >&2
+  exit 1
+fi
+[[ -d "$TRANSACTION_DIR" && "$(readlink "$CURRENT")" == "$old_target" ]]
+cmp -s "$TRANSACTION_DIR/old-server" "$SERVER_UNIT"
+cmp -s "$TRANSACTION_DIR/old-egress" "$EGRESS_UNIT"
+cmp -s "$TRANSACTION_DIR/old-marker" "$MARKER"
 
 echo "Deployment rollback behavioral tests passed."
