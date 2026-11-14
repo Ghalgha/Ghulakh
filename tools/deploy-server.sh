@@ -69,7 +69,7 @@ check_platform() {
   [[ -c /dev/net/tun ]] || die "/dev/net/tun is unavailable."
   [[ -r /proc/sys/net/ipv4/ip_forward && $(< /proc/sys/net/ipv4/ip_forward) == 1 ]] || die "Enable net.ipv4.ip_forward=1 administratively."
   [[ -r /proc/sys/net/ipv6/conf/all/forwarding && $(< /proc/sys/net/ipv6/conf/all/forwarding) == 1 ]] || die "Enable net.ipv6.conf.all.forwarding=1 administratively."
-  for cmd in systemctl systemd-analyze install ip nft ss runuser useradd getent python3 sha256sum readlink stat; do require_command "$cmd"; done
+  for cmd in systemctl systemd-analyze install ip nft ss runuser useradd getent python3 sha256sum readlink stat cmp; do require_command "$cmd"; done
 }
 parse_args() {
   ACTION="$1"; shift
@@ -442,6 +442,25 @@ deploy() {
     validate_previous_unit_state ghulakh-server.service "$old_server_enabled" "$old_server_active"
   fi
 
+  verify_rollback_unit_state() {
+    local unit="$1" expected_load="$2" expected_active="$3" expected_enabled="$4"
+    local actual_load actual_active actual_enabled
+    actual_load="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
+    if [[ "$actual_load" != "$expected_load" ]]; then
+      printf 'Rollback verification failed for %s: LoadState=%s, expected %s\\n' "$unit" "${actual_load:-unknown}" "$expected_load" >&2
+      return 1
+    fi
+    if [[ "$expected_load" == loaded ]]; then
+      actual_active="$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)"
+      actual_enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+      if [[ "$actual_active" != "$expected_active" || "$actual_enabled" != "$expected_enabled" ]]; then
+        printf 'Rollback verification failed for %s: ActiveState=%s (expected %s), UnitFileState=%s (expected %s)\\n' \\
+          "$unit" "${actual_active:-unknown}" "$expected_active" "${actual_enabled:-unknown}" "$expected_enabled" >&2
+        return 1
+      fi
+    fi
+  }
+
   rollback_activation() {
     local failed=0 restore_link
     restore_link="$BASE/.rollback-current.$BASHPID.$RANDOM"
@@ -500,6 +519,42 @@ deploy() {
       fi
     else
       systemctl disable --now ghulakh-server.service >/dev/null 2>&1 || failed=1
+    fi
+
+    if (( had_old_egress )); then
+      local expected_egress_active=inactive
+      [[ "$old_egress_active" == active ]] && expected_egress_active=active
+      verify_rollback_unit_state ghulakh-egress.service loaded "$expected_egress_active" "$old_egress_enabled" || failed=1
+    else
+      verify_rollback_unit_state ghulakh-egress.service not-found "" "" || failed=1
+    fi
+    if (( had_old_server )); then
+      local expected_server_active=inactive
+      [[ "$old_server_active" == active ]] && expected_server_active=active
+      verify_rollback_unit_state ghulakh-server.service loaded "$expected_server_active" "$old_server_enabled" || failed=1
+    else
+      verify_rollback_unit_state ghulakh-server.service not-found "" "" || failed=1
+    fi
+
+    if [[ -n "$old_target" ]]; then
+      [[ -L "$CURRENT" && "$(readlink "$CURRENT")" == "$old_target" ]] || failed=1
+    else
+      [[ ! -e "$CURRENT" && ! -L "$CURRENT" ]] || failed=1
+    fi
+    if (( had_old_egress )); then
+      cmp -s "$transaction_dir/old-egress" "$EGRESS_UNIT" || failed=1
+    else
+      [[ ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] || failed=1
+    fi
+    if (( had_old_server )); then
+      cmp -s "$transaction_dir/old-server" "$SERVER_UNIT" || failed=1
+    else
+      [[ ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" ]] || failed=1
+    fi
+    if (( had_old_marker )); then
+      cmp -s "$transaction_dir/old-marker" "$MARKER" || failed=1
+    else
+      [[ ! -e "$MARKER" && ! -L "$MARKER" ]] || failed=1
     fi
 
     if (( failed )); then
