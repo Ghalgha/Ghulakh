@@ -523,14 +523,14 @@ deploy() {
 
     if (( had_old_egress )); then
       local expected_egress_active=inactive
-      [[ "$old_egress_active" == active ]] && expected_egress_active=active
+      if [[ "$old_egress_active" == active ]]; then expected_egress_active=active; fi
       verify_rollback_unit_state ghulakh-egress.service loaded "$expected_egress_active" "$old_egress_enabled" || failed=1
     else
       verify_rollback_unit_state ghulakh-egress.service not-found "" "" || failed=1
     fi
     if (( had_old_server )); then
       local expected_server_active=inactive
-      [[ "$old_server_active" == active ]] && expected_server_active=active
+      if [[ "$old_server_active" == active ]]; then expected_server_active=active; fi
       verify_rollback_unit_state ghulakh-server.service loaded "$expected_server_active" "$old_server_enabled" || failed=1
     else
       verify_rollback_unit_state ghulakh-server.service not-found "" "" || failed=1
