@@ -9,7 +9,7 @@ sed -n '/^verify_release_tree() {/,/^}/p' "$DEPLOY" >"$TMP/functions.sh"
 sed -n '/^uninstall() {/,/^}/p' "$DEPLOY" >>"$TMP/functions.sh"
 
 require_root() { :; }
-die() { printf 'ERROR: %s\\n' "$*" >&2; exit 1; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
 verify_release_integrity() { [[ -d "$1" && ! -L "$1" ]]; }
 verify_managed_unit_runtime() { return 0; }
@@ -36,13 +36,13 @@ new_case() {
   chmod 0755 "$BASE" "$RELEASES" "$RELEASES/"* "$CASE/systemd"
   chown root:root "$BASE" "$RELEASES" "$RELEASES/"*
   local release="$RELEASES/$(printf 'a%.0s' {1..64})"
-  printf 'binary fixture\\n' >"$release/ghulakh-server"
-  printf 'credential tool fixture\\n' >"$release/create_credential.py"
+  printf 'binary fixture\n' >"$release/ghulakh-server"
+  printf 'credential tool fixture\n' >"$release/create_credential.py"
   cat >"$release/$EGRESS_SCRIPT_NAME" <<'SH'
 #!/usr/bin/env bash
 case "${1:-}" in
   --check-owned) exit 0 ;;
-  --remove) printf 'removed\\n' >>"$EGRESS_REMOVAL_LOG"; exit 0 ;;
+  --remove) printf 'removed\n' >>"$EGRESS_REMOVAL_LOG"; exit 0 ;;
   *) exit 2 ;;
 esac
 SH
@@ -50,14 +50,14 @@ SH
   chmod 0644 "$release/create_credential.py"
   chown root:root "$release/"*
   ln -s "$release" "$CURRENT"
-  printf 'Managed by Ghulakh deployment tool\\n' >"$SERVER_UNIT"
-  printf 'Managed by Ghulakh deployment tool\\n' >"$EGRESS_UNIT"
+  printf 'Managed by Ghulakh deployment tool\n' >"$SERVER_UNIT"
+  printf 'Managed by Ghulakh deployment tool\n' >"$EGRESS_UNIT"
   chmod 0644 "$SERVER_UNIT" "$EGRESS_UNIT"
   chown root:root "$SERVER_UNIT" "$EGRESS_UNIT"
   sha256sum "$SERVER_UNIT" "$EGRESS_UNIT" >"$MARKER"
   chmod 0600 "$MARKER"
   chown root:root "$MARKER"
-  printf 'persistent data\\n' >"$CASE/persistent/credentials"
+  printf 'persistent data\n' >"$CASE/persistent/credentials"
   EGRESS_REMOVAL_LOG="$CASE/egress-removal.log"
   export EGRESS_REMOVAL_LOG
   SYSTEMCTL_LOG="$CASE/systemctl.log"
@@ -71,7 +71,7 @@ SH
 }
 
 systemctl() {
-  printf '%s\\n' "$*" >>"$SYSTEMCTL_LOG"
+  printf '%s\n' "$*" >>"$SYSTEMCTL_LOG"
   case "$*" in
     "disable --now ghulakh-server.service")
       [[ "$FAIL_SERVER_STOP" == 0 ]] || return 1
@@ -109,7 +109,7 @@ fi
 # Egress stop failure: files remain; server may already be stopped.
 new_case egress-stop-failure
 FAIL_EGRESS_STOP=1
-if uninstall </dev/null >/dev/null 2>&1; then
+if ( uninstall </dev/null >/dev/null 2>&1 ); then
   echo "Uninstall continued after egress stop failure." >&2
   exit 1
 fi
@@ -128,7 +128,7 @@ fi
 [[ -f "$SERVER_UNIT" && -f "$EGRESS_UNIT" && -L "$CURRENT" && -f "$MARKER" && -d "$RELEASES" ]]
 [[ ! -e "$UNINSTALL_JOURNAL" ]]
 [[ "$(readlink -f "$CURRENT")" == "$RELEASES/$(printf 'a%.0s' {1..64})" ]]
-[[ "$(grep -c '^daemon-reload
+[[ $(grep -c daemon-reload "$SYSTEMCTL_LOG") -eq 2 ]]
 
 # Release cleanup failure retains journal and data; retry completes safely.
 new_case release-cleanup-failure
@@ -140,36 +140,13 @@ fi
 [[ -f "$UNINSTALL_JOURNAL" && -f "$MARKER" && -d "$RELEASES" ]]
 [[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -e "$CURRENT" ]]
 FAIL_RELEASE_REMOVE=0
-printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
+printf 'REMOVE GHULAKH\n' | uninstall >/dev/null
 [[ ! -e "$BASE" ]]
 [[ -f "$CASE/persistent/credentials" ]]
 
 # Successful uninstall removes only runtime and preserves persistent data.
 new_case successful-uninstall
-printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
-[[ ! -e "$BASE" && ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]]
-[[ -f "$CASE/persistent/credentials" ]]
-grep -Fxq -- '--remove' "$EGRESS_REMOVAL_LOG"
-echo "Uninstall transaction behavioral tests passed."
- "$SYSTEMCTL_LOG")" == 2 ]]
-
-# Release cleanup failure retains journal and data; retry completes safely.
-new_case release-cleanup-failure
-FAIL_RELEASE_REMOVE=1
-if uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1; then
-  echo "Uninstall ignored release cleanup failure." >&2
-  exit 1
-fi
-[[ -f "$UNINSTALL_JOURNAL" && -f "$MARKER" && -d "$RELEASES" ]]
-[[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -e "$CURRENT" ]]
-FAIL_RELEASE_REMOVE=0
-printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
-[[ ! -e "$BASE" ]]
-[[ -f "$CASE/persistent/credentials" ]]
-
-# Successful uninstall removes only runtime and preserves persistent data.
-new_case successful-uninstall
-printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
+printf 'REMOVE GHULAKH\n' | uninstall >/dev/null
 [[ ! -e "$BASE" && ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]]
 [[ -f "$CASE/persistent/credentials" ]]
 grep -Fxq -- '--remove' "$EGRESS_REMOVAL_LOG"
