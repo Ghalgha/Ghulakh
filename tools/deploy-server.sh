@@ -34,9 +34,9 @@ require_root() { [[ $EUID -eq 0 ]] || die "Run as root."; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
 verify_release_tree() {
-  local release_root="$1" unsafe_entry mounted_path
-  [[ -d "$release_root" && ! -L "$release_root" ]] || return 1
-  mounted_path="$(awk -v root="$release_root" '$5 == root || index($5, root "/") == 1 { print $5; exit }' /proc/self/mountinfo)" || return 1
+  local release_root="$1" mountinfo_file="${2:-/proc/self/mountinfo}" unsafe_entry mounted_path
+  [[ -d "$release_root" && ! -L "$release_root" && -r "$mountinfo_file" ]] || return 1
+  mounted_path="$(awk -v root="$release_root" '$5 == root || index($5, root "/") == 1 { print $5; exit }' "$mountinfo_file")" || return 1
   [[ -z "$mounted_path" ]] || return 1
   unsafe_entry="$(find "$release_root" -xdev \\( -type l -o \\( -type f -links +1 \\) -o ! -user root -o ! -group root \\) -print -quit)" || return 1
   [[ -z "$unsafe_entry" ]]
