@@ -46,3 +46,5 @@ sudo journalctl -u ghulakh-server.service -f
 ## Ограничения
 
 Успешная установка не доказывает live VK Calls relay compatibility или сквозную работу VPN. Необходимы отдельные испытания на VPS и физическом Android-устройстве, включая проверку UDP reachability, egress, IPv6, DNS, reconnect, leak resistance и длительной стабильности.
+
+Тесты транзакции uninstall используют только временные каталоги, локальные файлы unit и подменённый systemctl; проверяются отказы остановки обеих служб, rollback после ошибки daemon-reload, recovery после частичной очистки и сохранность persistent data.

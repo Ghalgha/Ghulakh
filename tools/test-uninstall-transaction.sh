@@ -9,7 +9,7 @@ sed -n '/^verify_release_tree() {/,/^}/p' "$DEPLOY" >"$TMP/functions.sh"
 sed -n '/^uninstall() {/,/^}/p' "$DEPLOY" >>"$TMP/functions.sh"
 
 require_root() { :; }
-die() { printf 'ERROR: %s\\n' "$*" >&2; return 1; }
+die() { printf 'ERROR: %s\\n' "$*" >&2; exit 1; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
 verify_release_integrity() { [[ -d "$1" && ! -L "$1" ]]; }
 verify_managed_unit_runtime() { return 0; }
@@ -59,6 +59,7 @@ SH
   chown root:root "$MARKER"
   printf 'persistent data\\n' >"$CASE/persistent/credentials"
   EGRESS_REMOVAL_LOG="$CASE/egress-removal.log"
+  export EGRESS_REMOVAL_LOG
   SYSTEMCTL_LOG="$CASE/systemctl.log"
   : >"$SYSTEMCTL_LOG"
   FAIL_SERVER_STOP=0
@@ -98,7 +99,7 @@ rm() {
 # Server stop failure: no managed files or release data may be removed.
 new_case server-stop-failure
 FAIL_SERVER_STOP=1
-if uninstall </dev/null >/dev/null 2>&1; then
+if ( uninstall </dev/null >/dev/null 2>&1 ); then
   echo "Uninstall continued after server stop failure." >&2
   exit 1
 fi
@@ -120,14 +121,37 @@ grep -Fxq 'disable --now ghulakh-server.service' "$SYSTEMCTL_LOG"
 # daemon-reload failure restores both unit files and the active release link.
 new_case daemon-reload-failure
 FAIL_DAEMON_RELOAD_ONCE=1
-if uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1; then
+if ( uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1 ); then
   echo "Uninstall ignored daemon-reload failure." >&2
   exit 1
 fi
 [[ -f "$SERVER_UNIT" && -f "$EGRESS_UNIT" && -L "$CURRENT" && -f "$MARKER" && -d "$RELEASES" ]]
 [[ ! -e "$UNINSTALL_JOURNAL" ]]
 [[ "$(readlink -f "$CURRENT")" == "$RELEASES/$(printf 'a%.0s' {1..64})" ]]
-[[ "$RELOAD_COUNT" == 2 ]]
+[[ "$(grep -c '^daemon-reload
+
+# Release cleanup failure retains journal and data; retry completes safely.
+new_case release-cleanup-failure
+FAIL_RELEASE_REMOVE=1
+if uninstall <<<"REMOVE GHULAKH" >/dev/null 2>&1; then
+  echo "Uninstall ignored release cleanup failure." >&2
+  exit 1
+fi
+[[ -f "$UNINSTALL_JOURNAL" && -f "$MARKER" && -d "$RELEASES" ]]
+[[ ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -e "$CURRENT" ]]
+FAIL_RELEASE_REMOVE=0
+printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
+[[ ! -e "$BASE" ]]
+[[ -f "$CASE/persistent/credentials" ]]
+
+# Successful uninstall removes only runtime and preserves persistent data.
+new_case successful-uninstall
+printf 'REMOVE GHULAKH\\n' | uninstall >/dev/null
+[[ ! -e "$BASE" && ! -e "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" ]]
+[[ -f "$CASE/persistent/credentials" ]]
+grep -Fxq -- '--remove' "$EGRESS_REMOVAL_LOG"
+echo "Uninstall transaction behavioral tests passed."
+ "$SYSTEMCTL_LOG")" == 2 ]]
 
 # Release cleanup failure retains journal and data; retry completes safely.
 new_case release-cleanup-failure
