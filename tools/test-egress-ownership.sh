@@ -79,6 +79,7 @@ cat >"$TMP/nat66.json" <<'JSON'
 {"nftables":[{"table":{"family":"inet","name":"ghulakh_egress","comment":"ghulakh-egress-v1"}},{"table":{"family":"ip","name":"ghulakh_nat4","comment":"ghulakh-egress-v1"}},{"table":{"family":"ip6","name":"ghulakh_nat6","comment":"ghulakh-egress-v1"}}]}
 JSON
 NFT_FIXTURE="$TMP/nat66.json" bash "$SCRIPT" --check-active nat66
+NFT_FIXTURE="$TMP/valid.json" bash "$SCRIPT" --check-active routed
 if NFT_FIXTURE="$TMP/valid.json" bash "$SCRIPT" --check-active nat66; then
   echo "Missing NAT66 table was accepted for nat66 mode." >&2
   exit 1
