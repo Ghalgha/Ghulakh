@@ -6,7 +6,7 @@ ghulakh_server_main_pid() {
   printf '%s\n' "$pid"
 }
 ghulakh_server_process_is_current() {
-  local pid="$1" proc_root="\${GHULAKH_PROC_ROOT:-/proc}" expected actual cgroup
+  local pid="$1" proc_root="${GHULAKH_PROC_ROOT:-/proc}" expected actual cgroup
   [[ "$pid" =~ ^[0-9]+$ && "$pid" -gt 1 ]] || return 1
   [[ -r "$proc_root/$pid/cgroup" && -e "$proc_root/$pid/exe" ]] || return 1
   cgroup="$(cat "$proc_root/$pid/cgroup" 2>/dev/null)" || return 1
@@ -16,7 +16,7 @@ ghulakh_server_process_is_current() {
   [[ "$actual" == "$expected" || "$actual" == "$expected (deleted)" ]]
 }
 ghulakh_server_has_tun_fd() {
-  local pid="$1" proc_root="\${GHULAKH_PROC_ROOT:-/proc}" fd target
+  local pid="$1" proc_root="${GHULAKH_PROC_ROOT:-/proc}" fd target
   [[ -d "$proc_root/$pid/fd" ]] || return 1
   for fd in "$proc_root/$pid"/fd/*; do
     [[ -e "$fd" || -L "$fd" ]] || continue
@@ -42,8 +42,12 @@ ghulakh_preflight_udp_port() {
   done <<<"$pids"
 }
 ghulakh_preflight_tun_interface() {
-  local interface="$1" details main_pid
-  if ! details="$(ip -d link show dev "$interface" 2>/dev/null)"; then return 0; fi
+  local interface="$1" details main_pid sys_class="${GHULAKH_SYS_CLASS_NET:-/sys/class/net}"
+  if [[ ! -e "$sys_class/$interface" && ! -L "$sys_class/$interface" ]]; then return 0; fi
+  details="$(ip -d link show dev "$interface" 2>/dev/null)" || {
+    printf 'Cannot inspect existing interface %s; refusing to continue.\n' "$interface" >&2
+    return 1
+  }
   if ! grep -Eq '(^|[[:space:]])type[[:space:]]+tun([[:space:]]|$)' <<<"$details"; then
     printf 'Interface %s already exists but is not a TUN interface; refusing to adopt it.\n' "$interface" >&2
     return 1
