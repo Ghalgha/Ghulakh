@@ -80,6 +80,9 @@ prepare_fixture() {
   printf 'old server unit\n' >"$TRANSACTION_DIR/old-server"
   printf 'old egress unit\n' >"$TRANSACTION_DIR/old-egress"
   printf 'old marker\n' >"$TRANSACTION_DIR/old-marker"
+  cp "$TRANSACTION_DIR/old-server" "$BASE/expected-server"
+  cp "$TRANSACTION_DIR/old-egress" "$BASE/expected-egress"
+  cp "$TRANSACTION_DIR/old-marker" "$BASE/expected-marker"
   printf 'new server unit\n' >"$SERVER_UNIT"
   printf 'new egress unit\n' >"$EGRESS_UNIT"
   printf 'new marker\n' >"$MARKER"
@@ -97,9 +100,9 @@ ACTIVE_SERVER=failed ACTIVE_EGRESS=active
 ENABLED_SERVER=enabled ENABLED_EGRESS=enabled
 rollback_activation
 [[ "$(readlink "$CURRENT")" == "$old_target" ]]
-cmp -s "$TRANSACTION_DIR/old-server" "$SERVER_UNIT"
-cmp -s "$TRANSACTION_DIR/old-egress" "$EGRESS_UNIT"
-cmp -s "$TRANSACTION_DIR/old-marker" "$MARKER"
+cmp -s "$BASE/expected-server" "$SERVER_UNIT"
+cmp -s "$BASE/expected-egress" "$EGRESS_UNIT"
+cmp -s "$BASE/expected-marker" "$MARKER"
 [[ "$ACTIVE_EGRESS" == active && "$ENABLED_EGRESS" == enabled-runtime ]]
 [[ "$ACTIVE_SERVER" == inactive && "$ENABLED_SERVER" == disabled ]]
 [[ ! -e "$TRANSACTION_DIR" && -z "$unit_stage_dir" ]]
