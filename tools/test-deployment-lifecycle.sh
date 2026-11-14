@@ -20,7 +20,7 @@ systemctl() {
   case "$1 $2 $3" in
     "show --property=LoadState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\\n' "$SYSTEMD_LOAD" ;;
     "show --property=ActiveState --value") [[ "$SYSTEMD_QUERY_FAILED" == 0 ]] || return 1; printf '%s\\n' "$SYSTEMD_ACTIVE" ;;
-    "is-enabled ") printf '%s\\n' "$SYSTEMD_ENABLED" ;;
+    "is-enabled "*) printf '%s\\n' "$SYSTEMD_ENABLED" ;;
     *) return 2 ;;
   esac
 }
