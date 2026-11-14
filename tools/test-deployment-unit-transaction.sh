@@ -35,7 +35,7 @@ systemd-analyze() {
 }
 
 cp() {
-  if [[ "${FAIL_MARKER_BACKUP:-0}" == 1 && "${2:-}" == "$MARKER" && "${3:-}" == "$marker_backup" ]]; then
+  if [[ "${FAIL_MARKER_BACKUP:-0}" == 1 && "${3:-}" == "$MARKER" && "${4:-}" == "$marker_backup" ]]; then
     printf 'partial marker snapshot\n' >"$marker_backup"
     return 1
   fi
