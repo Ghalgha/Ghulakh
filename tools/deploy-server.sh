@@ -33,6 +33,14 @@ USAGE
 require_root() { [[ $EUID -eq 0 ]] || die "Run as root."; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
+verify_release_tree() {
+  local release_root="$1" unsafe_entry mounted_path
+  [[ -d "$release_root" && ! -L "$release_root" ]] || return 1
+  mounted_path="$(awk -v root="$release_root" '$5 == root || index($5, root "/") == 1 { print $5; exit }' /proc/self/mountinfo)" || return 1
+  [[ -z "$mounted_path" ]] || return 1
+  unsafe_entry="$(find "$release_root" -xdev \\( -type l -o \\( -type f -links +1 \\) -o ! -user root -o ! -group root \\) -print -quit)" || return 1
+  [[ -z "$unsafe_entry" ]]
+}
 PREFLIGHT_TOOL="$(cd "$(dirname "$0")" && pwd)/$PREFLIGHT_TOOL_NAME"
 safe_file "$PREFLIGHT_TOOL" || die "Deployment preflight helper is missing or is not a regular file."
 source "$PREFLIGHT_TOOL"
@@ -555,18 +563,30 @@ status() {
 uninstall() {
   require_root
   [[ -f "$MARKER" && ! -L "$MARKER" && -d "$BASE" && ! -L "$BASE" ]] || die "No verified managed installation found."
-  [[ $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership, mode or link count is invalid."
+  [[ $(stat -c '%U:%G:%a' "$BASE") == root:root:755 ]] || die "Managed release root ownership or mode is invalid."
   [[ $(stat -c '%U:%G:%a:%h' "$MARKER") == root:root:600:1 ]] || die "Managed marker ownership, mode or link count is invalid."
-  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership, mode or link count is invalid."
+  [[ -d "$RELEASES" && ! -L "$RELEASES" && $(stat -c '%U:%G:%a' "$RELEASES") == root:root:755 ]] || die "Managed releases directory ownership or mode is invalid."
+  if [[ ! -s "$MARKER" ]]; then
+    [[ ! -e "$CURRENT" && ! -L "$CURRENT" && ! -e "$SERVER_UNIT" && ! -L "$SERVER_UNIT" && ! -e "$EGRESS_UNIT" && ! -L "$EGRESS_UNIT" ]] ||
+      die "Empty ownership marker is not an unambiguous incomplete-install reservation."
+    verify_release_tree "$RELEASES" || die "Incomplete release tree contains unsafe entries or mount points; refusing cleanup."
+    printf 'This removes only the incomplete deployment staging reservation. Persistent configuration, keys, credentials and service account remain.\\n'
+    printf 'Type REMOVE GHULAKH: '
+    local partial_answer
+    IFS= read -r partial_answer
+    [[ "$partial_answer" == "REMOVE GHULAKH" ]] || die "Uninstall cancelled."
+    rm -rf --one-file-system "$RELEASES" || die "Could not remove incomplete releases; ownership marker retained for retry."
+    rm -f -- "$MARKER" || die "Could not remove incomplete ownership marker; inspect $BASE."
+    rmdir "$BASE" 2>/dev/null || true
+    printf 'Incomplete runtime staging removed; persistent configuration and service account remain.\\n'
+    return 0
+  fi
   [[ -L "$CURRENT" ]] || die "Active release link is missing or is not a symlink."
   local active_release
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases; refusing uninstall." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release is not a root-owned directory."
-  local unsafe_release_entry
-  unsafe_release_entry="$(find "$RELEASES" -xdev \( -type l -o \( -type f -links +1 \) -o ! -user root -o ! -group root \) -print -quit)" ||
-    die "Could not completely inspect the release tree; refusing uninstall."
-  [[ -z "$unsafe_release_entry" ]] || die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
+  verify_release_tree "$RELEASES" || die "Release tree contains unsafe entries, mount points or could not be completely inspected; refusing uninstall."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
@@ -612,7 +632,7 @@ uninstall() {
     printf 'Uninstall aborted; managed units and active release link were restored. Services remain stopped; inspect and restart them if required.\n' >&2
     return 1
   fi
-  if ! rm -rf -- "$RELEASES"; then
+  if ! rm -rf --one-file-system "$RELEASES"; then
     printf 'ERROR: systemd units were removed, but release cleanup failed. Remaining data is under %s; persistent configuration is untouched.\n' "$RELEASES" >&2
     return 1
   fi
