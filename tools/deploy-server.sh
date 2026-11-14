@@ -326,6 +326,8 @@ deploy() {
   require_root
   check_platform
   parse_args "$@"
+  [[ ! -e "$UNINSTALL_JOURNAL" && ! -L "$UNINSTALL_JOURNAL" ]] ||
+    die "An interrupted uninstall is pending; resume uninstall before installing or updating."
   assert_managed_layout
   # Refuse incomplete managed layouts before creating accounts, directories, releases or credentials.
   if [[ -e "$CURRENT" && ! -L "$CURRENT" ]]; then
