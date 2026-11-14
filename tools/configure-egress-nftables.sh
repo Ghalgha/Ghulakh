@@ -64,7 +64,7 @@ if [[ ${1:-} == "--remove" ]]; then
     done <<<"$inventory"
   fi
   if (( ${#remove_commands[@]} > 0 )); then
-    printf '%s\\n' "${remove_commands[@]}" | nft -f -
+    printf '%s\n' "${remove_commands[@]}" | nft -f -
   fi
   echo "Removed Ghulakh-owned egress/NAT tables."
   exit 0
