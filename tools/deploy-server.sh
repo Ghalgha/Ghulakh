@@ -454,7 +454,7 @@ deploy() {
       actual_active="$(systemctl show --property=ActiveState --value "$unit" 2>/dev/null || true)"
       actual_enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
       if [[ "$actual_active" != "$expected_active" || "$actual_enabled" != "$expected_enabled" ]]; then
-        printf 'Rollback verification failed for %s: ActiveState=%s (expected %s), UnitFileState=%s (expected %s)\\n' \\
+        printf 'Rollback verification failed for %s: ActiveState=%s (expected %s), UnitFileState=%s (expected %s)\n' \
           "$unit" "${actual_active:-unknown}" "$expected_active" "${actual_enabled:-unknown}" "$expected_enabled" >&2
         return 1
       fi
