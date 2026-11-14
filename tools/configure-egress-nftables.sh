@@ -20,29 +20,32 @@ fi
 command -v nft >/dev/null || { echo "Missing dependency: nft" >&2; exit 2; }
 command -v ip >/dev/null || { echo "Missing dependency: ip" >&2; exit 2; }
 
-table_is_present() {
-  nft list table "$1" "$2" >/dev/null 2>&1
+owned_tables() {
+  nft -j list tables | python3 -c '
+import json, sys
+expected = {("inet", "ghulakh_egress"), ("ip", "ghulakh_nat4"), ("ip6", "ghulakh_nat6")}
+try:
+    payload = json.load(sys.stdin)
+except (ValueError, TypeError):
+    raise SystemExit("Could not parse nftables table inventory")
+found = {}
+for item in payload.get("nftables", []):
+    if not isinstance(item, dict) or not isinstance(item.get("table"), dict):
+        continue
+    table = item["table"]
+    key = (table.get("family"), table.get("name"))
+    if key in expected:
+        found[key] = found.get(key, 0) + 1
+        if table.get("comment") != "ghulakh-egress-v1":
+            raise SystemExit("Ownership marker mismatch for nftables table %s %s" % key)
+for key, count in found.items():
+    if count != 1:
+        raise SystemExit("Duplicate nftables table entry: %s %s" % key)
+for family, name in sorted(found):
+    print(family, name)
+'
 }
 
-table_is_owned() {
-  nft -j list table "$1" "$2" 2>/dev/null | python3 -c '
-import json,sys
-family,name=sys.argv[1:3]
-try: data=json.load(sys.stdin)
-except (ValueError,TypeError): raise SystemExit(1)
-tables=[x["table"] for x in data.get("nftables",[]) if isinstance(x,dict) and isinstance(x.get("table"),dict) and x["table"].get("family")==family and x["table"].get("name")==name]
-raise SystemExit(0 if len(tables)==1 and tables[0].get("comment")=="ghulakh-egress-v1" else 1)
-' "$1" "$2"
-}
-check_owned_tables() {
-  for table in "inet ghulakh_egress" "ip ghulakh_nat4" "ip6 ghulakh_nat6"; do
-    read -r family name <<<"$table"
-    if table_is_present "$family" "$name" && ! table_is_owned "$family" "$name"; then
-      echo "Refusing operation: ownership marker is not on nftables table $family $name" >&2
-      return 1
-    fi
-  done
-}
 
 if [[ ${1:-} == "--check-owned" ]]; then
   [[ $# -eq 1 ]] || usage
