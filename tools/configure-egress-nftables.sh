@@ -19,6 +19,7 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 command -v nft >/dev/null || { echo "Missing dependency: nft" >&2; exit 2; }
 command -v ip >/dev/null || { echo "Missing dependency: ip" >&2; exit 2; }
+command -v python3 >/dev/null || { echo "Missing dependency: python3" >&2; exit 2; }
 
 owned_tables() {
   nft -j list tables | python3 -c '
@@ -82,15 +83,12 @@ IPV6_MODE=${3:-nat66}
 # nftables matches the interface name and activates the rules when it appears.
 ip link show "$WAN_IF" >/dev/null 2>&1 || { echo "WAN interface not found: $WAN_IF" >&2; exit 2; }
 
-for table in "inet ghulakh_egress" "ip ghulakh_nat4"; do
-  read -r family name <<<"$table"
-  if table_is_present "$family" "$name"; then
-    echo "Refusing to overwrite existing table: $family $name (use --remove first)." >&2
-    exit 2
-  fi
-done
-if table_is_present ip6 ghulakh_nat6; then
-  echo "Refusing to overwrite existing table: ip6 ghulakh_nat6 (use --remove first)." >&2
+existing_tables="$(owned_tables)" || {
+  echo "Could not verify existing nftables tables; refusing to install." >&2
+  exit 2
+}
+if [[ -n "$existing_tables" ]]; then
+  echo "Refusing to overwrite existing Ghulakh-named nftables tables: $existing_tables" >&2
   exit 2
 fi
 
