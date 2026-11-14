@@ -13,7 +13,11 @@ export GHULAKH_PROC_ROOT="$TMP/proc" GHULAKH_SYS_CLASS_NET="$TMP/sys/class/net" 
 source "$ROOT/tools/deployment-preflight.sh"
 cat > "$TMP/bin/systemctl" <<'SH'
 #!/usr/bin/env bash
-case "$*" in *MainPID*) printf '%s\n' "${TEST_MAIN_PID:-0}" ;; *) exit 1 ;; esac
+case "$*" in
+  *MainPID*) printf '%s\n' "${TEST_MAIN_PID:-0}" ;;
+  *LoadState*) printf '%s\n' "${TEST_LOAD_STATE:-not-found}" ;;
+  *) exit 1 ;;
+esac
 SH
 cat > "$TMP/bin/ss" <<'SH'
 #!/usr/bin/env bash
@@ -51,4 +55,33 @@ printf '7: ghulakh0: <UP> mtu 1500 type dummy\n'
 SH
 chmod +x "$TMP/bin/ip"
 if ghulakh_preflight_tun_interface ghulakh0 2>/dev/null; then echo "non-TUN interface was accepted" >&2; exit 1; fi
+
+# Managed-layout preflight refuses foreign files and externally loaded units.
+sed -n '/^assert_managed_layout() {/,/^}/p' "$ROOT/tools/deploy-server.sh" >"$TMP/assert-managed-layout.sh"
+source "$TMP/assert-managed-layout.sh"
+BASE="$TMP/managed-root"
+MARKER="$BASE/.managed-by-ghulakh"
+SERVER_UNIT="$TMP/systemd/ghulakh-server.service"
+EGRESS_UNIT="$TMP/systemd/ghulakh-egress.service"
+mkdir -p "$TMP/systemd"
+TEST_LOAD_STATE=not-found
+assert_managed_layout
+
+printf 'administrator-owned unit\n' >"$SERVER_UNIT"
+if assert_managed_layout 2>/dev/null; then
+  echo "Managed-layout preflight accepted a foreign server unit file." >&2
+  exit 1
+fi
+rm -f "$SERVER_UNIT"
+ln -s "$TMP/foreign-unit" "$SERVER_UNIT"
+if assert_managed_layout 2>/dev/null; then
+  echo "Managed-layout preflight accepted a symlink at the server unit path." >&2
+  exit 1
+fi
+rm -f "$SERVER_UNIT"
+TEST_LOAD_STATE=loaded
+if assert_managed_layout 2>/dev/null; then
+  echo "Managed-layout preflight accepted a systemd unit loaded outside the managed path." >&2
+  exit 1
+fi
 echo "Deployment preflight behavioral tests passed."
