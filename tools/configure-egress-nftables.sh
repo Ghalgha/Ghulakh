@@ -6,6 +6,8 @@ usage() {
 Usage:
   configure-egress-nftables.sh <tun-interface> <wan-interface> [nat66|routed]
   configure-egress-nftables.sh --remove
+  configure-egress-nftables.sh --check-owned
+  configure-egress-nftables.sh --check-active nat66|routed
 
 Installs only Ghulakh-owned nftables tables. It does not change global
 FORWARD policy, sysctls, routes, INPUT rules, or unrelated firewall tables.
@@ -53,6 +55,21 @@ for family, name in sorted(found):
 if [[ ${1:-} == "--check-owned" ]]; then
   [[ $# -eq 1 ]] || usage
   owned_tables >/dev/null || exit 2
+  exit 0
+fi
+if [[ ${1:-} == "--check-active" ]]; then
+  [[ $# -eq 2 && ( "$2" == nat66 || "$2" == routed ) ]] || usage
+  inventory="$(owned_tables)" || exit 2
+  grep -Fqx 'inet ghulakh_egress' <<<"$inventory" || { echo "Missing managed inet egress table." >&2; exit 2; }
+  grep -Fqx 'ip ghulakh_nat4' <<<"$inventory" || { echo "Missing managed IPv4 NAT table." >&2; exit 2; }
+  if [[ "$2" == nat66 ]]; then
+    grep -Fqx 'ip6 ghulakh_nat6' <<<"$inventory" || { echo "Missing managed IPv6 NAT66 table." >&2; exit 2; }
+  else
+    if grep -Fqx 'ip6 ghulakh_nat6' <<<"$inventory"; then
+      echo "Unexpected NAT66 table for routed IPv6 mode." >&2
+      exit 2
+    fi
+  fi
   exit 0
 fi
 if [[ ${1:-} == "--remove" ]]; then
