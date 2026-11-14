@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+EGRESS_SCRIPT_NAME="configure-egress-nftables.sh"
+CREDENTIAL_TOOL_NAME="create_credential.py"
 DEPLOY="$ROOT/tools/deploy-server.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
