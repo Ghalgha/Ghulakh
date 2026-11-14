@@ -41,6 +41,24 @@ verify_release_tree() {
   unsafe_entry="$(find "$release_root" -xdev \\( -type l -o \\( -type f -links +1 \\) -o ! -user root -o ! -group root \\) -print -quit)" || return 1
   [[ -z "$unsafe_entry" ]]
 }
+verify_release_integrity() {
+  local release_root="$1" release_dir release_name expected_id extra_entry
+  verify_release_tree "$release_root" "${2:-/proc/self/mountinfo}" || return 1
+  shopt -s nullglob dotglob
+  for release_dir in "$release_root"/*; do
+    [[ -d "$release_dir" && ! -L "$release_dir" ]] || return 1
+    release_name="${release_dir##*/}"
+    [[ "$release_name" =~ ^[0-9a-f]{64}$ ]] || return 1
+    [[ $(stat -c '%U:%G:%a' "$release_dir") == root:root:755 ]] || return 1
+    [[ $(stat -c '%U:%G:%a:%h' "$release_dir/ghulakh-server") == root:root:755:1 ]] || return 1
+    [[ $(stat -c '%U:%G:%a:%h' "$release_dir/$EGRESS_SCRIPT_NAME") == root:root:755:1 ]] || return 1
+    [[ $(stat -c '%U:%G:%a:%h' "$release_dir/$CREDENTIAL_TOOL_NAME") == root:root:644:1 ]] || return 1
+    extra_entry="$(find "$release_dir" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" || return 1
+    [[ -z "$extra_entry" ]] || return 1
+    expected_id="$(sha256sum "$release_dir/ghulakh-server" "$release_dir/$EGRESS_SCRIPT_NAME" "$release_dir/$CREDENTIAL_TOOL_NAME" | cut -c1-64 | sha256sum | cut -c1-64)" || return 1
+    [[ "$expected_id" == "$release_name" ]] || return 1
+  done
+}
 PREFLIGHT_TOOL="$(cd "$(dirname "$0")" && pwd)/$PREFLIGHT_TOOL_NAME"
 safe_file "$PREFLIGHT_TOOL" || die "Deployment preflight helper is missing or is not a regular file."
 source "$PREFLIGHT_TOOL"
@@ -554,6 +572,7 @@ status() {
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release directory is not a root-owned directory."
+  verify_release_integrity "$RELEASES" || die "Managed release integrity verification failed."
   safe_file "$active_release/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
   "$active_release/$EGRESS_SCRIPT_NAME" --check-owned || die "An egress table is not verifiably owned."
   systemctl --no-pager --full status ghulakh-server.service || failed=1
@@ -586,7 +605,7 @@ uninstall() {
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases; refusing uninstall." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release is not a root-owned directory."
-  verify_release_tree "$RELEASES" || die "Release tree contains unsafe entries, mount points or could not be completely inspected; refusing uninstall."
+  verify_release_integrity "$RELEASES" || die "Release tree integrity verification failed; refusing uninstall."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
