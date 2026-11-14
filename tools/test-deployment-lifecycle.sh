@@ -88,4 +88,5 @@ if grep -Eq 'rm[[:space:]]+-rf[[:space:]]+/(etc|usr|var)([[:space:]]|$)' "$DEPLO
   exit 1
 fi
 bash "$ROOT/tools/test-deployment-preflight.sh"
+sudo bash "$ROOT/tools/test-egress-ownership.sh"
 echo "Deployment lifecycle static checks passed."
