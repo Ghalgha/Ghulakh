@@ -12,7 +12,7 @@ readonly EGRESS_UNIT="/etc/systemd/system/ghulakh-egress.service"
 readonly EGRESS_SCRIPT_NAME="configure-egress-nftables.sh"
 readonly CREDENTIAL_TOOL_NAME="create_credential.py"
 readonly TUN_INTERFACE="ghulakh0"
-source "$(cd "$(dirname "$0")" && pwd)/deployment-preflight.sh"
+readonly PREFLIGHT_TOOL_NAME="deployment-preflight.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
@@ -33,6 +33,9 @@ USAGE
 require_root() { [[ $EUID -eq 0 ]] || die "Run as root."; }
 require_command() { command -v "$1" >/dev/null 2>&1 || die "Missing command: $1"; }
 safe_file() { [[ -f "$1" && ! -L "$1" ]]; }
+PREFLIGHT_TOOL="$(cd "$(dirname "$0")" && pwd)/$PREFLIGHT_TOOL_NAME"
+safe_file "$PREFLIGHT_TOOL" || die "Deployment preflight helper is missing or is not a regular file."
+source "$PREFLIGHT_TOOL"
 
 check_platform() {
   [[ -d /run/systemd/system ]] || die "A running systemd system is required."
