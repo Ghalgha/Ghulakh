@@ -449,7 +449,7 @@ deploy() {
       not-found) return 0 ;;
       loaded) systemctl disable --now "$unit" ;;
       *)
-        printf 'Cannot safely stop newly installed %s during rollback (LoadState=%s).\\n' "$unit" "${load_state:-unknown}" >&2
+        printf 'Cannot safely stop newly installed %s during rollback (LoadState=%s).\n' "$unit" "${load_state:-unknown}" >&2
         return 1
         ;;
     esac
@@ -460,7 +460,7 @@ deploy() {
     local actual_load actual_active actual_enabled
     actual_load="$(systemctl show --property=LoadState --value "$unit" 2>/dev/null || true)"
     if [[ "$actual_load" != "$expected_load" ]]; then
-      printf 'Rollback verification failed for %s: LoadState=%s, expected %s\\n' "$unit" "${actual_load:-unknown}" "$expected_load" >&2
+      printf 'Rollback verification failed for %s: LoadState=%s, expected %s\n' "$unit" "${actual_load:-unknown}" "$expected_load" >&2
       return 1
     fi
     if [[ "$expected_load" == loaded ]]; then
