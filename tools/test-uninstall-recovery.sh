@@ -47,4 +47,15 @@ if ( uninstall </dev/null ); then
   exit 1
 fi
 [[ -d "$RELEASES/partial" && -f "$RELEASES/partial/remnant" ]]
+
+# A failed daemon-reload must retain both the journal and remaining files.
+printf 'runtime-removed\n' >"$UNINSTALL_JOURNAL"
+chmod 0600 "$UNINSTALL_JOURNAL"
+chown root:root "$UNINSTALL_JOURNAL"
+systemctl() { return 1; }
+if ( printf 'REMOVE GHULAKH\n' | uninstall ); then
+  echo "Recovery continued after systemd daemon-reload failure." >&2
+  exit 1
+fi
+[[ -f "$UNINSTALL_JOURNAL" && -f "$RELEASES/partial/remnant" ]]
 echo "Uninstall recovery behavioral tests passed."
