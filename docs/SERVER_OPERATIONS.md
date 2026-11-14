@@ -4,7 +4,7 @@
 
 Сервер устанавливается и обновляется через tools/deploy-server.sh. Полная процедура, требования, поведение rollback и границы очистки описаны в [DEPLOYMENT.md](DEPLOYMENT.md).
 
-Команда status проверяет владельца и режим managed directories и marker, владельца, режим 0644, link count и checksum обоих systemd units, расположение active release и table-level ownership nftables. Дополнительно она проверяет через systemd, что обе службы загружены именно из проверенных файлов /etc/systemd/system, находятся в active-состоянии и persistently enabled; ошибки чтения systemd не маскируются. Для диагностики используйте systemctl и journalctl отдельно.
+Команда status проверяет владельца и режим managed directories и marker, владельца, режим 0644, link count и checksum обоих systemd units, расположение active release и table-level ownership nftables. Дополнительно она проверяет через systemd, что обе службы загружены именно из проверенных файлов /etc/systemd/system, находятся в active-состоянии и persistently enabled. MainPID сервера сверяется с cgroup и бинарным файлом активного release, также проверяется открытый TUN-дескриптор; ошибки чтения systemd не маскируются. Для диагностики используйте systemctl и journalctl отдельно.
 
 Основные команды:
 

@@ -70,3 +70,5 @@ Mock UDP/integration tests покрывают TURN control/data composition, Noi
 
 
 Актуализация deployment lifecycle в PR #15: команда status дополнительно сверяет systemd LoadState, FragmentPath, ActiveState и UnitFileState с проверенными unit-файлами; uninstall отказывается продолжать, если systemd не подтверждает загрузку каждой службы из соответствующего управляемого файла. Эти проверки покрываются контролируемыми тестами systemd-заглушки. Полный install/update/uninstall сценарный набор и испытания на отдельном VPS ещё не завершены.
+
+Проверка runtime в status расширена: MainPID должен принадлежать cgroup управляемой службы, executable обязан соответствовать текущему release, процесс должен удерживать открытый /dev/net/tun. Поведенческие тесты используют изолированный proc-макет и проверяют отказ для чужого cgroup, другого executable и отсутствующего TUN-дескриптора.

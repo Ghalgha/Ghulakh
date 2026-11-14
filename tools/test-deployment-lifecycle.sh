@@ -18,6 +18,9 @@ trap 'rm -f -- "$ROLLBACK_HELPER"' EXIT
 sed -n '/^  stop_uncommitted_unit() {/,/^  }/p' "$DEPLOY" >"$ROLLBACK_HELPER"
 sed -n '/^  verify_rollback_unit_state() {/,/^  }/p' "$DEPLOY" >>"$ROLLBACK_HELPER"
 sed -n '/^verify_managed_unit_runtime() {/,/^}/p' "$DEPLOY" >>"$ROLLBACK_HELPER"
+sed -n '/^ghulakh_server_main_pid() {/,/^}/p' "$ROOT/tools/deployment-preflight.sh" >>"$ROLLBACK_HELPER"
+sed -n '/^ghulakh_server_process_is_current() {/,/^}/p' "$ROOT/tools/deployment-preflight.sh" >>"$ROLLBACK_HELPER"
+sed -n '/^ghulakh_server_has_tun_fd() {/,/^}/p' "$ROOT/tools/deployment-preflight.sh" >>"$ROLLBACK_HELPER"
 source "$ROLLBACK_HELPER"
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0 SYSTEMD_STOP_STATUS=0 SYSTEMD_STOP_CALLS=0
 systemctl() {
@@ -26,6 +29,7 @@ systemctl() {
       [[ "${SYSTEMD_QUERY_FAILED:-0}" == 0 ]] || return 1
       case "${2:-}" in
         --property=LoadState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_LOAD" ;;
+        --property=MainPID) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_MAIN_PID" ;;
         --property=ActiveState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_ACTIVE" ;;
         --property=FragmentPath) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_FRAGMENT_PATH" ;;
         --property=UnitFileState) [[ "${3:-}" == --value ]] || return 2; printf '%s\n' "$SYSTEMD_UNIT_FILE_STATE" ;;
@@ -165,6 +169,39 @@ grep -Fq 'verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" true
 grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" true' "$DEPLOY"
 grep -Fq 'verify_managed_unit_runtime ghulakh-server.service "$SERVER_UNIT" false' "$DEPLOY"
 grep -Fq 'verify_managed_unit_runtime ghulakh-egress.service "$EGRESS_UNIT" false' "$DEPLOY"
+
+# Status process identity must match the active release and retain the TUN fd.
+PROC_FIXTURE="$(mktemp -d)"
+trap 'rm -f -- "$ROLLBACK_HELPER"; rm -rf -- "$PROC_FIXTURE"' EXIT
+CURRENT="$PROC_FIXTURE/current"
+GHULAKH_PROC_ROOT="$PROC_FIXTURE/proc"
+mkdir -p "$PROC_FIXTURE/release" "$GHULAKH_PROC_ROOT/4242/fd"
+printf 'server binary\n' >"$PROC_FIXTURE/release/ghulakh-server"
+ln -s "$PROC_FIXTURE/release" "$CURRENT"
+ln -s "$PROC_FIXTURE/release/ghulakh-server" "$GHULAKH_PROC_ROOT/4242/exe"
+printf '0::/system.slice/ghulakh-server.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
+ln -s /dev/net/tun "$GHULAKH_PROC_ROOT/4242/fd/3"
+SYSTEMD_MAIN_PID=4242
+[[ "$(ghulakh_server_main_pid)" == 4242 ]]
+ghulakh_server_process_is_current 4242
+ghulakh_server_has_tun_fd 4242
+printf '0::/system.slice/foreign.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
+if ghulakh_server_process_is_current 4242; then
+  echo "Status accepted a PID outside the managed service cgroup." >&2
+  exit 1
+fi
+printf '0::/system.slice/ghulakh-server.service\n' >"$GHULAKH_PROC_ROOT/4242/cgroup"
+ln -sfn /bin/false "$GHULAKH_PROC_ROOT/4242/exe"
+if ghulakh_server_process_is_current 4242; then
+  echo "Status accepted a process from a different executable." >&2
+  exit 1
+fi
+ln -sfn "$PROC_FIXTURE/release/ghulakh-server" "$GHULAKH_PROC_ROOT/4242/exe"
+rm "$GHULAKH_PROC_ROOT/4242/fd/3"
+if ghulakh_server_has_tun_fd 4242; then
+  echo "Status accepted a server process without an open TUN descriptor." >&2
+  exit 1
+fi
 SYSTEMD_LOAD=loaded SYSTEMD_ACTIVE=active SYSTEMD_ENABLED=enabled SYSTEMD_QUERY_FAILED=0
 SYSTEMD_FRAGMENT_PATH=/etc/systemd/system/ghulakh-server.service
 SYSTEMD_UNIT_FILE_STATE=enabled

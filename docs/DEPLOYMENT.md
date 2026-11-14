@@ -84,7 +84,7 @@ sudo bash tools/deploy-server.sh update \
 
 ## Проверка состояния
 
-Команда status проверяет владельца и права каталогов и ownership marker, владельца, режим 0644 и отсутствие hard links у обоих systemd units, их checksum, структурную принадлежность nftables tables и расположение active release. Для каждой службы она также запрашивает у systemd LoadState, FragmentPath, ActiveState и UnitFileState: FragmentPath обязан указывать ровно на проверенный файл в /etc/systemd/system, служба должна быть active и persistently enabled. Ошибка любого запроса или несовпадение приводит к ненулевому коду.
+Команда status проверяет владельца и права каталогов и ownership marker, владельца, режим 0644 и отсутствие hard links у обоих systemd units, их checksum, структурную принадлежность nftables tables и расположение active release. Для каждой службы она также запрашивает у systemd LoadState, FragmentPath, ActiveState и UnitFileState: FragmentPath обязан указывать ровно на проверенный файл в /etc/systemd/system, служба должна быть active и persistently enabled. MainPID сервера должен принадлежать cgroup ghulakh-server.service, его executable должен соответствовать текущему release, а процесс должен удерживать открытый /dev/net/tun. Ошибка любого запроса или несовпадение приводит к ненулевому коду.
 
 ~~~
 sudo bash tools/deploy-server.sh status

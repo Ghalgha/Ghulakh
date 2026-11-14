@@ -696,6 +696,12 @@ status() {
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release directory is not a root-owned directory."
   verify_release_integrity "$RELEASES" || die "Managed release integrity verification failed."
+  local server_pid
+  server_pid="$(ghulakh_server_main_pid)" || die "Could not identify the active managed server MainPID."
+  ghulakh_server_process_is_current "$server_pid" ||
+    die "The active server process does not belong to the current verified release."
+  ghulakh_server_has_tun_fd "$server_pid" ||
+    die "The active server process does not hold an open /dev/net/tun descriptor."
   safe_file "$active_release/$EGRESS_SCRIPT_NAME" || die "Managed egress helper is missing or unsafe."
   local ipv6_mode
   ipv6_mode="$(awk '/^ExecStart=\\/bin\\/bash .* ghulakh0 / { print $NF }' "$EGRESS_UNIT")"
