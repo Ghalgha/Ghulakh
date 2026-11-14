@@ -559,7 +559,7 @@ uninstall() {
   active_release="$(readlink -f "$CURRENT")"
   case "$active_release" in "$RELEASES"/*) ;; *) die "Active release points outside managed releases; refusing uninstall." ;; esac
   [[ -d "$active_release" && ! -L "$active_release" && $(stat -c '%U:%G' "$active_release") == root:root ]] || die "Active release is not a root-owned directory."
-  find "$RELEASES" -xdev \\( -type l -o ! -user root -o ! -group root \\) -print -quit | grep -q . && die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
+  find "$RELEASES" -xdev \( -type l -o ! -user root -o ! -group root \) -print -quit | grep -q . && die "Release tree contains a symlink or non-root-owned object; refusing uninstall."
   if [[ -s "$MARKER" ]]; then
     sha256sum -c "$MARKER" >/dev/null || die "Managed unit checksum verification failed; refusing uninstall."
     for unit in "$SERVER_UNIT" "$EGRESS_UNIT"; do
