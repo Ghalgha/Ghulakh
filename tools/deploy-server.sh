@@ -38,7 +38,7 @@ verify_release_tree() {
   [[ -d "$release_root" && ! -L "$release_root" && -r "$mountinfo_file" ]] || return 1
   mounted_path="$(awk -v root="$release_root" '$5 == root || index($5, root "/") == 1 { print $5; exit }' "$mountinfo_file")" || return 1
   [[ -z "$mounted_path" ]] || return 1
-  unsafe_entry="$(find "$release_root" -xdev \\( -type l -o \\( -type f -links +1 \\) -o ! -user root -o ! -group root \\) -print -quit)" || return 1
+  unsafe_entry="$(find "$release_root" -xdev \( -type l -o \( -type f -links +1 \) -o ! -user root -o ! -group root \) -print -quit)" || return 1
   [[ -z "$unsafe_entry" ]]
 }
 verify_release_integrity() (
