@@ -7,7 +7,7 @@ DEPLOY="$ROOT/tools/deploy-server.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf -- "$TMP"' EXIT
 sed -n '/^verify_release_tree() {/,/^}/p' "$DEPLOY" >"$TMP/ownership-functions.sh"
-sed -n '/^verify_release_integrity() {/,/^}/p' "$DEPLOY" >>"$TMP/ownership-functions.sh"
+sed -n '/^verify_release_integrity() ($/,/^)/p' "$DEPLOY" >>"$TMP/ownership-functions.sh"
 source "$TMP/ownership-functions.sh"
 
 RELEASES="$TMP/releases"
